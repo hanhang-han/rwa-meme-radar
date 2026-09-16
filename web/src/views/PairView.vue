@@ -32,6 +32,23 @@
             <div class="kpi"><span class="kpi-label">{{ tr('代币价格', 'Token price') }}</span><strong class="kpi-value mono">{{ usd(stockAsset.price) }}</strong><span class="kpi-note">{{ age(stockAsset.updatedAt) }}</span></div>
             <div class="kpi"><span class="kpi-label">{{ tr('已核验配对', 'Verified pairs') }}</span><strong class="kpi-value mono">{{ num(verifiedRelations.length) }}</strong><span class="kpi-note">{{ tr('含流动性证据', 'with liquidity evidence') }}</span></div>
           </div>
+          <section v-if="selected" class="panel">
+            <div class="panel-head">
+              <h2>{{ tr('核心事实', 'Key facts') }}</h2>
+            </div>
+            <div class="x-coverage">
+              <span>{{ tr('池流动性', 'Pool liquidity') }} {{ usd(selected.liquidityUsd) }}</span>
+              <span>{{ selected.protocol }}</span>
+              <span v-if="selected.feePct != null">{{ selected.feePct }}%</span>
+            </div>
+          </section>
+          <section v-if="stockDetail" class="panel">
+            <div class="panel-head">
+              <h2>{{ tr('股票价与代币价', 'Stock price vs token price') }}</h2>
+            </div>
+            <p>{{ tr('代币价格', 'Token price') }}: {{ usd(stockAsset.price) }} · {{ age(stockAsset.updatedAt) }}</p>
+            <p>{{ tr('参考股价', 'Stock reference') }}: {{ usd(stockDetail.stock?.stockPrice) ?? tr('上游未提供', 'Not provided') }}</p>
+          </section>
           <article v-for="r in verifiedRelations" :key="r.id" class="x-proof">
             <div class="panel-head">
               <h3>{{ r.ticker }} · {{ r.wrapper ? tr('包装股票配对', 'Wrapped stock pair') : tr('直接股票配对', 'Direct pair') }}</h3>
@@ -88,12 +105,23 @@ const verifiedRelations = computed(() =>
 const selected = computed(() => verifiedRelations.value.find((r) => r.pool === route.query.pool) ?? verifiedRelations.value[0]);
 const stockAsset = computed(() => stockDetail.value?.asset ?? {});
 
+const memeDetail = ref(null);
 async function load() {
   if (!props.stock) return;
   try {
     stockDetail.value = await detail.fetch(props.chain, props.stock.toLowerCase());
   } catch {
     stockDetail.value = null;
+  }
+  const sel = selected.value;
+  if (sel) {
+    try {
+      memeDetail.value = await detail.fetch(String(sel.chainId ?? '196'), sel.token);
+    } catch {
+      memeDetail.value = null;
+    }
+  } else {
+    memeDetail.value = null;
   }
 }
 
@@ -105,5 +133,5 @@ function goSearch() {
 }
 
 onMounted(load);
-watch(() => props.stock, load);
+watch(() => [props.stock, route.query.pool], load);
 </script>

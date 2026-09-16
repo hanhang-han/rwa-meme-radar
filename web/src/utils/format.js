@@ -1,6 +1,6 @@
 // Shared formatters, ported from radar-v2.js so view markup stays identical
 // in output. All take null-safe inputs and honor the current language via tr.
-import { tr } from '../i18n';
+import { tr, useI18n } from '../i18n';
 
 export const usd = (v) => {
   if (v == null || !Number.isFinite(Number(v))) return tr('待采集', 'Pending');
@@ -19,7 +19,8 @@ export const pct = (v) => {
 
 export const date = (v) => {
   if (!v) return tr('尚未采集', 'Not collected');
-  const locale = typeof window !== 'undefined' && window.__LANG === 'en' ? 'en-US' : 'zh-CN';
+  const { lang } = useI18n();
+  const locale = lang.lang === 'en' ? 'en-US' : 'zh-CN';
   return new Date(v).toLocaleString(locale, { hour12: false });
 };
 

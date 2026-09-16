@@ -11,8 +11,9 @@
         <code>{{ asset.token }}</code>
         <button :data-copy="asset.token" @click="copyAddress">{{ tr('复制合约地址', 'Copy contract') }}</button>
         <a :href="explorer(asset.token, 'address', chain(asset))" target="_blank" rel="noopener">{{ tr('区块浏览器', 'Block explorer') }} ↗</a>
+        <a :href="okxUrl" target="_blank" rel="noopener">{{ tr('在 OKX 查看资产', 'View asset on OKX') }} ↗</a>
       </div>
-      <p>{{ tr('来源', 'Source') }} {{ asset.provider ?? 'OKX' }} · {{ age(asset.updatedAt) }}</p>
+      <p>{{ tr('来源', 'Source') }} {{ asset.provider ?? 'OKX' }} · {{ age(asset.updatedAt) }}{{ asset.error ? ' · ' + tr('部分采集失败，历史保留', 'Partial collection failure; history retained') : '' }}</p>
     </section>
 
     <section class="panel x-verdict">
@@ -48,15 +49,26 @@
       </div>
       <div class="kpi"><span class="kpi-label">{{ tr('24h 成交额', '24h volume') }}</span><strong class="kpi-value mono">{{ usd(asset.volume24h) }}</strong><span class="kpi-note">DEX</span></div>
       <div class="kpi"><span class="kpi-label">{{ tr('24h 交易', '24h trades') }}</span><strong class="kpi-value mono">{{ num(asset.txs24h) }}</strong><span class="kpi-note">{{ num(asset.buys24h) }} / {{ num(asset.sells24h) }}</span></div>
-      <div class="kpi"><span class="kpi-label">{{ tr('流动性', 'Liquidity') }}</span><strong class="kpi-value mono">{{ usd(asset.liquidity) }}</strong><span class="kpi-note">{{ num(asset.holders) }} {{ tr('持有人', 'holders') }}</span></div>
+      <div class="kpi"><span class="kpi-label">{{ tr('持币地址数', 'Holder addresses') }}</span><strong class="kpi-value mono">{{ num(asset.holders) }}</strong><span class="kpi-note">{{ age(asset.fieldTimes?.holders) }}</span></div>
     </div>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>{{ tr('价格走势', 'Price history') }}</h2>
-      </div>
-      <CandleChart :asset="asset" :samples="data.samples ?? []" />
-    </section>
+    <div class="x-grid">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>{{ tr('价格走势', 'Price history') }}</h2>
+        </div>
+        <CandleChart :asset="asset" :samples="data.samples ?? []" />
+      </section>
+      <section class="panel">
+        <h2>{{ tr('前10大地址持仓占比', 'Top-10 address share') }}</h2>
+        <template v-if="asset.risk?.top10 != null">
+          <strong class="kpi-value">{{ num(asset.risk.top10) }}%</strong>
+          <progress max="100" :value="Math.max(0, Math.min(100, asset.risk.top10))"></progress>
+          <p>{{ date(asset.risk.checkedAt) }} · OKX</p>
+        </template>
+        <div v-else class="x-empty">{{ tr('上游尚未提供集中度数据。', 'Holder concentration is not available from the source yet.') }}</div>
+      </section>
+    </div>
 
     <section class="panel">
       <div class="panel-head">
@@ -66,13 +78,12 @@
       <p class="hint">{{ statText }}</p>
       <div v-if="trades.length" class="scroll">
         <table class="tbl">
-          <thead><tr><th>{{ tr('时间', 'Time') }}</th><th>{{ tr('方向', 'Side') }}</th><th>{{ tr('美元成交额', 'USD volume') }}</th><th>{{ tr('成交价', 'Trade price') }}</th><th>DEX</th><th>{{ tr('交易', 'Transaction') }}</th></tr></thead>
+          <thead><tr><th>{{ tr('时间', 'Time') }}</th><th>{{ tr('方向', 'Side') }}</th><th>{{ tr('美元成交额', 'USD volume') }}</th><th>DEX</th><th>{{ tr('交易', 'Transaction') }}</th></tr></thead>
           <tbody id="v2TradeBody">
             <tr v-for="t in trades" :key="t.id" :class="{ 'trade-new': newIds.has(t.id) }">
               <td>{{ date(t.t) }}</td>
               <td :class="t.type === 'buy' ? 'up' : 'down'">{{ t.type === 'buy' ? tr('买入', 'Buy') : tr('卖出', 'Sell') }}</td>
               <td>{{ usd(t.volume) }}</td>
-              <td>{{ usd(t.price) }}</td>
               <td>{{ t.dex }}</td>
               <td><a v-if="t.hash" :href="explorer(t.hash, 'tx', chain(asset))" target="_blank" rel="noopener">{{ short(t.hash) }} ↗</a><template v-else>{{ tr('未提供哈希', 'Hash unavailable') }}</template></td>
             </tr>
@@ -96,7 +107,7 @@
       </section>
       <section class="panel">
         <h2>{{ tr('关系时间线', 'Relationship timeline') }}</h2>
-        <p v-for="ev in events" :key="ev.id">{{ date(ev.t) }} · {{ ev.label }}</p>
+        <EventRow v-for="ev in events" :key="ev.id" :ev="ev" />
         <p v-if="!events.length">{{ tr('等待首条关系核验事件。', 'Waiting for the first relationship-verification event.') }}</p>
       </section>
     </div>
@@ -110,6 +121,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router';
 import CandleChart from '../components/CandleChart.vue';
 import RegistryBadge from '../components/RegistryBadge.vue';
+import EventRow from '../components/EventRow.vue';
 import { useDetailStore } from '../stores/detail';
 import { getInsight } from '../api/client';
 import { tr } from '../i18n';
@@ -150,6 +162,11 @@ const statText = computed(() =>
 );
 
 let lastPriceText = '';
+const okxUrl = computed(() => {
+  const cid = chain(asset.value);
+  const host = { 196: 'xlayer', 56: 'bsc', 4663: 'robinhood' }[cid] ?? 'xlayer';
+  return `https://www.okx.com/web3/detail?chain=${host}&address=${encodeURIComponent(asset.value.token ?? '')}`;
+});
 async function load() {
   try {
     const d = await detail.fetch(props.chain, props.address.toLowerCase());

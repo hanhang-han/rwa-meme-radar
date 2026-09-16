@@ -1,10 +1,12 @@
 <template>
   <div>
-    <div class="x-toolbar">
-      <h2>{{ tr('股票 → 链上资产 → 关联代币', 'Stocks → on-chain assets → related tokens') }}</h2>
+    <div class="page-heading">
+      <h2>{{ tr('股票雷达', 'Stock radar') }}</h2>
+      <p>{{ tr('按股票代码聚合发行方与合约。股票现货价缺失时保留原始空值。', 'Grouped by ticker across issuers and contracts. Missing spot prices remain unknown.') }}</p>
+    </div>
+    <div class="v2-stock-toolbar">
       <input id="xStockSearch" v-model="qInput" :placeholder="tr('搜索股票代码、名称、CA', 'Search ticker, name or CA')" @input="onSearch">
     </div>
-    <p class="hint">{{ tr('按股票代码聚合发行方与合约。股票现货价缺失时保留原始空值。', 'Grouped by ticker across issuers and contracts. Missing spot prices remain unknown.') }}</p>
     <div id="xStockRows">
       <div v-if="!rows.length" class="x-empty">{{ tr('暂无匹配股票。', 'No matching stocks.') }}</div>
       <details v-for="[ticker, list] in rows" :key="ticker" class="x-stock" :open="autoOpen(ticker)">
@@ -12,7 +14,6 @@
           <strong>{{ companyTitle(ticker, list[0]) }}</strong>
           <span>{{ list.length }} {{ tr('个股票资产', 'stock assets') }}</span>
           <span>{{ relatedCount(list) }} {{ tr('个关联资产', 'related assets') }}</span>
-          <span>24h {{ usd(list.reduce((n, s) => n + (s.volume24h || 0), 0)) }}</span>
         </summary>
         <h3>{{ tr('关联 Meme', 'Related memes') }}</h3>
         <div v-if="relLinks(list).length">
@@ -44,6 +45,11 @@
         </details>
       </details>
     </div>
+    <div class="x-pager">
+      <button :disabled="safePage <= 0" @click="setPage(Math.max(0, safePage - 1))">{{ tr('上一页', 'Previous') }}</button>
+      <span>{{ safePage + 1 }} / {{ pages }} · {{ allRows.length }} {{ tr('个股票标的', 'stock underlyings') }}</span>
+      <button :disabled="(safePage + 1) >= pages" @click="setPage(safePage + 1)">{{ tr('下一页', 'Next') }}</button>
+    </div>
   </div>
 </template>
 
@@ -63,7 +69,9 @@ const COMPANY = { AAPL: '苹果', AMD: '超威半导体', AMZN: '亚马逊', BAB
 
 const search = computed(() => String(route.query.q ?? '').toLowerCase());
 
-const rows = computed(() => {
+const PAGE = 20;
+const page = computed(() => Math.max(0, Number(route.query.page) || 0));
+const allRows = computed(() => {
   const grouped = new Map();
   for (const s of store.stockTokens) {
     const id = s.stockIdentity?.id || s.stockCode || s.assetId || s.instrumentId;
@@ -73,6 +81,9 @@ const rows = computed(() => {
   }
   return [...grouped.entries()].sort((a, b) => relatedCount(b[1]) - relatedCount(a[1]) || String(a[0] ?? "").localeCompare(String(b[0] ?? "")));
 });
+const pages = computed(() => Math.max(1, Math.ceil(allRows.value.length / PAGE)));
+const safePage = computed(() => Math.min(page.value, pages.value - 1));
+const rows = computed(() => allRows.value.slice(safePage.value * PAGE, safePage.value * PAGE + PAGE));
 
 function relatedCount(list) {
   return new Set(
@@ -100,7 +111,11 @@ function companyTitle(ticker, first) {
 
 function autoOpen(ticker) {
   const key = String(ticker ?? '');
-  return (search.value && rows.value.length === 1) || search.value === key.toLowerCase();
+  return (search.value && allRows.value.length === 1) || search.value === key.toLowerCase();
+}
+
+function setPage(p) {
+  router.push({ query: { ...route.query, page: p || undefined } });
 }
 
 function pairLinkFor(s) {
