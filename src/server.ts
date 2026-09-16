@@ -18,7 +18,7 @@ import { sampleRelationship, relationshipAnalytics, sectorAnalytics, saveRelatio
 import { verifyDirectPools, Verification } from "./lib/verification";
 import { okxState, refreshOkx } from "./lib/okx";
 import { assessRelation, relationTypes } from "./lib/relations";
-import { refreshXLayer, refreshLiveQuotes, refreshSideQuotes, xLayerState, xLayerDetail } from "./lib/xlayer";
+import { refreshXLayer, refreshLiveQuotes, refreshSideQuotes, refreshAssetOnDemand, xLayerState, xLayerDetail } from "./lib/xlayer";
 import { unifiedFromXLayer } from "./lib/unified-state";
 import { refreshRobinhood, robinhoodState, robinhoodToken } from "./lib/robinhood";
 import { refreshMarketEnrichment } from "./lib/market-enrichment";
@@ -542,6 +542,7 @@ app.get("/api/token/:chain/:address", async (c) => {
   const chain = c.req.param("chain");
   const address = c.req.param("address").toLowerCase();
   if (['196','56','4663'].includes(chain) && /^0x[\da-f]{40}$/.test(address)) {
+    if(chain==='196')void refreshAssetOnDemand(address);
     const detail=dashboardDetail(chain,address);
     if(detail)return c.json(detail);
   }

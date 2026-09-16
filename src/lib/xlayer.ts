@@ -195,7 +195,7 @@ export function normalizeTrade(row:any, token:string) {
     user:addr(row.userAddress),hash:/^0x[\da-f]{64}$/i.test(row.txHashUrl)?row.txHashUrl:null,
     dex:String(row.dexName??''),source:'OKX trades',providerFiltered:String(row.isFiltered??'0')!=='0'};
 }
-async function refreshTrades(asset:XAsset) {
+export async function refreshTrades(asset:XAsset) {
   // Incremental pagination stops at a stored ID. Keep explicit gaps when the
   // bounded batch cannot bridge to the last scan; never claim full history.
   let after='', reached=false, oldest=Date.now(), lastCursor='';
@@ -271,6 +271,17 @@ export async function refreshQuotes(assets:XAsset[]) {
     }
   }
   coolStale(tokens, answered);
+}
+
+// Detail views drive their own collection: refresh trades for the asset a
+// user is watching so the activity feed keeps rolling between scan rounds.
+export async function refreshAssetOnDemand(address:string){
+  await inNetwork('196', okxState, async () => {
+    const asset=db().get<XAsset>('asset',address);
+    if(!asset||asset.kind!=='candidate')return;
+    if(asset.tradeAt&&Date.now()-asset.tradeAt<45_000)return;
+    try{await refreshTrades(asset);}catch(e){console.error('[ondemand]',e instanceof Error?e.message:e);}
+  });
 }
 
 // Fast price lane: one batched price-info call per round keeps displayed

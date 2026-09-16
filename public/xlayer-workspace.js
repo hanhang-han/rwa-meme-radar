@@ -18,6 +18,7 @@
   const fresh = at => at && Date.now()-at<900000;
   const change = v => v == null ? tr('待采集','Pending') : `${v>=0?'+':''}${Number(v).toFixed(2)}%`;
   let snapshot, filter='related', search='', stockSearch='', page=0, stockPage=0, renderedLanguage;
+  let lastTradeIds=new Set(), lastPriceText='';
   let detailCache = new Map(), detailPending = new Set(), detailChart;
   const sectors = ['芯片','交易所','支付','托管','加密国库'];
   const sectorName = value => ({'芯片':tr('芯片','Semiconductors'),'交易所':tr('交易所','Exchanges'),'支付':tr('支付','Payments'),'托管':tr('托管','Custody'),'加密国库':tr('加密国库','Crypto treasury')}[value]||value);
@@ -59,7 +60,7 @@
     if(relationFor(asset.token).length) return `<span class="x-badge pending">${tr('历史证据 · 待复核','Historical evidence · needs review')}</span>`;
     return asset.match?`<span class="x-badge pending">${esc(asset.match.ticker)} ${tr('名称线索','name lead')}</span>`:`<span class="x-badge">${tr('未识别股票关系','No stock relation')}</span>`;
   }
-  const kpi = (label,value,note) => `<div class="kpi"><span class="kpi-label">${label}</span><strong class="kpi-value">${value}</strong><span class="kpi-note">${note}</span></div>`;
+  const kpi = (label,value,note,attrs='') => `<div class="kpi" ${attrs}><span class="kpi-label">${label}</span><strong class="kpi-value">${value}</strong><span class="kpi-note">${note}</span></div>`;
   function candidate(a) {
     return `<a class="x-signal" href="${link(a.token)}"><div><strong>${esc(a.symbol)}</strong> ${badge(a)}<small>${esc(a.name)} · ${esc(short(a.token))} · ${tr('来源','Source')} ${esc(a.provider||tr('已接入目录','Connected catalogue'))}</small></div><div><strong>${usd(a.volume24h)}</strong><small>${tr('24h 成交额','24h volume')} · ${age(a.updatedAt)}</small></div><span aria-hidden="true">↗</span></a>`;
   }
@@ -167,25 +168,61 @@
     }catch(error){if(location.hash.toLowerCase()==='#detail/'+chain+'/'+key)document.getElementById('memeDetail').innerHTML=`<section class="panel x-empty">${esc(error.message)}<p><a href="#meme">${tr('返回关系雷达','Back to Meme Radar')} →</a></p></section>`;}
     finally{detailPending.delete(cacheKey);}
   }
+  const tradeRow = (t,a) => `<tr><td>${date(t.t)}</td><td class="${t.type==='buy'?'up':'down'}">${t.type==='buy'?'买入':'卖出'}</td><td>${usd(t.volume)}</td><td>${usd(t.price)}</td><td>${esc(t.dex)}</td><td>${t.hash?`<a href="${explorer(t.hash,'tx',a.chainId||a.chain||'196')}" target="_blank" rel="noopener">${esc(short(t.hash))} ↗</a>`:'暂无交易哈希'}</td></tr>`;
+  const tradeStat = (a,d) => a.tradeAt?`当前已保存最近 24h 内 ${d.activity.count} 笔：${d.activity.buys} 买 / ${d.activity.sells} 卖。采集范围从 ${date(a.oldestTradeAt)} 起；不是全历史统计。`:'成交采集排队中，缺失不表示零成交。';
+  // Incremental refresh for the same asset: append chart points, slide in new
+  // trades, flash the price KPI. The surrounding DOM is never rebuilt.
+  function updateDetail(d) {
+    const a=d.asset;
+    if(detailChart&&document.getElementById('xPriceChart')&&window.echarts){
+      const data=d.samples.map(s=>[s.t,s.price]);
+      if(a.price!=null)data.push([Date.now(),a.price]);
+      detailChart.setOption({series:[{data}]});
+    }
+    const tbody=document.getElementById('xTradeBody');
+    if(tbody){
+      const fresh=d.trades.filter(t=>!lastTradeIds.has(t.id));
+      if(fresh.length){
+        tbody.insertAdjacentHTML('afterbegin',fresh.map(t=>`<tr class="trade-new">${tradeRow(t,a).slice(3)}`).join(''));
+        while(tbody.children.length>150)tbody.lastElementChild.remove();
+      }
+    }
+    d.trades.forEach(t=>lastTradeIds.add(t.id));
+    const stat=document.getElementById('xTradeStat');
+    if(stat&&a.tradeAt)stat.textContent=tradeStat(a,d);
+    const priceEl=document.querySelector('#memeDetail [data-kpi="price"] .kpi-value');
+    if(priceEl&&a.price!=null){
+      const text=usd(a.price);
+      if(text!==lastPriceText){
+        priceEl.textContent=text;
+        priceEl.classList.remove('kpi-flash');void priceEl.offsetWidth;priceEl.classList.add('kpi-flash');
+      }
+      lastPriceText=text;
+    }
+  }
   function drawDetail(d) {
-    if(detailChart){detailChart.dispose();detailChart=null;}
     const a=d.asset,relations=d.relations||[], stock=d.stock;
+    if(document.getElementById('memeDetail').dataset.xAsset===a.token){updateDetail(d);return;}
+    if(detailChart){detailChart.dispose();detailChart=null;}
     document.getElementById('memeDetail').dataset.xAsset=a.token;
     const countText=fresh(a.countsAt)?`${num(a.buys24h)} ${tr('买','buys')} / ${num(a.sells24h)} ${tr('卖','sells')}`:tr('买卖分项见已采集成交','Buy/sell detail appears in collected activity');
     const profile=a.profile||(d.stocks||[]).find(s=>s.profile)?.profile;
     document.getElementById('memeDetail').innerHTML=`
       <div class="page-heading"><a href="${stock?'#stock':'#meme'}">← ${stock?tr('股票','Stock'):tr('Meme','Meme')} Radar</a><h2>${esc(a.symbol)} <span class="x-badge">${tr('持续追踪','Tracked')}</span> <span class="x-badge">${tr('来源','Source')} ${esc(a.provider||tr('已接入目录','Connected catalogue'))}</span></h2><p>${esc(stock?company(a.stockCode||a.symbol):a.name)} · ${esc(labels[a.kind]?.()||tr('资产','Asset'))} · ${tr('首次发现','First seen')} ${date(a.firstSeen)}</p></div>
       <section class="panel"><div class="address-row"><code>${esc(a.token)}</code><button data-copy="${esc(a.token)}">${tr('复制 CA','Copy CA')}</button><a href="${explorer(a.token,'address',a.chainId||a.chain||'196')}" target="_blank" rel="noopener">${tr('区块浏览器','Block explorer')} ↗</a></div><p class="hint">${tr('行情','Market')} ${date(a.updatedAt)} · ${tr('成交','Activity')} ${date(a.tradeAt)}${a.error?' · '+esc(a.error):''}</p></section>
-      <div class="kpis">${kpi(tr('最新价格','Latest price'),usd(a.price),change(a.change24h)+' · 24h')}${kpi(tr('24h 成交额','24h volume'),usd(a.volume24h),a.volumeScope==='exchange'?tr('场内行情统计','Exchange market statistics'):tr('已采集行情统计','Collected market statistics'))}${kpi(tr('24h 交易','24h trades'),num(a.txs24h),countText)}${kpi(tr('流动性','Liquidity'),usd(a.liquidity),num(a.holders)+' '+tr('持有人','holders'))}</div>
+      <div class="kpis">${kpi(tr('最新价格','Latest price'),usd(a.price),change(a.change24h)+' · 24h','data-kpi="price"')}${kpi(tr('24h 成交额','24h volume'),usd(a.volume24h),a.volumeScope==='exchange'?tr('场内行情统计','Exchange market statistics'):tr('已采集行情统计','Collected market statistics'))}${kpi(tr('24h 交易','24h trades'),num(a.txs24h),countText)}${kpi(tr('流动性','Liquidity'),usd(a.liquidity),num(a.holders)+' '+tr('持有人','holders'))}</div>
       <section class="panel x-verdict"><span class="eyebrow">RELATIONSHIP EVIDENCE</span><h2>${stock?tr('股票代币与关联资产','Stock token and related assets'):esc(d.analysis.conclusion)}</h2><p>${stock?tr('该股票代币已进入资产目录，下面展示已核验的配对关系。','This stock token is in the asset catalogue. Verified pair relationships appear below.'):tr('配对池和股票包装映射分别核验；名称匹配只作为发现起点。','Pair pools and wrapped-stock mappings are verified separately; name matching is only a discovery starting point.')}</p>
       ${relations.length?relations.map(r=>`<article class="x-proof"><div class="panel-head"><h3>${esc(r.ticker)} · ${r.wrapper?'包装股票配对':'直接股票配对'}</h3><span class="x-badge ${r.status==='verified'?'verified':'pending'}">${r.status==='verified'?'地址已核验':r.status==='invalid'?'证据变化':'复核失败'} · ${age(r.checkedAt)}</span></div><p>代币 <a href="${link(r.token,r.chainId||a.chainId||'196')}">${esc(short(r.token))}</a> → 池 <a href="${explorer(r.pool,'address',r.chainId||a.chainId||'196')}" target="_blank" rel="noopener">${esc(short(r.pool))}</a> → 股票侧 <a href="${explorer(r.stockSide,'address',r.chainId||a.chainId||'196')}" target="_blank" rel="noopener">${esc(short(r.stockSide))}</a>${r.wrapper?` → asset()/underlying() → <a href="${link(r.stock,r.chainId||a.chainId||'196')}">${esc(short(r.stock))}</a>`:''}</p><div class="x-coverage"><span>${esc(r.protocol)}</span><span>池总流动性 ${usd(r.liquidityUsd)}</span><span>核验区块 ${num(r.block)}</span></div><details><summary>查看完整地址与核验依据</summary><p>token0：<code>${esc(r.token0)}</code></p><p>token1：<code>${esc(r.token1)}</code></p><p>原始股票代币：<code>${esc(r.stock)}</code></p><p>股票侧余额（原始最小单位）：${esc(r.stockBalance??'未采集')}</p><p>链上地址读取 ${date(r.checkedAt)}；池流动性为最近查询估值，不能视为锁仓证明。</p></details></article>`).join(''):`<div class="x-empty">${a.match?`${esc(a.match.ticker)} 名称线索已保存。`:''}${d.scan?`已查询 ${d.scan.poolCount} 个高流动性池，状态 ${esc(d.scan.status)}。`:'尚未完成配对池核验。'}当前范围内暂无已核验股票关系。</div>`}</section>
       <div class="x-grid"><section class="panel"><h2>价格观察 · 5 分钟采样</h2><p class="hint">自开始追踪起的价格快照。至少两个采样点后显示曲线。</p>${d.samples.length>=2?'<div id="xPriceChart" class="chart"></div>':`<div class="x-empty">已保存 ${d.samples.length} 个采样点，下一采样时段继续累积。</div>`}</section><section class="panel"><h2>股票背景与关联解读</h2><p class="hint">规则说明 · AI 模型尚未接入</p>${profile?`<h3>${esc(profile.companyName)}</h3><p>${esc(profile.exchange)} · ${esc(profile.industry)} · ${esc(profile.stockCode)}</p><p>发行方资料不代表与该 Meme 存在官方合作。</p>`:'<p>公司资料等待对应股票的背景信息返回。</p>'}<p>${esc(d.analysis.conclusion)}</p><p>${esc(d.analysis.correlation.reason)}</p><p>股票捕获率：${esc(d.analysis.capture.reason)}</p></section></div>
-      <section class="panel"><div class="panel-head"><h2>最近成交</h2><span class="hint">保存并按成交 ID 去重</span></div><p class="hint">${a.tradeAt?`当前已保存最近 24h 内 ${d.activity.count} 笔：${d.activity.buys} 买 / ${d.activity.sells} 卖。采集范围从 ${date(a.oldestTradeAt)} 起；不是全历史统计。`:'成交采集排队中，缺失不表示零成交。'}${a.gapDetected?' 检测到分页覆盖缺口，统计不完整。':''}</p>${d.trades.length?`<div class="scroll"><table class="tbl"><thead><tr><th>时间</th><th>方向</th><th>美元成交额</th><th>成交价</th><th>DEX</th><th>交易</th></tr></thead><tbody>${d.trades.map(t=>`<tr><td>${date(t.t)}</td><td class="${t.type==='buy'?'up':'down'}">${t.type==='buy'?'买入':'卖出'}</td><td>${usd(t.volume)}</td><td>${usd(t.price)}</td><td>${esc(t.dex)}</td><td>${t.hash?`<a href="${explorer(t.hash,'tx',a.chainId||a.chain||'196')}" target="_blank" rel="noopener">${esc(short(t.hash))} ↗</a>`:'暂无交易哈希'}</td></tr>`).join('')}</tbody></table></div>`:'<div class="x-empty">当前已保存范围内暂无成交记录。</div>'}</section>
+      <section class="panel"><div class="panel-head"><h2>最近成交</h2><span class="hint">保存并按成交 ID 去重</span></div><p class="hint" id="xTradeStat">${tradeStat(a,d)}${a.gapDetected?' 检测到分页覆盖缺口，统计不完整。':''}</p>${d.trades.length?`<div class="scroll"><table class="tbl"><thead><tr><th>时间</th><th>方向</th><th>美元成交额</th><th>成交价</th><th>DEX</th><th>交易</th></tr></thead><tbody id="xTradeBody">${d.trades.map(t=>tradeRow(t,a)).join('')}</tbody></table></div>`:'<div class="x-empty">当前已保存范围内暂无成交记录。</div>'}</section>
       <div class="x-grid"><section class="panel"><h2>风险信息</h2>${a.risk?`<p>风险等级：${esc(a.risk.level)} / 5 · Top 10 持仓 ${a.risk.top10==null?'未提供':a.risk.top10+'%'}</p><p>${a.risk.tags.length?a.risk.tags.map(tag=>`<span class="x-badge">${esc(tag)}</span>`).join(' '):'此次响应未提供风险标签'}</p><p class="hint">检测时间 ${date(a.risk.checkedAt)}</p>`:'<p>风险数据尚未返回。</p>'}<p>${esc(d.analysis.safety)}</p></section><section class="panel"><h2>关系时间线</h2>${d.events.length?d.events.map(event=>`<p>${date(event.t)} · ${esc(event.label)}</p>`).join(''):'<p>等待首条关系核验事件；资产记录已持久保存。</p>'}</section></div>`;
     localizeRenderedText(document.getElementById('memeDetail'));
+    lastTradeIds=new Set(d.trades.map(t=>t.id));lastPriceText=a.price!=null?usd(a.price):'';
     if(d.samples.length>=2 && window.echarts) {
+      const data=d.samples.map(s=>[s.t,s.price]);
+      if(a.price!=null)data.push([Date.now(),a.price]);
       detailChart=echarts.init(document.getElementById('xPriceChart'));
-      detailChart.setOption({tooltip:{trigger:'axis'},grid:{left:70,right:20,top:20,bottom:35},xAxis:{type:'time',axisLabel:{color:'#91a0b5'}},yAxis:{type:'value',scale:true,axisLabel:{color:'#91a0b5'},splitLine:{lineStyle:{color:'#253044'}}},series:[{type:'line',showSymbol:false,data:d.samples.map(s=>[s.t,s.price]),lineStyle:{color:'#b9fa6a'},areaStyle:{color:'rgba(185,250,106,.06)'}}]});
+      detailChart.setOption({tooltip:{trigger:'axis'},grid:{left:70,right:20,top:20,bottom:35},xAxis:{type:'time',axisLabel:{color:'#91a0b5'}},yAxis:{type:'value',scale:true,axisLabel:{color:'#91a0b5'},splitLine:{lineStyle:{color:'#253044'}}},series:[{type:'line',showSymbol:false,data,lineStyle:{color:'#b9fa6a'},areaStyle:{color:'rgba(185,250,106,.06)'}}]});
     }
   }
   document.addEventListener('click',event=>{

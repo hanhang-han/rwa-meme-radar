@@ -362,3 +362,9 @@ body { max-width:1600px; margin:auto; }
 .v2-event .tag { margin-right:6px; }
 .v2-clear-search { margin-left:6px;padding:2px 8px;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--accent);font-size:11px;cursor:pointer; }
 .v2-clear-search:hover { border-color:var(--accent); }
+
+/* Incremental detail updates: new trades slide in, price flashes once. */
+@keyframes v2-trade-in { from { background: rgba(185, 250, 106, .20); } to { background: transparent; } }
+tr.trade-new > td { animation: v2-trade-in 2s ease-out; }
+@keyframes v2-kpi-flash { 0% { color: var(--accent); } 100% { color: inherit; } }
+.kpi-flash { animation: v2-kpi-flash 1.2s ease-out; }
