@@ -31,3 +31,7 @@ export async function getRegistry() {
 export async function getBriefing(lang) {
   return getJSON(`/ai/briefing?lang=${lang}`);
 }
+
+export async function getInsight(chain, address, lang) {
+  return getJSON(`/ai/insight/${encodeURIComponent(chain)}/${encodeURIComponent(address)}?lang=${lang}`);
+}

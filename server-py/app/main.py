@@ -29,7 +29,7 @@ _load_env()
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
 
-from .api import ai_route, candles, dashboard, stream, token
+from .api import ai_route, candles, dashboard, misc, stream, token
 
 
 @asynccontextmanager
@@ -80,6 +80,7 @@ app.include_router(stream.router, prefix="/api")
 app.include_router(token.router, prefix="/api")
 app.include_router(candles.router, prefix="/api")
 app.include_router(ai_route.router, prefix="/api")
+app.include_router(misc.router, prefix="/api")
 
 
 @app.get("/api/health")

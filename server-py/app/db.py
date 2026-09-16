@@ -118,6 +118,20 @@ class ResearchStore:
             )
         return [json.loads(r[0]) for r in await cur.fetchall()]
 
+    async def events_page(self, before: dict | None = None, limit: int = 50) -> list:
+        if before:
+            cur = await self.db.execute(
+                """SELECT body FROM events WHERE asset LIKE ?
+                   AND (t < ? OR (t = ? AND id < ?)) ORDER BY t DESC, id DESC LIMIT ?""",
+                (f"{self.scope}:%", before["t"], before["t"], self.key(before["id"]), limit),
+            )
+        else:
+            cur = await self.db.execute(
+                "SELECT body FROM events WHERE asset LIKE ? ORDER BY t DESC, id DESC LIMIT ?",
+                (f"{self.scope}:%", limit),
+            )
+        return [json.loads(r[0]) for r in await cur.fetchall()]
+
     async def put_event(self, id: str, asset: str, value: dict, now=None) -> None:
         body = {**value, "id": self.key(id), "asset": self.key(asset),
                 "chainId": self.scope, "t": now or time.time() * 1000}
