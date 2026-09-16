@@ -13,6 +13,15 @@ const positive=(value:string|undefined,fallback:number)=>Number.isFinite(Number(
 export function collectionStatus(){return {...usage,dailyLimit:positive(process.env.OKX_DAILY_REQUEST_LIMIT,8000),roundLimit:positive(process.env.OKX_ROUND_REQUEST_LIMIT,70),intervalMs:300000};}
 export function startCollection(){usage.round=0;usage.startedAt=Date.now();usage.lastError=null;usage.nextAt=0;}
 export function endCollection(error:string|null=null){usage.completedAt=Date.now();usage.nextAt=Date.now()+300000;usage.lastError=error;}
+let lastPersist=0,persistTimer:ReturnType<typeof setTimeout>|null=null;
+// Usage is a local protective counter; writing it on every request blocks the
+// event loop (writeFileSync+renameSync). Persist at most every 30s.
+function persistUsage(){
+  if(process.env.NODE_ENV==='test')return;
+  const now=Date.now();
+  if(now-lastPersist>=30_000){lastPersist=now;writeSnapshot('data/okx-usage.json',usage);return;}
+  if(!persistTimer)persistTimer=setTimeout(()=>{persistTimer=null;lastPersist=Date.now();writeSnapshot('data/okx-usage.json',usage);},30_000);
+}
 function chargeRequest(opts?:{skipRound?:boolean}){
   if(!loaded){if(process.env.NODE_ENV!=='test')Object.assign(usage,readSnapshot('data/okx-usage.json')??{}, {round:usage.round,startedAt:usage.startedAt});loaded=true;}
   const day=new Date().toISOString().slice(0,10);if(usage.day!==day){usage.day=day;usage.daily=0;}
@@ -22,7 +31,7 @@ function chargeRequest(opts?:{skipRound?:boolean}){
   if(usage.daily>=limits.dailyLimit||(!opts?.skipRound&&usage.round>=limits.roundLimit))throw new Error('OKX local request budget exhausted');
   for(const budget of budgets)budget.remaining--;
   usage.daily++;if(!opts?.skipRound)usage.round++;
-  if(process.env.NODE_ENV!=='test')writeSnapshot('data/okx-usage.json',usage);
+  persistUsage();
 }
 
 // All workers share one rate limiter. Never send these headers to another host.

@@ -57,6 +57,21 @@ function restore(){
   }
 }
 function save(){if(process.env.NODE_ENV!=='test')writeSnapshot(snapshotFile,enrichmentState);}
+// Bounded growth: observations are per (asset|pool|holder, provider); drop the
+// oldest-updated keys once a table passes the cap.
+function prune(){
+  const cap=5000;
+  for(const table of ['assets','pools','holders'] as const){
+    const map=enrichmentState[table] as Record<string,Record<string,{updatedAt?:number|null}>>;
+    const entries=Object.entries(map);
+    if(entries.length<=cap)continue;
+    entries.sort((a,b)=>{
+      const at=(o:Record<string,{updatedAt?:number|null}>)=>Math.max(...Object.values(o).map(v=>v?.updatedAt??0));
+      return at(b[1])-at(a[1]);
+    });
+    for(const [k] of entries.slice(cap))delete map[k];
+  }
+}
 async function json(url:string,headers:Record<string,string>={}){
   const response=await fetch(url,{headers:{accept:'application/json','user-agent':'CliperxRadar/1.0',...headers},signal:AbortSignal.timeout(20_000)});
   if(!response.ok)throw new Error(`HTTP ${response.status}`);
@@ -236,6 +251,6 @@ export function enrichmentCapabilities(){restore();return Object.entries(enrichm
 
 export async function refreshMarketEnrichment(feed:{assets:any[];relations:any[];stockTokens:any[]}){
   restore();if(running)return;running=true;
-  try{await Promise.allSettled([refreshDex(feed.assets,feed.relations),refreshBlockscout(feed.assets),refreshEodhd(feed.stockTokens)]);await refreshCoinGecko(feed.assets,feed.relations);save();}
+  try{await Promise.allSettled([refreshDex(feed.assets,feed.relations),refreshBlockscout(feed.assets),refreshEodhd(feed.stockTokens)]);await refreshCoinGecko(feed.assets,feed.relations);prune();save();}
   finally{running=false;}
 }

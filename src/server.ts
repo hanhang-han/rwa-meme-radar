@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { compress } from 'hono/compress';
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { rpc } from "./lib/rpc";
 import { tokens, padAddr, decimalsOf } from "./lib/erc20";
 import { findPools, readPoolPrice, PoolHit } from "./lib/pancake";
@@ -511,6 +512,7 @@ void sampleHourly();
 const app = new Hono();
 app.use('/api/*',compress());
 let dashboardJson='',dashboardJsonAt=0;
+const etag=(v:string)=>'"'+createHash('sha1').update(v).digest('base64url').slice(0,20)+'"';
 app.get('/api/dashboard',c=>{
   if(!dashboardJson||Date.now()-dashboardJsonAt>10000){
     const u=dashboardState();
@@ -522,7 +524,9 @@ app.get('/api/dashboard',c=>{
       quality:u.quality,metrics:u.metrics,sectors:u.sectors,distribution:u.distribution,capabilities:u.capabilities,collection:u.collection}});
     dashboardJsonAt=Date.now();
   }
-  return c.body(dashboardJson,200,{'Content-Type':'application/json','Cache-Control':'no-store'});
+  const tag=etag(dashboardJson);
+  if(c.req.header('if-none-match')===tag)return new Response(null,{status:304,headers:{ETag:tag}});
+  return c.body(dashboardJson,200,{'Content-Type':'application/json','Cache-Control':'no-cache','ETag':tag});
 });
 function radarTokenJson(t: NewToken, tickers: Set<string>) {
   const match = matchStock(t.symbol, t.name, tickers);
@@ -718,10 +722,12 @@ void loop("registrySync", 600_000, async () => {
   if (!registryConfigured()) return;
   await syncRegistry(xLayerState().relations);
 });
+let stateJson='',stateJsonAt=0;
 app.get("/api/state", (c) => {
+  if(!stateJson||Date.now()-stateJsonAt>10000){
   const tickers = buildTickerSet(state.assets.map((a) => a.underlying));
   const xlayer = xLayerState();
-  return c.json({
+  stateJson=JSON.stringify({
     ...state,
     rpcPool: rpc.nodeStats(),
     leadCandidates: [...candidates.entries()].map(([token, meta]) => {
@@ -803,7 +809,10 @@ app.get("/api/state", (c) => {
     // instead of an ever-growing percentage.
     scanProgress: Math.round((state.assets.filter((a) => a.pools.length > 0).length / Math.max(state.assets.length, 1)) * 100),
     now: Date.now(),
-  });
+  });stateJsonAt=Date.now();}
+  const tag=etag(stateJson);
+  if(c.req.header('if-none-match')===tag)return new Response(null,{status:304,headers:{ETag:tag}});
+  return c.body(stateJson,200,{'Content-Type':'application/json','Cache-Control':'no-cache','ETag':tag});
 });
 app.get("/", (c) => c.body(readFileSync("public/index.html", "utf-8"), 200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" }));
 app.get("/app.js", (c) => c.body(readFileSync("public/app.js", "utf-8"), 200, { "Content-Type": "application/javascript", "Cache-Control": "no-cache" }));

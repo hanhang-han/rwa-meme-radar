@@ -42,6 +42,7 @@ export async function candleSeries(chain: string, address: string, bar: string, 
     s.candles(address, bar, parsed);
     const rows = s.candleRange(address, bar, Math.min(limit, 300)) as Candle[];
     mem.set(key, { rows, at: Date.now() });
+    if(mem.size>600){let drop=mem.size-500;for(const k of mem.keys()){mem.delete(k);if(--drop<=0)break;}}
     return rows;
   })();
   inflight.set(key, task);
