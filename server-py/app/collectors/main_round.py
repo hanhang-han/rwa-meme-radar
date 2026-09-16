@@ -24,6 +24,23 @@ def word_address(value) -> str | None:
     return None
 
 
+_decimals: dict[str, int] = {}
+
+
+async def cached_decimals(addr: str) -> int:
+    hit = _decimals.get(addr)
+    if hit is not None:
+        return hit
+    try:
+        raw = await rpc_call(addr, "0x313ce567")
+        hx = raw.hex() if isinstance(raw, bytes) else str(raw)
+        d = 18 if hx in ("0x", "0x0") else int(hx, 16)
+    except Exception:
+        d = 18
+    _decimals[addr] = d
+    return d
+
+
 async def rpc_call(to: str, data: str):
     def call():
         return w3().eth.call({"to": Web3.to_checksum_address(to), "data": data})
@@ -162,6 +179,53 @@ async def _block_hex() -> str:
     return hex(num)
 
 
+async def refresh_liquidity() -> None:
+    """Lightweight freshness lane: recompute liquidityUsd for verified
+    relations straight from on-chain reserves — no OKX quota, no identity
+    re-verification. Keeps the priority filter populated between scans."""
+    s = await store("196")
+    now = now_ms()
+    stale = [
+        r for r in await s.all("relation")
+        if r.get("status") == "verified" and now - (r.get("liquidityAt") or 0) > 900_000
+    ]
+    stale.sort(key=lambda r: r.get("liquidityAt") or 0)
+    done = 0
+    for rel in stale[:12]:
+        try:
+            raw = await rpc_call(rel["pool"], "0x0902f1ac")
+            hx = raw.hex() if isinstance(raw, bytes) else str(raw)
+            if hx == "0x" or len(hx) < 130:
+                continue
+            r0 = int(hx[2:66], 16)
+            r1 = int(hx[66:130], 16)
+            if not r0 or not r1:
+                continue
+            token = rel.get("token", "")
+            meme_is0 = (rel.get("token0") or "").lower() == token
+            # Price the pool from the meme side when possible; otherwise use
+            # the stock side — most pairs have at least one priced leg.
+            meme_price = ((await s.get("asset", token)) or {}).get("price")
+            stock_price = ((await s.get("asset", rel.get("stock", ""))) or {}).get("price")
+            if meme_price:
+                dm = await cached_decimals(rel["token0"] if meme_is0 else rel["token1"])
+                units = (r0 if meme_is0 else r1) / 10 ** dm
+                rel["liquidityUsd"] = units * meme_price * 2
+            elif stock_price:
+                ds = await cached_decimals(rel["token1"] if meme_is0 else rel["token0"])
+                units = (r1 if meme_is0 else r0) / 10 ** ds
+                rel["liquidityUsd"] = units * stock_price * 2
+            else:
+                continue
+            rel["liquidityAt"] = now_ms()
+            await s.put("relation", rel["id"], rel)
+            done += 1
+        except Exception:
+            continue
+    if stale:
+        print(f"[liqRefresh] tried={min(len(stale), 12)} refreshed={done}", flush=True)
+
+
 async def refresh_main_round() -> None:
     s = await store("196")
     stocks = await s.all("stock")
@@ -172,7 +236,7 @@ async def refresh_main_round() -> None:
 
     # Recheck stale relations first so evidence stays fresh.
     relations = await s.all("relation")
-    stale = [r for r in relations if (now_ms() - (r.get("checkedAt") or 0)) > 600_000]
+    stale = [r for r in relations if (now_ms() - (r.get("checkedAt") or 0)) > 600_000 or (now_ms() - (r.get("liquidityAt") or 0)) > 600_000]
     stale.sort(key=lambda r: r.get("checkedAt") or 0)
     for rel in stale[:16]:
         try:
@@ -184,6 +248,25 @@ async def refresh_main_round() -> None:
                 rel["status"] = "verified"
                 rel["checkedAt"] = now_ms()
                 rel["block"] = int(block, 16)
+                # Recompute liquidity from on-chain reserves so the priority
+                # filter recovers without waiting for OKX quota.
+                try:
+                    raw = await rpc_call(rel["pool"], "0x0902f1ac")
+                    hx = raw.hex() if isinstance(raw, bytes) else str(raw)
+                    if hx != "0x" and len(hx) >= 130:
+                        r0 = int(hx[2:66], 16)
+                        r1 = int(hx[66:130], 16)
+                        token = rel.get("token", "")
+                        meme_is0 = rel.get("token0", "").lower() == token
+                        dm = await cached_decimals(rel["token0"] if meme_is0 else rel["token1"])
+                        meme_units = (r0 if meme_is0 else r1) / 10 ** dm
+                        asset = await s.get("asset", token)
+                        price = (asset or {}).get("price")
+                        if price:
+                            rel["liquidityUsd"] = meme_units * price * 2
+                            rel["liquidityAt"] = now_ms()
+                except Exception:
+                    pass
             await s.put("relation", rel["id"], rel)
         except Exception:
             continue

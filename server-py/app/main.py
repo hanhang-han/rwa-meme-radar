@@ -62,9 +62,10 @@ async def lifespan(_: FastAPI):
 
     spawn_loop("aiBriefing", 1800, briefing.refresh_briefing)
 
-    from .collectors.main_round import refresh_main_round
+    from .collectors.main_round import refresh_main_round, refresh_liquidity
 
     spawn_loop("mainRound", 300, refresh_main_round)
+    spawn_loop("liquidityRefresh", 90, refresh_liquidity)
 
     try:
         yield
