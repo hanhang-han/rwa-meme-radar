@@ -815,6 +815,9 @@ app.get("/style.css", (c) => c.body(readFileSync("public/style.css", "utf-8"), 2
 app.get("/echarts.min.js", (c) =>
   c.body(readFileSync(require.resolve("echarts/dist/echarts.min.js")), 200, { "Content-Type": "application/javascript", "Cache-Control": "public, max-age=86400" }),
 );
+app.get("/lightweight-charts.js", (c) =>
+  c.body(readFileSync("public/lightweight-charts.js"), 200, { "Content-Type": "application/javascript", "Cache-Control": "public, max-age=86400" }),
+);
 app.get("/api/history", (c) => {
   const out: Record<string, { t: number; v: number; p?: string }[]> = {};
   for (const key of ts.keys()) out[key] = ts.get(key, 1440);
