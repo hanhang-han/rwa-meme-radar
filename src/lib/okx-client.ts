@@ -13,15 +13,15 @@ const positive=(value:string|undefined,fallback:number)=>Number.isFinite(Number(
 export function collectionStatus(){return {...usage,dailyLimit:positive(process.env.OKX_DAILY_REQUEST_LIMIT,8000),roundLimit:positive(process.env.OKX_ROUND_REQUEST_LIMIT,70),intervalMs:300000};}
 export function startCollection(){usage.round=0;usage.startedAt=Date.now();usage.lastError=null;usage.nextAt=0;}
 export function endCollection(error:string|null=null){usage.completedAt=Date.now();usage.nextAt=Date.now()+300000;usage.lastError=error;}
-function chargeRequest(){
+function chargeRequest(opts?:{skipRound?:boolean}){
   if(!loaded){if(process.env.NODE_ENV!=='test')Object.assign(usage,readSnapshot('data/okx-usage.json')??{}, {round:usage.round,startedAt:usage.startedAt});loaded=true;}
   const day=new Date().toISOString().slice(0,10);if(usage.day!==day){usage.day=day;usage.daily=0;}
   const limits=collectionStatus();
   const budgets:Allowance[]=[];for(let b=allowance.getStore();b;b=b.parent)budgets.push(b);
   if(budgets.some(b=>b.remaining<=0))throw new Error('OKX network request allowance exhausted');
-  if(usage.daily>=limits.dailyLimit||usage.round>=limits.roundLimit)throw new Error('OKX local request budget exhausted');
+  if(usage.daily>=limits.dailyLimit||(!opts?.skipRound&&usage.round>=limits.roundLimit))throw new Error('OKX local request budget exhausted');
   for(const budget of budgets)budget.remaining--;
-  usage.daily++;usage.round++;
+  usage.daily++;if(!opts?.skipRound)usage.round++;
   if(process.env.NODE_ENV!=='test')writeSnapshot('data/okx-usage.json',usage);
 }
 
@@ -29,17 +29,17 @@ function chargeRequest(){
 export function okxGet(endpoint: string, params: Record<string, string>): Promise<any> {
   return okxRequest(endpoint + '?' + new URLSearchParams(params), 'GET');
 }
-export function okxPost(endpoint: string, data: unknown): Promise<any> {
-  return okxRequest(endpoint, 'POST', JSON.stringify(data));
+export function okxPost(endpoint: string, data: unknown, opts?: { skipRound?: boolean; urgent?: boolean }): Promise<any> {
+  return okxRequest(endpoint, 'POST', JSON.stringify(data), opts);
 }
-function okxRequest(path: string, method: 'GET' | 'POST', body = ''): Promise<any> {
+function okxRequest(path: string, method: 'GET' | 'POST', body = '', opts?: { skipRound?: boolean; urgent?: boolean }): Promise<any> {
   const task = async () => {
     const key = process.env.OKX_API_KEY, secret = process.env.OKX_SECRET_KEY, passphrase = process.env.OKX_PASSPHRASE;
     if (!key || !secret || !passphrase) throw new Error('OKX credentials not configured');
     if (!path.startsWith('/api/v6/dex/')) throw new Error('Invalid OKX endpoint');
     for (let attempt = 0; attempt < 4; attempt++) {
       await pause(Math.max(0, nextAt - Date.now()));
-      chargeRequest();
+      chargeRequest(opts);
       const timestamp = new Date().toISOString();
       const response = await fetch('https://web3.okx.com' + path, {
         method, ...(body ? {body} : {}),
@@ -55,13 +55,17 @@ function okxRequest(path: string, method: 'GET' | 'POST', body = ''): Promise<an
         continue;
       }
       if (!response.ok || json.code !== '0') {
-        // Upstream diagnostics may contain echoed request fields: expose codes only.
-        throw new Error(`OKX HTTP ${response.status} · code ${String(json.code ?? 'unknown').replace(/[^\w-]/g, '').slice(0, 30)}`);
+        // Upstream diagnostics may contain echoed request fields: keep messages alphanumeric and short.
+        const detail=[json.error?.code,json.error?.message,json.msg].filter(Boolean).join(' ').replace(/[^\w :.-]/g, '').slice(0, 90);
+        throw new Error(`OKX HTTP ${response.status} · code ${String(json.code ?? 'unknown').replace(/[^\w-]/g, '').slice(0, 30)} · ${detail}`);
       }
       return json.data;
     }
     throw new Error('OKX rate limit');
   };
+  // Urgent calls (batched price refresh) bypass the serial queue so a long
+  // collection round cannot stall sub-minute price updates. Quotas still apply.
+  if (opts?.urgent) return task();
   const result = queue.then(task);
   queue = result.catch(() => {});
   return result;

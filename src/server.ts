@@ -18,7 +18,7 @@ import { sampleRelationship, relationshipAnalytics, sectorAnalytics, saveRelatio
 import { verifyDirectPools, Verification } from "./lib/verification";
 import { okxState, refreshOkx } from "./lib/okx";
 import { assessRelation, relationTypes } from "./lib/relations";
-import { refreshXLayer, xLayerState, xLayerDetail } from "./lib/xlayer";
+import { refreshXLayer, refreshLiveQuotes, refreshSideQuotes, xLayerState, xLayerDetail } from "./lib/xlayer";
 import { unifiedFromXLayer } from "./lib/unified-state";
 import { refreshRobinhood, robinhoodState, robinhoodToken } from "./lib/robinhood";
 import { refreshMarketEnrichment } from "./lib/market-enrichment";
@@ -478,7 +478,10 @@ void loop("dashboard", 300_000, collectDashboard);
 void loop("marketEnrichment", 300_000, async () => refreshMarketEnrichment(dashboardState()));
 void loop("robinhood", 300_000, refreshRobinhood);
 void loop("bnb", 60_000, refreshBnb);
-void loop("binance", 300_000, refreshBinance);
+void loop("binance", 30_000, refreshBinance);
+// Sub-minute price freshness for displayed assets; quota is enforced inside okxPost.
+void loop("liveQuotes", 90_000, refreshLiveQuotes);
+void loop("sideQuotes", 300_000, refreshSideQuotes);
 void loop("assets", 600_000, refreshAssets);
 void loop("oracles", 30_000, refreshOracles);
 void loop("scan", 500, scanPools);

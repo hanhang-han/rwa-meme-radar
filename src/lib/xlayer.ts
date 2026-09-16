@@ -236,18 +236,66 @@ async function refreshTrades(asset:XAsset) {
   db().put('asset',asset.token,asset);
 }
 
-async function refreshQuotes(assets:XAsset[]) {
-  if (!assets.length) return;
-  const data=await okxPost('/api/v6/dex/market/price-info',assets.map(a=>({chainIndex:chainId(),tokenContractAddress:a.token})));
-  if (!Array.isArray(data)) throw new Error('Invalid quote response');
-  for(const row of data) {
-    const old=db().get<XAsset>('asset',addr(row.tokenContractAddress)??'');
-    if (!old || String(row.chainIndex)!==chainId()) continue;
-    const mapped={...row};
-    for(const [raw,target] of [['volume24H','volume'],['txs24H','txs'],['priceChange24H','change']])if(Object.hasOwn(row,raw))mapped[target]=row[raw];
-    const updated=saveAsset(mapped);
-    if(updated) db().put('quote-time',updated.token,{at:numeric(row.time)??Date.now()});
+// Tokens OKX no longer prices would otherwise dominate every oldest-first
+// round. Track consecutive misses and cool them down for an hour.
+const quoteMiss=new Map<string,number>();
+function coolStale(tokens:string[],answered:Set<string>) {
+  for(const t of tokens){
+    if(answered.has(t)) quoteMiss.delete(t);
+    else quoteMiss.set(t,(quoteMiss.get(t)??0)+1);
   }
+  if(quoteMiss.size>800) for(const [t] of quoteMiss) { quoteMiss.delete(t); if(quoteMiss.size<=600) break; }
+}
+export async function refreshQuotes(assets:XAsset[]) {
+  // One malformed address rejects the whole batch (OKX 51000), so validate
+  // locally and cap batch size.
+  const tokens=[...new Set(assets.map(a=>a.token).filter(t=>/^0x[0-9a-fA-F]{40}$/.test(t)))];
+  if (!tokens.length) return;
+  const answered=new Set<string>();
+  for(let i=0;i<tokens.length;i+=50) {
+    try {
+      const data=await okxPost('/api/v6/dex/market/price-info',tokens.slice(i,i+50).map(t=>({chainIndex:chainId(),tokenContractAddress:t})),{skipRound:true,urgent:true});
+      if (!Array.isArray(data)) throw new Error('Invalid quote response');
+      for(const row of data) { const a=addr(row.tokenContractAddress); if(a) answered.add(a); }
+      for(const row of data) {
+        const old=db().get<XAsset>('asset',addr(row.tokenContractAddress)??'');
+        if (!old || String(row.chainIndex)!==chainId()) continue;
+        const mapped={...row};
+        for(const [raw,target] of [['volume24H','volume'],['txs24H','txs'],['priceChange24H','change']])if(Object.hasOwn(row,raw))mapped[target]=row[raw];
+        const updated=saveAsset(mapped);
+        if(updated) db().put('quote-time',updated.token,{at:numeric(row.time)??Date.now()});
+      }
+    } catch (e) {
+      // One rejected chunk must not starve the rest of the round.
+      console.error(`[quotes] chunk ${i}-${i+50} skipped: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  coolStale(tokens, answered);
+}
+
+// Fast price lane: one batched price-info call per round keeps displayed
+// meme/stock prices under a minute stale without touching scan budgets.
+export async function refreshLiveQuotes(){
+  // Pin the scope to X Layer: the dashboard loop rotates chains via
+  // AsyncLocalStorage, and db()/chainId() follow it.
+  await inNetwork('196', okxState, async () => {
+    const relationAssets=new Set(db().all<XRelation>('relation').filter(r=>r.status!=='invalid').flatMap(r=>[r.token,r.stock]));
+    const basketAssets=new Set(db().all<any>('basket').flatMap(b=>b.members.map((m:any)=>m.token)));
+    const work=db().all<XAsset>('asset').filter(a=>a.kind==='stock'||(a.kind==='candidate'&&(relationAssets.has(a.token)||basketAssets.has(a.token))))
+      .filter(a=>(quoteMiss.get(a.token)??0)<3)
+      .sort((a,b)=>(a.fieldTimes?.price??0)-(b.fieldTimes?.price??0)).slice(0,150);
+    if(work.length)await refreshQuotes(work);
+  });
+}
+let sideTurn=0;
+export async function refreshSideQuotes(){
+  const chains=['56','4663'];
+  const chain=chains[sideTurn%chains.length];sideTurn++;
+  await inNetwork(chain, okxState, async () => {
+    const work=db().all<XAsset>('asset').filter(a=>a.kind==='stock'||a.kind==='candidate')
+      .sort((a,b)=>(a.fieldTimes?.price??0)-(b.fieldTimes?.price??0)).slice(0,100);
+    if(work.length)await refreshQuotes(work);
+  });
 }
 
 export async function refreshXLayer() {
@@ -280,13 +328,6 @@ export async function refreshXLayer() {
       db().put('relation',r.id,r);
     }
     const savedAssets=db().all<XAsset>('asset');
-    const relationAssets=new Set(db().all<XRelation>('relation').filter(r=>r.status!=='invalid').flatMap(r=>[r.token,r.stock]));
-    const basketAssets=new Set(db().all<any>('basket').flatMap(b=>b.members.map((m:any)=>m.token)));
-    const quoteWork=savedAssets.filter(a=>relationAssets.has(a.token)||basketAssets.has(a.token))
-      .sort((a,b)=>Number(basketAssets.has(b.token))-Number(basketAssets.has(a.token))||(a.fieldTimes?.price??0)-(b.fieldTimes?.price??0)).slice(0,100);
-    await refreshQuotes(quoteWork);
-    const catalogueQuotes=db().all<XAsset>('asset').filter(a=>a.kind==='stock'&&!quoteWork.some(q=>q.token===a.token)).sort((a,b)=>(a.fieldTimes?.price??0)-(b.fieldTimes?.price??0)).slice(0,100);
-    await refreshQuotes(catalogueQuotes);
     const scans=new Map(db().all<Scan>('scan').map(s=>[s.token,s]));
     await stage('activity',8,async()=>{
     const all=db().all<XAsset>('asset').filter(a=>a.kind==='candidate');
