@@ -23,6 +23,10 @@ async def get_token(chain: str, address: str):
     if chain not in ("196", "56", "4663") or not (address.startswith("0x") and len(address) == 42):
         raise HTTPException(status_code=400, detail="unsupported token")
     await reload_if_stale()
+    if chain == 196:
+        import asyncio
+        from ..collectors.trades import refresh_asset_on_demand
+        asyncio.ensure_future(refresh_asset_on_demand(address))
 
     s = await store(chain)
     asset = await s.get("asset", address)

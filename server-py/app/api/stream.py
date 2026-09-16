@@ -1,18 +1,35 @@
-"""SSE stream placeholder (P4 wires collectors to it)."""
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
+"""SSE stream: one queue per client; collectors broadcast through the hub."""
 import asyncio
 import json
+import time
+
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
+
+from ..stream_hub import clients, hello
 
 router = APIRouter()
 
 
 @router.get("/stream")
 async def get_stream():
-    async def frames():
-        yield f"event: hello\ndata: {json.dumps({'at': 0})}\n\n"
-        while True:
-            await asyncio.sleep(25)
-            yield "event: heartbeat\ndata: {}\n\n"
+    q: asyncio.Queue = asyncio.Queue(maxsize=256)
+    clients().add(q)
+    hello(q)
 
-    return StreamingResponse(frames(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    async def frames():
+        try:
+            while True:
+                try:
+                    frame = await asyncio.wait_for(q.get(), timeout=25)
+                    yield frame
+                except asyncio.TimeoutError:
+                    yield f"event: heartbeat\ndata: {json.dumps({'at': int(time.time() * 1000)})}\n\n".encode()
+        finally:
+            clients().discard(q)
+
+    return StreamingResponse(
+        frames(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

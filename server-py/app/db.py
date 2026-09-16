@@ -92,6 +92,12 @@ class ResearchStore:
         )
         return [json.loads(r[0]) for r in await cur.fetchall()]
 
+    async def has_trade(self, asset: str, id: str) -> bool:
+        cur = await self.db.execute(
+            'SELECT 1 FROM trades WHERE asset=? AND id=?', (self.key(asset), id)
+        )
+        return await cur.fetchone() is not None
+
     async def put_trades(self, asset: str, rows: list) -> None:
         await self.db.executemany(
             "INSERT OR IGNORE INTO trades VALUES (?,?,?,?)",

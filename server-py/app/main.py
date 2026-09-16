@@ -1,8 +1,14 @@
 """RWA Meme Radar backend (FastAPI). Serves the /api/* contract previously
 implemented by the Node/Hono server; collectors run as background tasks."""
+import asyncio
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+
+async def _sync_apply(collector) -> None:
+    collector.apply_live()
 
 
 def _load_env() -> None:
@@ -28,7 +34,21 @@ from .api import candles, dashboard, stream, token
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Background collectors start here in later phases.
+    from . import stream_hub
+    from .collectors import binance as binance_collector
+    from .collectors.live_quotes import refresh_live_quotes, refresh_watched
+    from .collectors.scheduler import spawn_loop
+
+    binance_collector.start_stream()
+    spawn_loop("liveQuotes", 90, refresh_live_quotes)
+    spawn_loop("watchedPrice", 15, refresh_watched)
+    spawn_loop("binance", 30, binance_collector.refresh_binance)
+    spawn_loop("binanceApply", 10, lambda: _sync_apply(binance_collector))
+
+    async def heartbeat():
+        stream_hub.broadcast("heartbeat", {"at": int(time.time() * 1000)})
+
+    spawn_loop("streamHeartbeat", 25, heartbeat)
     try:
         yield
     finally:
