@@ -36,6 +36,8 @@ async def get_token(chain: str, address: str):
     samples = await s.samples(address, 288)
     trades = await s.recent_trades(address, 50)
     events = [e for e in await s.events(address, 50)][:50]
+    pools = [p for p in await s.all("pool") if p.get("token0", "").lower() == address or p.get("token1", "").lower() == address]
+    scan = await s.get("scan", address)
     day_ago = time.time() * 1000 - 86_400_000
     activity = await s.activity(address, day_ago)
 
@@ -47,7 +49,8 @@ async def get_token(chain: str, address: str):
         "trades": trades,
         "events": events,
         "samples": samples,
-        "pools": [],
+        "pools": pools,
+        "scan": scan,
         "activity": activity,
         "analysis": {
             "conclusion": "已核验股票配对" if verified else "尚未完成配对池核验。",

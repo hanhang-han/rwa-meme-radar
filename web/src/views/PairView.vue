@@ -42,6 +42,15 @@
               <span v-if="selected.feePct != null">{{ selected.feePct }}%</span>
             </div>
           </section>
+          <section v-if="memeDetail && (memeDetail.pools ?? []).length" class="panel">
+            <div class="panel-head">
+              <h2>{{ tr('流动性池分布', 'Liquidity pool distribution') }}</h2>
+            </div>
+            <div v-for="p in memeDetail.pools" :key="p.pool" class="v2-pool">
+              <p><a :href="explorer(p.pool, 'address', chain(asset))" target="_blank" rel="noopener">{{ short(p.pool) }}</a>
+                · {{ p.protocol }} · {{ usd(p.liquidityUsd) }} · {{ tr('核验', 'checked') }} {{ date(p.checkedAt) }}</p>
+            </div>
+          </section>
           <section v-if="stockDetail" class="panel">
             <div class="panel-head">
               <h2>{{ tr('股票价与代币价', 'Stock price vs token price') }}</h2>
