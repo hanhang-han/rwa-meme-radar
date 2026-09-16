@@ -12,6 +12,7 @@ import { recentActivity, fetchRadar, EventHistogram, RadarData, NewToken } from 
 import { matchStock, buildTickerSet } from "./lib/stocks";
 import { ts, tsHourly } from "./lib/timeseries";
 import { BSTOCKS, binanceBstockToken, binanceState, refreshBinanceBstocks } from "./lib/bstocks";
+import { startBinanceStream, applyBinanceLive } from "./lib/binance-ws";
 
 import { readSnapshot, writeSnapshot } from "./lib/snapshot";
 import { sampleRelationship, relationshipAnalytics, sectorAnalytics, saveRelationships } from "./lib/relationship-series";
@@ -24,6 +25,7 @@ import { refreshRobinhood, robinhoodState, robinhoodToken } from "./lib/robinhoo
 import { refreshMarketEnrichment } from "./lib/market-enrichment";
 import { aiEnabled, aiNarrate } from "./lib/ai";
 import { registryConfigured, registryInfo, syncRegistry } from "./lib/registry";
+import { candleSeries, CANDLE_BARS } from "./lib/candles";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 const require = createRequire(import.meta.url);
@@ -478,6 +480,8 @@ void loop("dashboard", 300_000, collectDashboard);
 void loop("marketEnrichment", 300_000, async () => refreshMarketEnrichment(dashboardState()));
 void loop("robinhood", 300_000, refreshRobinhood);
 void loop("bnb", 60_000, refreshBnb);
+startBinanceStream();
+void loop("binanceApply", 10_000, async () => { applyBinanceLive(); });
 void loop("binance", 30_000, refreshBinance);
 // Sub-minute price freshness for displayed assets; quota is enforced inside okxPost.
 void loop("liveQuotes", 90_000, refreshLiveQuotes);
@@ -697,6 +701,19 @@ void loop("aiBriefing", 30*60_000, async () => {
 // On-chain PairRegistry (X Layer 196): public read API + idempotent sync of
 // verified pairs. Unconfigured (no REGISTRY_CONTRACT) degrades to metadata only.
 app.get("/api/registry", async (c) => c.json(await registryInfo(xLayerState().relations)));
+// Real OHLCV candles from OKX DEX REST, cached per bar and persisted so
+// history extends beyond the API's recent window.
+app.get("/api/candles/:chain/:address", async (c) => {
+  const chain = c.req.param("chain"), address = c.req.param("address").toLowerCase();
+  const bar = c.req.query("bar") ?? "5m";
+  if (!CANDLE_BARS.includes(bar) || !["196", "56", "4663"].includes(chain) || !/^0x[\da-f]{40}$/.test(address)) return c.json({ error: "bad request" }, 400);
+  try {
+    const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 150) || 150, 30), 300);
+    return c.json(await candleSeries(chain, address, bar, limit));
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "upstream failed" }, 502);
+  }
+});
 void loop("registrySync", 600_000, async () => {
   if (!registryConfigured()) return;
   await syncRegistry(xLayerState().relations);

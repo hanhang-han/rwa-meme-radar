@@ -168,17 +168,64 @@
     }catch(error){if(location.hash.toLowerCase()==='#detail/'+chain+'/'+key)document.getElementById('memeDetail').innerHTML=`<section class="panel x-empty">${esc(error.message)}<p><a href="#meme">${tr('返回关系雷达','Back to Meme Radar')} →</a></p></section>`;}
     finally{detailPending.delete(cacheKey);}
   }
+  let chartMode='candle', chartBar='5m', chartFetching='';
+  const candleMem=new Map();
+  async function loadCandles(chain,address,bar,limit=180){
+    const key=address+':'+bar, now=Date.now(), hit=candleMem.get(key);
+    if(hit&&now-hit.at<20_000)return hit.rows;
+    if(chartFetching===key&&now-chartFetching.at<10_000)return hit?.rows??null;
+    try{
+      const r=await(await fetch('/api/candles/'+encodeURIComponent(chain)+'/'+encodeURIComponent(address)+'?bar='+bar+'&limit='+limit)).json();
+      if(!r||!Array.isArray(r.rows))return hit?.rows??null;
+      candleMem.set(key,{rows:r.rows,at:now});return r.rows;
+    }catch(e){return hit?.rows??null;}
+  }
+  function ensureChart(el){if(!detailChart||detailChart.isDisposed())detailChart=echarts.init(el);return detailChart;}
+  const candleOption=rows=>{
+    const last=rows[rows.length-1];
+    return {tooltip:{trigger:'axis',axisPointer:{type:'cross'},valueFormatter:v=>v==null?'—':Number(v).toLocaleString('en-US',{maximumFractionDigits:8})},
+      grid:[{left:70,right:20,top:15,height:'56%'},{left:70,right:20,top:'71%',height:'16%'}],
+      axisPointer:{link:[{xAxisIndex:'all'}]},
+      xAxis:[{type:'time',axisLabel:{color:'#91a0b5'}},{type:'time',gridIndex:1,axisLabel:{show:false}}],
+      yAxis:[{type:'value',scale:true,axisLabel:{color:'#91a0b5'},splitLine:{lineStyle:{color:'#253044'}}},{type:'value',gridIndex:1,axisLabel:{show:false},splitLine:{show:false}}],
+      dataZoom:[{type:'inside',xAxisIndex:[0,1]},{type:'slider',xAxisIndex:[0,1],height:12,bottom:2,borderColor:'#253044',fillerColor:'rgba(185,250,106,.08)'}],
+      series:[{type:'candlestick',data:rows.map(r=>[r.o,r.c,r.l,r.h]),itemStyle:{color:'#2dd4a7',color0:'#ff5d5d',borderColor:'#2dd4a7',borderColor0:'#ff5d5d'},
+        markLine:{symbol:'none',data:[{yAxis:last.c}],lineStyle:{color:'#b9fa6a',type:'dashed',width:1},label:{formatter:()=>usd(last.c),color:'#b9fa6a',position:'insideEndTop'}}},
+        {type:'bar',xAxisIndex:1,yAxisIndex:1,data:rows.map(r=>[r.t,r.vu??r.v]),itemStyle:{color:'rgba(96,125,159,.55)'}}]};
+  };
+  const lineOption=data=>({tooltip:{trigger:'axis'},grid:{left:70,right:20,top:20,bottom:35},xAxis:{type:'time',axisLabel:{color:'#91a0b5'}},yAxis:{type:'value',scale:true,axisLabel:{color:'#91a0b5'},splitLine:{lineStyle:{color:'#253044'}}},
+    series:[{type:'line',showSymbol:false,data,lineStyle:{color:'#b9fa6a'},areaStyle:{color:'rgba(185,250,106,.06)'}}]});
+  let lastPaintKey='';
+  async function paintChart(d,reset=false){
+    const a=d.asset, chain=a.chainId||a.chain||'196', el=document.getElementById('xPriceChart');
+    if(!el||!window.echarts)return;
+    const paintKey=chartMode+':'+chartBar;
+    if(paintKey!==lastPaintKey){reset=true;lastPaintKey=paintKey;}
+    document.querySelectorAll('#xChartTabs [data-chart-mode]').forEach(b=>b.classList.toggle('active',b.dataset.chartMode===chartMode));
+    document.querySelectorAll('#xChartTabs [data-chart-bar]').forEach(b=>b.classList.toggle('active',chartMode==='candle'&&b.dataset.chartBar===chartBar));
+    const hint=document.getElementById('xChartHint');
+    if(chartMode==='candle'){
+      let rows=await loadCandles(chain,a.token,chartBar);
+      if(rows&&rows.length){
+        if(a.price!=null){rows=[...rows];const i=rows.length-1;rows[i]={...rows[i],c:a.price,h:Math.max(rows[i].h,a.price),l:Math.min(rows[i].l,a.price)};}
+        if(hint)hint.textContent=(chartBar==='1m'?tr('1 分钟','1m'):chartBar==='1H'?tr('1 小时','1H'):chartBar+' ') + tr('K 线 · OKX DEX 真实成交 · 虚线为最新价','candles · real OKX DEX trades · dashed line marks the latest price');
+        ensureChart(el).resize();detailChart.setOption(candleOption(rows),{notMerge:reset});return;
+      }
+      if(d.samples.length>=2&&hint)hint.textContent=tr('暂无 K 线返回，显示 5 分钟采样线。','No candles returned yet; showing 5-minute sample line.');
+      else{if(hint)hint.textContent=tr('K 线与采样点暂缺，成交后自动出现。','Candles and samples pending; they appear after trades.');ensureChart(el).clear();return;}
+    } else if(hint) hint.textContent=tr('分时 · 5 分钟采样 + 最新价','Intraday · 5-minute samples plus the live price');
+    const data=d.samples.map(s=>[s.t,s.price]);
+    if(a.price!=null)data.push([Date.now(),a.price]);
+    if(data.length<2){ensureChart(el).clear();return;}
+    ensureChart(el).resize();detailChart.setOption(lineOption(data),{notMerge:reset});
+  }
   const tradeRow = (t,a) => `<tr><td>${date(t.t)}</td><td class="${t.type==='buy'?'up':'down'}">${t.type==='buy'?'买入':'卖出'}</td><td>${usd(t.volume)}</td><td>${usd(t.price)}</td><td>${esc(t.dex)}</td><td>${t.hash?`<a href="${explorer(t.hash,'tx',a.chainId||a.chain||'196')}" target="_blank" rel="noopener">${esc(short(t.hash))} ↗</a>`:'暂无交易哈希'}</td></tr>`;
   const tradeStat = (a,d) => a.tradeAt?`当前已保存最近 24h 内 ${d.activity.count} 笔：${d.activity.buys} 买 / ${d.activity.sells} 卖。采集范围从 ${date(a.oldestTradeAt)} 起；不是全历史统计。`:'成交采集排队中，缺失不表示零成交。';
   // Incremental refresh for the same asset: append chart points, slide in new
   // trades, flash the price KPI. The surrounding DOM is never rebuilt.
   function updateDetail(d) {
     const a=d.asset;
-    if(detailChart&&document.getElementById('xPriceChart')&&window.echarts){
-      const data=d.samples.map(s=>[s.t,s.price]);
-      if(a.price!=null)data.push([Date.now(),a.price]);
-      detailChart.setOption({series:[{data}]});
-    }
+    void paintChart(d);
     const tbody=document.getElementById('xTradeBody');
     if(tbody){
       const fresh=d.trades.filter(t=>!lastTradeIds.has(t.id));
@@ -213,19 +260,18 @@
       <div class="kpis">${kpi(tr('最新价格','Latest price'),usd(a.price),change(a.change24h)+' · 24h','data-kpi="price"')}${kpi(tr('24h 成交额','24h volume'),usd(a.volume24h),a.volumeScope==='exchange'?tr('场内行情统计','Exchange market statistics'):tr('已采集行情统计','Collected market statistics'))}${kpi(tr('24h 交易','24h trades'),num(a.txs24h),countText)}${kpi(tr('流动性','Liquidity'),usd(a.liquidity),num(a.holders)+' '+tr('持有人','holders'))}</div>
       <section class="panel x-verdict"><span class="eyebrow">RELATIONSHIP EVIDENCE</span><h2>${stock?tr('股票代币与关联资产','Stock token and related assets'):esc(d.analysis.conclusion)}</h2><p>${stock?tr('该股票代币已进入资产目录，下面展示已核验的配对关系。','This stock token is in the asset catalogue. Verified pair relationships appear below.'):tr('配对池和股票包装映射分别核验；名称匹配只作为发现起点。','Pair pools and wrapped-stock mappings are verified separately; name matching is only a discovery starting point.')}</p>
       ${relations.length?relations.map(r=>`<article class="x-proof"><div class="panel-head"><h3>${esc(r.ticker)} · ${r.wrapper?'包装股票配对':'直接股票配对'}</h3><span class="x-badge ${r.status==='verified'?'verified':'pending'}">${r.status==='verified'?'地址已核验':r.status==='invalid'?'证据变化':'复核失败'} · ${age(r.checkedAt)}</span></div><p>代币 <a href="${link(r.token,r.chainId||a.chainId||'196')}">${esc(short(r.token))}</a> → 池 <a href="${explorer(r.pool,'address',r.chainId||a.chainId||'196')}" target="_blank" rel="noopener">${esc(short(r.pool))}</a> → 股票侧 <a href="${explorer(r.stockSide,'address',r.chainId||a.chainId||'196')}" target="_blank" rel="noopener">${esc(short(r.stockSide))}</a>${r.wrapper?` → asset()/underlying() → <a href="${link(r.stock,r.chainId||a.chainId||'196')}">${esc(short(r.stock))}</a>`:''}</p><div class="x-coverage"><span>${esc(r.protocol)}</span><span>池总流动性 ${usd(r.liquidityUsd)}</span><span>核验区块 ${num(r.block)}</span></div><details><summary>查看完整地址与核验依据</summary><p>token0：<code>${esc(r.token0)}</code></p><p>token1：<code>${esc(r.token1)}</code></p><p>原始股票代币：<code>${esc(r.stock)}</code></p><p>股票侧余额（原始最小单位）：${esc(r.stockBalance??'未采集')}</p><p>链上地址读取 ${date(r.checkedAt)}；池流动性为最近查询估值，不能视为锁仓证明。</p></details></article>`).join(''):`<div class="x-empty">${a.match?`${esc(a.match.ticker)} 名称线索已保存。`:''}${d.scan?`已查询 ${d.scan.poolCount} 个高流动性池，状态 ${esc(d.scan.status)}。`:'尚未完成配对池核验。'}当前范围内暂无已核验股票关系。</div>`}</section>
-      <div class="x-grid"><section class="panel"><h2>价格观察 · 5 分钟采样</h2><p class="hint">自开始追踪起的价格快照。至少两个采样点后显示曲线。</p>${d.samples.length>=2?'<div id="xPriceChart" class="chart"></div>':`<div class="x-empty">已保存 ${d.samples.length} 个采样点，下一采样时段继续累积。</div>`}</section><section class="panel"><h2>股票背景与关联解读</h2><p class="hint">规则说明 · AI 模型尚未接入</p>${profile?`<h3>${esc(profile.companyName)}</h3><p>${esc(profile.exchange)} · ${esc(profile.industry)} · ${esc(profile.stockCode)}</p><p>发行方资料不代表与该 Meme 存在官方合作。</p>`:'<p>公司资料等待对应股票的背景信息返回。</p>'}<p>${esc(d.analysis.conclusion)}</p><p>${esc(d.analysis.correlation.reason)}</p><p>股票捕获率：${esc(d.analysis.capture.reason)}</p></section></div>
+      <div class="x-grid"><section class="panel"><div class="panel-head"><h2>${tr('价格走势','Price chart')}</h2><div class="tab-group" id="xChartTabs"><button class="tab" data-chart-mode="line">${tr('分时','Line')}</button><button class="tab" data-chart-mode="candle">${tr('K线','Candles')}</button>${chartMode==='candle'?['1m','5m','15m','1H'].map(b=>`<button class="tab" data-chart-bar="${b}">${b}</button>`).join(''):''}</div></div><div id="xPriceChart" class="chart x-candles"></div><p class="hint" id="xChartHint">${tr('K 线来自 OKX DEX 真实成交；采样线为本地 5 分钟快照。','Candles come from real OKX DEX trades; the line mode uses local 5-minute snapshots.')}</p></section><section class="panel"><h2>股票背景与关联解读</h2><p class="hint">规则说明 · AI 模型尚未接入</p>${profile?`<h3>${esc(profile.companyName)}</h3><p>${esc(profile.exchange)} · ${esc(profile.industry)} · ${esc(profile.stockCode)}</p><p>发行方资料不代表与该 Meme 存在官方合作。</p>`:'<p>公司资料等待对应股票的背景信息返回。</p>'}<p>${esc(d.analysis.conclusion)}</p><p>${esc(d.analysis.correlation.reason)}</p><p>股票捕获率：${esc(d.analysis.capture.reason)}</p></section></div>
       <section class="panel"><div class="panel-head"><h2>最近成交</h2><span class="hint">保存并按成交 ID 去重</span></div><p class="hint" id="xTradeStat">${tradeStat(a,d)}${a.gapDetected?' 检测到分页覆盖缺口，统计不完整。':''}</p>${d.trades.length?`<div class="scroll"><table class="tbl"><thead><tr><th>时间</th><th>方向</th><th>美元成交额</th><th>成交价</th><th>DEX</th><th>交易</th></tr></thead><tbody id="xTradeBody">${d.trades.map(t=>tradeRow(t,a)).join('')}</tbody></table></div>`:'<div class="x-empty">当前已保存范围内暂无成交记录。</div>'}</section>
       <div class="x-grid"><section class="panel"><h2>风险信息</h2>${a.risk?`<p>风险等级：${esc(a.risk.level)} / 5 · Top 10 持仓 ${a.risk.top10==null?'未提供':a.risk.top10+'%'}</p><p>${a.risk.tags.length?a.risk.tags.map(tag=>`<span class="x-badge">${esc(tag)}</span>`).join(' '):'此次响应未提供风险标签'}</p><p class="hint">检测时间 ${date(a.risk.checkedAt)}</p>`:'<p>风险数据尚未返回。</p>'}<p>${esc(d.analysis.safety)}</p></section><section class="panel"><h2>关系时间线</h2>${d.events.length?d.events.map(event=>`<p>${date(event.t)} · ${esc(event.label)}</p>`).join(''):'<p>等待首条关系核验事件；资产记录已持久保存。</p>'}</section></div>`;
     localizeRenderedText(document.getElementById('memeDetail'));
     lastTradeIds=new Set(d.trades.map(t=>t.id));lastPriceText=a.price!=null?usd(a.price):'';
-    if(d.samples.length>=2 && window.echarts) {
-      const data=d.samples.map(s=>[s.t,s.price]);
-      if(a.price!=null)data.push([Date.now(),a.price]);
-      detailChart=echarts.init(document.getElementById('xPriceChart'));
-      detailChart.setOption({tooltip:{trigger:'axis'},grid:{left:70,right:20,top:20,bottom:35},xAxis:{type:'time',axisLabel:{color:'#91a0b5'}},yAxis:{type:'value',scale:true,axisLabel:{color:'#91a0b5'},splitLine:{lineStyle:{color:'#253044'}}},series:[{type:'line',showSymbol:false,data,lineStyle:{color:'#b9fa6a'},areaStyle:{color:'rgba(185,250,106,.06)'}}]});
-    }
+    void paintChart(d,true);
   }
   document.addEventListener('click',event=>{
+    const cm=event.target.closest('[data-chart-mode]');
+    if(cm){const mode=cm.dataset.chartMode;if(mode!==chartMode){chartMode=mode;const tabs=document.getElementById('xChartTabs');if(tabs)tabs.outerHTML=`<div class="tab-group" id="xChartTabs"><button class="tab" data-chart-mode="line">${tr('分时','Line')}</button><button class="tab" data-chart-mode="candle">${tr('K线','Candles')}</button>${chartMode==='candle'?['1m','5m','15m','1H'].map(b=>`<button class="tab" data-chart-bar="${b}">${b}</button>`).join(''):''}</div>`;if(detailChart&&snapshot)detail( (location.hash.split('/')[2]||'').toLowerCase(), location.hash.split('/')[1]||'196' );}}
+    const cb=event.target.closest('[data-chart-bar]');
+    if(cb&&cb.dataset.chartBar!==chartBar){chartBar=cb.dataset.chartBar;if(detailChart&&snapshot)detail( (location.hash.split('/')[2]||'').toLowerCase(), location.hash.split('/')[1]||'196' );}
     const f=event.target.closest('[data-x-filter]');if(f){filter=f.dataset.xFilter;page=0;renderMeme();}
     const p=event.target.closest('[data-x-page]');if(p){page=Math.max(0,page+Number(p.dataset.xPage));renderMeme();}
     const sp=event.target.closest('[data-x-stock-page]');if(sp){stockPage=Math.max(0,stockPage+Number(sp.dataset.xStockPage));renderStocks();}

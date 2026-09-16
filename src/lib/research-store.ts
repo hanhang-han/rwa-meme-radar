@@ -13,6 +13,9 @@ export class ResearchStore {
       CREATE TABLE IF NOT EXISTS samples (asset TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, cap REAL, PRIMARY KEY(asset,t));
       CREATE TABLE IF NOT EXISTS trades (asset TEXT NOT NULL,id TEXT NOT NULL,t INTEGER NOT NULL,body TEXT NOT NULL,PRIMARY KEY(asset,id));
       CREATE INDEX IF NOT EXISTS trades_time ON trades(asset,t);
+      CREATE TABLE IF NOT EXISTS candles (asset TEXT NOT NULL, bar TEXT NOT NULL, openTime INTEGER NOT NULL,
+        open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL,
+        volume REAL, volumeUsd REAL, confirmed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(asset,bar,openTime));
       CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, asset TEXT NOT NULL,t INTEGER NOT NULL,body TEXT NOT NULL);`);
     // Version 1 records belong to X Layer. Migrate all identities atomically;
     // the JSON bodies and original observation timestamps remain unchanged.
@@ -51,6 +54,19 @@ export class ResearchStore {
   }
   samples(asset: string, limit = 288): {t:number;price:number;cap:number|null}[] {
     return this.db.prepare('SELECT t,price,cap FROM samples WHERE asset=? ORDER BY t DESC LIMIT ?').all(this.key(asset), limit).reverse() as any;
+  }
+  candles(asset: string, bar: string, rows: { t:number;o:number;h:number;l:number;c:number;v:number|null;vu:number|null;confirmed:boolean }[]) {
+    const upsert = this.db.prepare(`INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(asset,bar,openTime) DO UPDATE SET open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,volume=excluded.volume,volumeUsd=excluded.volumeUsd,confirmed=excluded.confirmed`);
+    this.db.exec('BEGIN');
+    try {
+      for (const r of rows) upsert.run(this.key(asset), bar, r.t, r.o, r.h, r.l, r.c, r.v, r.vu, r.confirmed ? 1 : 0);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  candleRange(asset: string, bar: string, limit = 300) {
+    return this.db.prepare('SELECT openTime t,open o,high h,low l,close c,volume v,volumeUsd vu,confirmed FROM candles WHERE asset=? AND bar=? ORDER BY openTime DESC LIMIT ?')
+      .all(this.key(asset), bar, limit).reverse().map((r:any) => ({ ...r, confirmed: !!r.confirmed }));
   }
   hasTrade(asset: string, id: string) { return !!this.db.prepare('SELECT 1 FROM trades WHERE asset=? AND id=?').get(this.key(asset),id); }
   trades(asset: string, rows: any[]) {

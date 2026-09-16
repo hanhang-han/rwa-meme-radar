@@ -368,3 +368,7 @@ body { max-width:1600px; margin:auto; }
 tr.trade-new > td { animation: v2-trade-in 2s ease-out; }
 @keyframes v2-kpi-flash { 0% { color: var(--accent); } 100% { color: inherit; } }
 .kpi-flash { animation: v2-kpi-flash 1.2s ease-out; }
+
+/* Candlestick view needs room for the volume pane. */
+.chart.x-candles { height: 380px; }
+#xChartTabs .tab { padding: 4px 10px; }
