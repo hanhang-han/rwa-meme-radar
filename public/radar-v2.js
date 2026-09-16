@@ -328,6 +328,63 @@ function proof(r,hideLink=false){return `<article class="x-proof"><div class="pa
     });
     lastKpiVals=kn;
   }
+  // SSE client over fetch-streaming: nginx sub_filter rewrites fetch('/api/'
+  // literals but not EventSource URLs, so read the stream manually. Polling
+  // remains the fallback whenever the stream is down.
+  function handleStreamEvent(event,raw){
+    let d;try{d=JSON.parse(raw);}catch{return;}
+    if(event==='price'&&d.token&&d.price!=null){
+      const a=(feed.assets??[]).find(x=>x.token===d.token&&String(x.chainId??x.chain)==='196');
+      if(a){a.price=d.price;a.fieldTimes={...(a.fieldTimes||{}),price:d.at};}
+      if(lastDetail&&lastDetail.asset?.token===d.token){
+        lastDetail.asset.price=d.price;
+        const priceEl=document.querySelector('#memeDetail [data-kpi="price"] .kpi-value');
+        if(priceEl){const t=usd(d.price);if(t!==lastPriceText){priceEl.textContent=t;priceEl.classList.remove('kpi-flash');void priceEl.offsetWidth;priceEl.classList.add('kpi-flash');}lastPriceText=t;}
+        void paintDetailChart(lastDetail);
+      }
+      if(a)document.querySelectorAll(`tr[data-asset="${d.token}"] td[data-field="price"]`).forEach(td=>{
+        const before=td.textContent;td.innerHTML=field(a,'price',true);
+        if(td.textContent!==before){td.classList.remove('kpi-flash');void td.offsetWidth;td.classList.add('kpi-flash');}
+      });
+    }else if(event==='trade'&&d.token&&Array.isArray(d.fresh)){
+      if(lastDetail&&lastDetail.asset?.token===d.token){
+        const a=lastDetail.asset,tbody=document.getElementById('v2TradeBody');
+        if(tbody){
+          const unseen=d.fresh.filter(t=>!lastTradeIds.has(t.id));
+          if(unseen.length){
+            tbody.insertAdjacentHTML('afterbegin',unseen.map(t=>`<tr class="trade-new">${tradeRow(t,a).slice(3)}`).join(''));
+            while(tbody.children.length>150)tbody.lastElementChild.remove();
+            unseen.forEach(t=>lastTradeIds.add(t.id));
+          }
+        }
+      }
+    }
+  }
+  async function connectStream(){
+    for(;;){
+      try{
+        const res=await fetch('/api/stream');
+        if(!res.ok||!res.body)throw new Error('stream unavailable');
+        const reader=res.body.getReader(),dec=new TextDecoder();let buf='';
+        for(;;){
+          const {done,value}=await reader.read();
+          if(done)break;
+          buf+=dec.decode(value,{stream:true});
+          let idx;
+          while((idx=buf.indexOf('\n\n'))>=0){
+            const frame=buf.slice(0,idx);buf=buf.slice(idx+2);
+            let event='message',data='';
+            for(const line of frame.split('\n')){
+              if(line.startsWith('event:'))event=line.slice(6).trim();
+              else if(line.startsWith('data:'))data+=line.slice(5).trim();
+            }
+            if(data&&event!=='heartbeat')handleStreamEvent(event,data);
+          }
+        }
+      }catch(e){/* stream down; polling keeps the page live */}
+      await new Promise(r=>setTimeout(r,5000));
+    }
+  }
   function render(data){if(!data)return;loadRegistry();snapshot=data;feed=data.unified??data.xlayer??{};const byId=new Map((feed.assets??[]).map(a=>[key(a),a]));feed={...feed,groups:(feed.groups??[]).map(g=>({...g,members:g.members.map(a=>typeof a==='string'?byId.get(a):a).filter(Boolean)}))};summarySources();
     for(const id of ['meme','stock']){const h=document.querySelector('#view-'+id+' > .page-heading h2');if(h&&!h.querySelector('[data-help]'))h.insertAdjacentHTML('beforeend',' '+help(id));}trackListHash();setTimeout(fillAI,0);
     if(openHelp&&helpLanguage!==tr('zh','en'))showHelp(openHelp);
@@ -379,5 +436,6 @@ function proof(r,hideLink=false){return `<article class="x-proof"><div class="pa
   document.addEventListener('keydown',e=>{if(!openHelp)return;if(e.key==='Escape'){e.preventDefault();closeHelp();}else if(e.key==='Tab'){e.preventDefault();document.querySelector('#v2HelpDialog [data-help-close]').focus();}});
   document.addEventListener('error',e=>{if(e.target.matches?.('img.v2-logo')){const span=document.createElement('span');span.className='v2-logo placeholder';span.textContent='•';e.target.replaceWith(span);}},true);
   window.addEventListener('resize',()=>{charts.forEach(c=>c.resize());if(detailChart&&detailChartEl){try{detailChart.resize(detailChartEl.clientWidth||600,detailChartEl.clientHeight||380);}catch(e){}}});
+  void connectStream();
   window.RadarV2={render,marketKey:key};
 })();

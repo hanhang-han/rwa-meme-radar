@@ -20,13 +20,14 @@ import { sampleRelationship, relationshipAnalytics, sectorAnalytics, saveRelatio
 import { verifyDirectPools, Verification } from "./lib/verification";
 import { okxState, refreshOkx } from "./lib/okx";
 import { assessRelation, relationTypes } from "./lib/relations";
-import { refreshXLayer, refreshLiveQuotes, refreshSideQuotes, refreshAssetOnDemand, xLayerState, xLayerDetail } from "./lib/xlayer";
+import { refreshXLayer, refreshLiveQuotes, refreshSideQuotes, refreshAssetOnDemand, refreshWatched, xLayerState, xLayerDetail } from "./lib/xlayer";
 import { unifiedFromXLayer } from "./lib/unified-state";
 import { refreshRobinhood, robinhoodState, robinhoodToken } from "./lib/robinhood";
 import { refreshMarketEnrichment } from "./lib/market-enrichment";
 import { aiEnabled, aiNarrate } from "./lib/ai";
 import { registryConfigured, registryInfo, syncRegistry } from "./lib/registry";
 import { candleSeries, CANDLE_BARS } from "./lib/candles";
+import { streamClients } from "./lib/stream";
 
 if (existsSync(".env")) process.loadEnvFile(".env");
 const require = createRequire(import.meta.url);
@@ -486,6 +487,8 @@ void loop("binanceApply", 10_000, async () => { applyBinanceLive(); });
 void loop("binance", 30_000, refreshBinance);
 // Sub-minute price freshness for displayed assets; quota is enforced inside okxPost.
 void loop("liveQuotes", 90_000, refreshLiveQuotes);
+// Detail-page assets: on-chain reserve read every 15s, no OKX quota.
+void loop("watchedPrice", 15_000, refreshWatched);
 void loop("sideQuotes", 300_000, refreshSideQuotes);
 void loop("assets", 600_000, refreshAssets);
 void loop("oracles", 30_000, refreshOracles);
@@ -705,6 +708,21 @@ void loop("aiBriefing", 30*60_000, async () => {
 // On-chain PairRegistry (X Layer 196): public read API + idempotent sync of
 // verified pairs. Unconfigured (no REGISTRY_CONTRACT) degrades to metadata only.
 app.get("/api/registry", async (c) => c.json(await registryInfo(xLayerState().relations)));
+// Server-sent events: price/trade/briefing deltas plus a heartbeat. The
+// frontend falls back to polling whenever this stream is unavailable.
+app.get("/api/stream", (c) => {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamClients().add(controller);
+      try { controller.enqueue(new TextEncoder().encode(`event: hello\ndata: ${JSON.stringify({ at: Date.now() })}\n\n`)); } catch { /* closing */ }
+    },
+    cancel(controller) { streamClients().delete(controller); },
+  });
+  return c.body(stream, 200, {
+    "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no", "Connection": "keep-alive",
+  });
+});
 // Real OHLCV candles from OKX DEX REST, cached per bar and persisted so
 // history extends beyond the API's recent window.
 app.get("/api/candles/:chain/:address", async (c) => {
@@ -717,6 +735,10 @@ app.get("/api/candles/:chain/:address", async (c) => {
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : "upstream failed" }, 502);
   }
+});
+void loop("streamHeartbeat", 25_000, async () => {
+  const { broadcastStream } = await import("./lib/stream");
+  broadcastStream("heartbeat", { at: Date.now() });
 });
 void loop("registrySync", 600_000, async () => {
   if (!registryConfigured()) return;

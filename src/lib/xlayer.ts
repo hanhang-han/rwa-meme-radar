@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { okxGet, okxPost, withRequestAllowance } from './okx-client';
 import { numeric, okxState, type RwaToken } from './okx';
+import { broadcastStream } from './stream';
 import { ResearchStore } from './research-store';
 import { matchStock, buildTickerSet } from './stocks';
 import { sectors, basketIndex } from './analytics';
@@ -195,15 +196,17 @@ export function normalizeTrade(row:any, token:string) {
     user:addr(row.userAddress),hash:/^0x[\da-f]{64}$/i.test(row.txHashUrl)?row.txHashUrl:null,
     dex:String(row.dexName??''),source:'OKX trades',providerFiltered:String(row.isFiltered??'0')!=='0'};
 }
-export async function refreshTrades(asset:XAsset) {
+export async function refreshTrades(asset:XAsset): Promise<any[]> {
   // Incremental pagination stops at a stored ID. Keep explicit gaps when the
   // bounded batch cannot bridge to the last scan; never claim full history.
   let after='', reached=false, oldest=Date.now(), lastCursor='';
+  const fresh: any[] = [];
   for(let page=0;page<3;page++) {
     const data=await okxGet('/api/v6/dex/market/trades',{chainIndex:chainId(),tokenContractAddress:asset.token,limit:'100',...(after?{after}:{})});
     if (!Array.isArray(data)) throw new Error('Invalid trades response');
     const normalized=data.map(r=>normalizeTrade(r,asset.token)).filter(Boolean) as any[];
     if (normalized.some(r=>db().hasTrade(asset.token,r.id))) reached=true;
+    if(page===0)for(const r of normalized)if(!db().hasTrade(asset.token,r.id))fresh.push(r);
     db().trades(asset.token,normalized);
     for(const row of normalized) oldest=Math.min(oldest,row.t);
     if(data.length<100) reached=true;
@@ -234,6 +237,7 @@ export async function refreshTrades(asset:XAsset) {
   asset.tradeCoverage=asset.gapDetected?'partial-gap': 'observed';
   asset.tradeCursor=lastCursor;asset.tradeAt=Date.now();asset.error=null;
   db().put('asset',asset.token,asset);
+  return fresh;
 }
 
 // Tokens OKX no longer prices would otherwise dominate every oldest-first
@@ -263,6 +267,7 @@ export async function refreshQuotes(assets:XAsset[]) {
         const mapped={...row};
         for(const [raw,target] of [['volume24H','volume'],['txs24H','txs'],['priceChange24H','change']])if(Object.hasOwn(row,raw))mapped[target]=row[raw];
         const updated=saveAsset(mapped);
+        if(updated&&updated.price!==(old?.price??null)){rebaseWatch(updated.token,updated.price);broadcastStream('price',{chainId:chainId(),token:updated.token,price:updated.price,change24h:updated.change24h??null,at:Date.now()});}
         if(updated) db().put('quote-time',updated.token,{at:numeric(row.time)??Date.now()});
       }
     } catch (e) {
@@ -276,11 +281,61 @@ export async function refreshQuotes(assets:XAsset[]) {
 // Detail views drive their own collection: refresh trades for the asset a
 // user is watching so the activity feed keeps rolling between scan rounds.
 export async function refreshAssetOnDemand(address:string){
+  watchAsset(address);
   await inNetwork('196', okxState, async () => {
     const asset=db().get<XAsset>('asset',address);
     if(!asset||asset.kind!=='candidate')return;
     if(asset.tradeAt&&Date.now()-asset.tradeAt<45_000)return;
-    try{await refreshTrades(asset);}catch(e){console.error('[ondemand]',e instanceof Error?e.message:e);}
+    try{
+      const fresh=await refreshTrades(asset);
+      if(fresh.length)broadcastStream('trade',{chainId:chainId(),token:address,fresh});
+    }catch(e){console.error('[ondemand]',e instanceof Error?e.message:e);}
+  });
+}
+
+// Watched assets (detail pages) get their price straight from the pair
+// pool's reserves over the public RPC: no OKX quota, ~15s cadence. The
+// reserve ratio is anchored to the latest OKX quote and moves the price by
+// the ratio delta, so no stock price or decimals lookup is required.
+const watched=new Map<string,number>();
+export function watchAsset(token:string){watched.set(token.toLowerCase(),Date.now());}
+const watchBase=new Map<string,{price:number;mr:number;sr:number}>();
+export function rebaseWatch(token:string,price:number|null){const b=watchBase.get(token);if(b&&price!=null)b.price=price;}
+export async function refreshWatched(){
+  const now=Date.now();
+  for(const [t,at] of [...watched])if(now-at>60_000)watched.delete(t);
+  if(!watched.size)return;
+  await inNetwork('196', okxState, async () => {
+    for(const token of [...watched.keys()]){
+      const asset=db().get<XAsset>('asset',token);if(!asset)continue;
+      const rel=db().all<XRelation>('relation').filter(r=>r.token===token&&r.status==='verified').sort((a,b)=>b.checkedAt-a.checkedAt)[0];
+      if(!rel)continue;
+      try{
+        const raw=await xRpc('eth_call',[{to:rel.pool,data:'0x0902f1ac'},'latest']);
+        if(raw==='0x'||raw.length<130)continue;
+        const r0=BigInt('0x'+raw.slice(2,66)),r1=BigInt('0x'+raw.slice(66,130));
+        if(!r0||!r1)continue;
+        const memeIs0=rel.token0.toLowerCase()===token;
+        const memeReserve=Number(memeIs0?r0:r1),stockReserve=Number(memeIs0?r1:r0);
+        if(!memeReserve||!stockReserve)continue;
+        let base=watchBase.get(token);
+        if(!base){
+          watchBase.set(token,{price:asset.price??0,mr:memeReserve,sr:stockReserve});
+          continue;
+        }
+        if(!base.price||base.mr<=0){base.price=asset.price??base.price;base.mr=memeReserve;base.sr=stockReserve;continue;}
+        const ratio=stockReserve/memeReserve,ratioBase=base.sr/base.mr;
+        if(!(ratio>0)||!(ratioBase>0))continue;
+        const price=base.price*(ratio/ratioBase);
+        if(!Number.isFinite(price)||price<=0)continue;
+        base.mr=memeReserve;base.sr=stockReserve;
+        const old=db().get<XAsset>('asset',token);
+        const updated=saveAsset({tokenContractAddress:token,price,time:Date.now()});
+        if(updated&&updated.price!==(old?.price??null)){
+          broadcastStream('price',{chainId:chainId(),token,price:updated.price,change24h:updated.change24h??null,at:Date.now()});
+        }
+      }catch{/* pool read failed; liveQuotes remains the fallback */}
+    }
   });
 }
 
