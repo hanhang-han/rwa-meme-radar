@@ -21,7 +21,7 @@
   const explorer=(address,c,type='address')=>(c==='4663'?'https://robinhoodchain.blockscout.com':c==='56'?'https://www.oklink.com/bsc':'https://www.oklink.com/xlayer')+'/'+type+'/'+encodeURIComponent(address);
   const okxLink=a=>'https://web3.okx.com/token/'+({'196':'x-layer','56':'bsc','4663':'robinhood-chain'}[chain(a)])+'/'+encodeURIComponent(a.token);
   const empty=text=>`<div class="x-empty">${text}</div>`;
-  const card=(title,value,note,href)=>`<div class="kpi"><span class="kpi-label">${title}</span>${href?`<a href="${esc(href)}" class="kpi-value mono">${value}</a>`:`<strong class="kpi-value mono">${value}</strong>`}<span class="kpi-note">${note??''}</span></div>`;
+  const card=(title,value,note,href,attrs='')=>`<div class="kpi" ${attrs}><span class="kpi-label">${title}</span>${href?`<a href="${esc(href)}" class="kpi-value mono">${value}</a>`:`<strong class="kpi-value mono">${value}</strong>`}<span class="kpi-note">${note??''}</span></div>`;
   const docs={
     overview:['总览帮助你从最新线索和已核验关系中选择下一步查看的资产。数字只代表本站已发现的覆盖范围；进入 Meme 雷达查看资产，进入配对分析检查证据。','Overview helps you choose assets from recent leads and verified relationships. Counts describe this product’s discovered coverage. Use Meme Radar for assets and Pair Analysis for evidence.'],
     meme:['比较股票相关 Meme。重点关系要求核验有效且池流动性新鲜、至少 1,000 美元；名称候选只有名称线索。同名合约分别保存，可搜索、筛选、排序并进入详情。','Compare stock-related Memes. Priority requires current verification and fresh pool liquidity of at least $1,000; name leads only have naming evidence. Each contract retains its own record. Search, filter, sort and open details.'],
@@ -181,12 +181,95 @@
 async function loadRegistry(){if(registryState&&Date.now()-registryAt<60000)return;try{const r=await(await fetch('/api/registry')).json();registryState=r;registryAt=Date.now();const f=document.querySelector('footer');if(f&&r&&r.configured&&r.contract){let b=f.querySelector('#v2RegistryFooter');if(!b){b=document.createElement('span');b.id='v2RegistryFooter';f.append(' · ',b);}b.innerHTML=`<a href="${r.explorer}" target="_blank" rel="noopener">PairRegistry (X Layer) ${r.contract.slice(0,8)}…${r.contract.slice(-4)} ↗</a> · ${Number(r.onchainCount)} pairs`;}}catch(e){}}
 function registryBadge(r){const s=registryState;if(!s||!s.configured||!s.contract)return '';const hit=(s.pairs||[]).find(p=>p.meme===String(r.token||'').toLowerCase()&&p.stock===String(r.stock||'').toLowerCase());if(!hit)return '';const short=s.contract.slice(0,10)+'…'+s.contract.slice(-6);return `<p>⛓ ${tr('链上登记','On-chain registry')} ✓ · <a href="${s.explorer}" target="_blank" rel="noopener">${short} ↗</a> · ${date(hit.registeredAt*1000)}</p>`;}
 function proof(r,hideLink=false){return `<article class="x-proof"><div class="panel-head"><h3>${esc(r.ticker)} · ${status(r)}</h3>${hideLink?'':`<a href="${pairLink(r)}">${tr('交易池分析','Pool analysis')} →</a>`}</div><p>${chainNames[chain(r)]} · ${esc(r.protocol)} · ${tr('核验区块','Verified block')} ${num(r.block)} · ${date(r.checkedAt)}</p><p><a href="${explorer(r.pool,chain(r))}" target="_blank" rel="noopener">${tr('池地址','Pool')} ${esc(r.pool)} ↗</a></p><p>${tr('池流动性','Pool liquidity')} ${usd(r.liquidityUsd)} · ${esc(r.liquidityProvider??'OKX')} · ${age(r.liquidityAt)}</p>${registryBadge(r)}<details><summary>${tr('查看交易池双方合约','View both pool contracts')}</summary><p>token0: <code>${esc(r.token0)}</code></p><p>token1: <code>${esc(r.token1)}</code></p><p>${r.wrapper?tr('已核验包装映射','Verified wrapper mapping'):tr('直接配对','Direct pair')}: <code>${esc(r.stockSide)}</code> → <code>${esc(r.stock)}</code></p></details></article>`;}
+  let detailChart=null,chartMode='candle',chartBar='5m',lastPaintKey='',lastDetail=null,lastTradeIds=new Set(),lastPriceText='';
+  const candleMem=new Map();
+  const tradeRow=(t,a)=>`<tr><td>${date(t.t)}</td><td>${t.type==='buy'?tr('买入','Buy'):tr('卖出','Sell')}</td><td>${usd(t.volume)}</td><td>${esc(t.dex)}</td><td>${t.hash?`<a href="${explorer(t.hash,chain(a),'tx')}" target="_blank" rel="noopener">${short(t.hash)} ↗</a>`:tr('未提供哈希','Hash unavailable')}</td></tr>`;
+  const tradeStatText=a=>a.tradeAt?tr('已保存范围内的成交，可能存在分页缺口，不代表完整历史。','Trades in the saved coverage may have pagination gaps; this is not complete history.'):tr('成交采集排队中，缺失不表示零成交。','Trade collection is queued; missing data does not mean zero trades.');
+  async function loadCandles(cid,address,bar,limit=180){
+    const key=address+':'+bar,now=Date.now(),hit=candleMem.get(key);
+    if(hit&&now-hit.at<20_000)return hit.rows;
+    try{
+      const r=await(await fetch('/api/candles/'+encodeURIComponent(cid)+'/'+encodeURIComponent(address)+'?bar='+bar+'&limit='+limit)).json();
+      if(!r||!Array.isArray(r.rows))return hit?.rows??null;
+      candleMem.set(key,{rows:r.rows,at:now});return r.rows;
+    }catch(e){return hit?.rows??null;}
+  }
+  const chartDead=c=>!c||(typeof c.isDisposed==='function'&&c.isDisposed());
+  function ensureDetailChart(el){if(!window.echarts)return null;if(chartDead(detailChart)){detailChart=echarts.init(el);charts.push(detailChart);}return detailChart;}
+  const fmtAxis=v=>{const d=new Date(v),p=n=>String(n).padStart(2,'0');return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;};
+  // Candlestick does not paint on a time axis in this echarts build; the
+  // classic category-axis form is used with timestamp categories.
+  const candleOption=rows=>{
+    const last=rows[rows.length-1],times=rows.map(r=>r.t);
+    return {tooltip:{trigger:'axis',axisPointer:{type:'cross'},valueFormatter:v=>v==null?'—':Number(v).toLocaleString('en-US',{maximumFractionDigits:8})},
+      grid:[{left:65,right:20,top:15,height:'56%'},{left:65,right:20,top:'71%',height:'16%'}],
+      axisPointer:{link:[{xAxisIndex:'all'}]},
+      xAxis:[{type:'category',data:times,axisLabel:{formatter:fmtAxis}},{type:'category',gridIndex:1,data:times,axisLabel:{show:false}}],
+      yAxis:[{type:'value',scale:true},{type:'value',gridIndex:1,axisLabel:{show:false},splitLine:{show:false}}],
+      dataZoom:[{type:'inside',xAxisIndex:[0,1]},{type:'slider',xAxisIndex:[0,1],height:12,bottom:2}],
+      series:[{type:'candlestick',data:rows.map(r=>[r.o,r.c,r.l,r.h]),itemStyle:{color:'#2dd4a7',color0:'#ff5d5d',borderColor:'#2dd4a7',borderColor0:'#ff5d5d'},
+        markLine:{symbol:'none',data:[{yAxis:last.c}],lineStyle:{color:'#b9fa6a',type:'dashed',width:1},label:{formatter:()=>usd(last.c),color:'#b9fa6a',position:'insideEndTop'}}},
+        {type:'bar',xAxisIndex:1,yAxisIndex:1,data:rows.map(r=>[r.t,r.vu??r.v]),itemStyle:{color:'rgba(96,125,159,.55)'}}]};
+  };
+  const lineOption=data=>({tooltip:{trigger:'axis'},grid:{left:65,right:20,top:20,bottom:30},xAxis:{type:'time'},yAxis:{type:'value',scale:true},
+    series:[{name:tr('美元价格','USD price'),type:'line',showSymbol:false,connectNulls:false,data,lineStyle:{color:'#b9fa6a'},areaStyle:{color:'rgba(185,250,106,.06)'}}]});
+  function syncChartTabs(){
+    document.querySelectorAll('#v2ChartTabs [data-chart-mode]').forEach(b=>b.classList.toggle('active',b.dataset.chartMode===chartMode));
+    const grp=document.getElementById('v2ChartTabs');if(!grp)return;
+    const have=[...grp.querySelectorAll('[data-chart-bar]')];
+    if(chartMode==='candle'&&!have.length){['1m','5m','15m','1H'].forEach(b=>{const btn=document.createElement('button');btn.className='tab';btn.dataset.chartBar=b;btn.textContent=b;grp.append(btn);});}
+    if(chartMode!=='candle'&&have.length)have.forEach(b=>b.remove());
+    grp.querySelectorAll('[data-chart-bar]').forEach(b=>b.classList.toggle('active',chartMode==='candle'&&b.dataset.chartBar===chartBar));
+  }
+  async function paintDetailChart(d,reset=false){
+    const a=d.asset??{},cid=chain(a),el=document.getElementById('v2Price');
+    if(!el||!window.echarts)return;
+    const paintKey=chartMode+':'+chartBar;
+    if(paintKey!==lastPaintKey){reset=true;lastPaintKey=paintKey;}
+    syncChartTabs();
+    const hint=document.getElementById('v2ChartHint');
+    if(chartMode==='candle'){
+      let rows=await loadCandles(cid,a.token,chartBar);
+      if(rows&&rows.length){
+        if(a.price!=null){rows=[...rows];const i=rows.length-1;rows[i]={...rows[i],c:a.price,h:Math.max(rows[i].h,a.price),l:Math.min(rows[i].l,a.price)};}
+        if(hint)hint.textContent=(chartBar==='1m'?tr('1 分钟','1m'):chartBar==='1H'?tr('1 小时','1H'):chartBar+' ')+tr('K 线 · OKX DEX 真实成交 · 虚线为最新价','candles · real OKX DEX trades · dashed line marks the latest price');
+        const ch=ensureDetailChart(el);if(ch){ch.resize();ch.setOption(candleOption(rows),{notMerge:reset});}return;
+      }
+      if((d.samples??[]).length>=2&&hint)hint.textContent=tr('暂无 K 线返回，显示 5 分钟采样线。','No candles returned yet; showing the 5-minute sample line.');
+      else if(hint){hint.textContent=tr('K 线与采样点暂缺，成交后自动出现。','Candles and samples are pending; they appear after trades.');const ch=ensureDetailChart(el);if(ch)ch.clear();return;}
+    }else if(hint)hint.textContent=tr('分时 · 5 分钟采样 + 最新价','Intraday · 5-minute samples plus the live price');
+    const data=(d.samples??[]).map(p=>[p.t,p.price]);
+    if(a.price!=null)data.push([Date.now(),a.price]);
+    if(data.length<2){const ch=ensureDetailChart(el);if(ch)ch.clear();return;}
+    const ch=ensureDetailChart(el);if(ch){ch.resize();ch.setOption(lineOption(data),{notMerge:reset});}
+  }
+  function updateDetailIncremental(d){
+    const a=d.asset??{};
+    void paintDetailChart(d);
+    const tbody=document.getElementById('v2TradeBody');
+    if(tbody){
+      const fresh=(d.trades??[]).filter(t=>!lastTradeIds.has(t.id));
+      if(fresh.length){
+        tbody.insertAdjacentHTML('afterbegin',fresh.map(t=>`<tr class="trade-new">${tradeRow(t,a).slice(3)}`).join(''));
+        while(tbody.children.length>150)tbody.lastElementChild.remove();
+      }
+    }
+    (d.trades??[]).forEach(t=>lastTradeIds.add(t.id));
+    const stat=document.getElementById('v2TradeStat');
+    if(stat&&a.tradeAt)stat.textContent=tradeStatText(a);
+    const priceEl=document.querySelector('#memeDetail [data-kpi="price"] .kpi-value');
+    if(priceEl&&a.price!=null){
+      const text=usd(a.price);
+      if(text!==lastPriceText){priceEl.textContent=text;priceEl.classList.remove('kpi-flash');void priceEl.offsetWidth;priceEl.classList.add('kpi-flash');}
+      lastPriceText=text;
+    }
+  }
   function detailPage(d){
     const a=d.asset??{},rs=d.relations??[];
     return `<div class="page-heading"><a href="${lastListHash}">← ${tr('返回列表','Back to list')}</a><h2>${logo(a)} ${esc(a.symbol)} <span class="x-badge">${chainNames[chain(a)]}</span> ${help('detail')}</h2><p>${esc(a.name)} · ${tr('本站首次收录','First listed')} ${date(a.firstSeen)}</p></div><section class="panel"><div class="address-row"><code>${esc(a.token)}</code><button data-copy="${esc(a.token)}">${tr('复制合约地址','Copy contract')}</button><a href="${explorer(a.token,chain(a))}" target="_blank" rel="noopener">${tr('区块浏览器','Block explorer')} ↗</a><a href="${okxLink(a)}" target="_blank" rel="noopener">${tr('在 OKX 查看资产','View asset on OKX')} ↗</a></div><p>${tr('来源','Source')} ${esc(a.provider??'OKX')} · ${age(a.updatedAt)}${a.error?' · '+tr('部分采集失败，历史保留','Partial collection failure; history retained'):''}</p></section><section class="panel x-verdict"><h2>${rs.some(r=>r.status==='verified')?tr('已确认的股票配对','Confirmed stock pair'):a.kind==='stock'?tr('已收录股票代币','Stock token catalogued'):(rs.length||a.match)?tr('关系待核实','Relationship pending verification'):tr('与股票无关 · 全市场发现候选','Unrelated to stocks · market-wide discovery')}</h2><p>${tr('依据同链双方合约与股票目录核验。配对不代表官方关系或安全认证。','Verified against both contracts and a same-chain stock catalogue. Pairing does not certify affiliation or safety.')}</p>${rs.map(proof).join('')||empty(a.match?tr('名称线索已保存，尚无资金关系证据。','Name lead saved; no capital relationship has been verified.'):tr('该资产来自全市场热门扫描，目前没有与任何股票的名称匹配或配对池记录。','Discovered by market-wide hot scanning; no stock name match or pair-pool record exists.'))}${!rs.some(r=>r.status==='verified')&&a.kind!=='stock'?`<p class="hint">${tr('想看与股票有真实配对的资产？','Looking for assets with real stock pairs?')} <a href="#meme?filter=related">${tr('Meme 雷达 · 重点关系','Meme Radar · priority relations')} →</a> · <a href="#pair">${tr('交易池分析','Pool analysis')}</a></p>`:''}</section><section class="panel x-ai"><h2>${tr('数据解读','Data readout')}</h2><p class="hint">${tr('由 DeepSeek 基于本站已采集字段生成，只解读已有数据，不预测价格。','Generated by DeepSeek from collected fields only; no price forecasts.')}</p><div class="v2-ai-text" id="v2Insight" data-chain="${chain(a)}" data-token="${esc(a.token)}"></div></section>
-      <div class="kpis">${card(tip('price',tr('最新价格','Latest price')),field(a,'price',true),age(a.fieldTimes?.price??a.updatedAt))}${card(tip('volume',tr('24h 成交额','24h volume')),field(a,'volume24h',true),a.volumeScope==='exchange'?tr('场内统计','Exchange statistics'):'DEX')}${card(tip('trades',tr('24h 成交次数','24h trades')),(a.buys24h!=null&&a.sells24h!=null)?num((a.buys24h??0)+(a.sells24h??0)):field(a,'txs24h'),(a.buys24h!=null&&a.sells24h!=null)?tr('买 / 卖（同口径合计）：','Buys / sells (same scope): ')+num(a.buys24h)+' / '+num(a.sells24h):tr('总次数（无拆分，批量行情口径）','Total only (batch quote scope)'))}${card(tip('holders',tr('持币地址数','Holder addresses')),field(a,'holders'),age(a.fieldTimes?.holders))}</div>
-      <div class="x-grid"><section class="panel"><h2>${tr('价格走势','Price history')}${tip('prices','')}</h2>${d.samples?.length>=2?'<div id="v2Price" class="chart"></div>':empty(tr('样本不足，历史将从真实采集开始累积。','Insufficient samples; history accumulates from actual observations.'))}</section><section class="panel"><h2>${tip('holder',tr('前10大地址持仓占比','Top-10 address share'))}</h2>${a.risk?.top10!=null?`<strong class="kpi-value">${num(a.risk.top10)}%</strong><progress max="100" value="${Math.max(0,Math.min(100,a.risk.top10))}"></progress><p>${date(a.risk.checkedAt)} · OKX</p>`:empty(tr('上游尚未提供集中度数据。','Holder concentration is not available from the source yet.'))}<p>${tr('规则解读：先核验关系，再结合资金规模和成交覆盖判断。','Rule-based reading: verify the relationship, then examine liquidity size and activity coverage.')}</p></section></div>
-      <section class="panel"><h2>${tr('最近采集的成交','Recently collected trades')}${tip('activity','')}</h2><p>${a.tradeAt?tr('已保存范围内的成交，可能存在分页缺口，不代表完整历史。','Trades in the saved coverage may have pagination gaps; this is not complete history.'):tr('成交采集排队中，缺失不表示零成交。','Trade collection is queued; missing data does not mean zero trades.')}</p>${d.trades?.length?`<div class="scroll"><table class="tbl"><thead><tr>${[tr('时间','Time'),tr('方向','Side'),tr('美元成交额','USD volume'),'DEX',tr('交易','Transaction')].map(t=>`<th>${t}</th>`).join('')}</tr></thead><tbody>${d.trades.map(t=>`<tr><td>${date(t.t)}</td><td>${t.type==='buy'?tr('买入','Buy'):tr('卖出','Sell')}</td><td>${usd(t.volume)}</td><td>${esc(t.dex)}</td><td>${t.hash?`<a href="${explorer(t.hash,chain(a),'tx')}" target="_blank" rel="noopener">${short(t.hash)} ↗</a>`:tr('未提供哈希','Hash unavailable')}</td></tr>`).join('')}</tbody></table></div>`:empty(tr('当前保存范围内暂无成交记录。','No trades in the saved coverage.'))}</section><section class="panel"><h2>${tr('配对发现与核验记录','Discovery and verification log')}${tip('timeline','')}</h2>${(d.events??[]).map(e=>eventHtml({...e,chainId:chain(a)})).join('')||empty(tr('等待新的关系事件','Waiting for relationship events'))}</section>`;
+      <div class="kpis">${card(tip('price',tr('最新价格','Latest price')),field(a,'price',true),age(a.fieldTimes?.price??a.updatedAt),'','data-kpi="price"')}${card(tip('volume',tr('24h 成交额','24h volume')),field(a,'volume24h',true),a.volumeScope==='exchange'?tr('场内统计','Exchange statistics'):'DEX')}${card(tip('trades',tr('24h 成交次数','24h trades')),(a.buys24h!=null&&a.sells24h!=null)?num((a.buys24h??0)+(a.sells24h??0)):field(a,'txs24h'),(a.buys24h!=null&&a.sells24h!=null)?tr('买 / 卖（同口径合计）：','Buys / sells (same scope): ')+num(a.buys24h)+' / '+num(a.sells24h):tr('总次数（无拆分，批量行情口径）','Total only (batch quote scope)'))}${card(tip('holders',tr('持币地址数','Holder addresses')),field(a,'holders'),age(a.fieldTimes?.holders))}</div>
+      <div class="x-grid"><section class="panel"><div class="panel-head"><h2>${tr('价格走势','Price history')}${tip('prices','')}</h2><div class="tab-group" id="v2ChartTabs"><button class="tab" data-chart-mode="line">${tr('分时','Line')}</button><button class="tab" data-chart-mode="candle">${tr('K线','Candles')}</button>${chartMode==='candle'?['1m','5m','15m','1H'].map(b=>`<button class="tab" data-chart-bar="${b}">${b}</button>`).join(''):''}</div></div><div id="v2Price" class="chart x-candles"></div><p class="hint" id="v2ChartHint"></p></section><section class="panel"><h2>${tip('holder',tr('前10大地址持仓占比','Top-10 address share'))}</h2>${a.risk?.top10!=null?`<strong class="kpi-value">${num(a.risk.top10)}%</strong><progress max="100" value="${Math.max(0,Math.min(100,a.risk.top10))}"></progress><p>${date(a.risk.checkedAt)} · OKX</p>`:empty(tr('上游尚未提供集中度数据。','Holder concentration is not available from the source yet.'))}<p>${tr('规则解读：先核验关系，再结合资金规模和成交覆盖判断。','Rule-based reading: verify the relationship, then examine liquidity size and activity coverage.')}</p></section></div>
+      <section class="panel"><h2>${tr('最近采集的成交','Recently collected trades')}${tip('activity','')}</h2><p id="v2TradeStat">${tradeStatText(a)}</p>${d.trades?.length?`<div class="scroll"><table class="tbl"><thead><tr>${[tr('时间','Time'),tr('方向','Side'),tr('美元成交额','USD volume'),'DEX',tr('交易','Transaction')].map(t=>`<th>${t}</th>`).join('')}</tr></thead><tbody id="v2TradeBody">${d.trades.map(t=>tradeRow(t,a)).join('')}</tbody></table></div>`:empty(tr('当前保存范围内暂无成交记录。','No trades in the saved coverage.'))}</section><section class="panel"><h2>${tr('配对发现与核验记录','Discovery and verification log')}${tip('timeline','')}</h2>${(d.events??[]).map(e=>eventHtml({...e,chainId:chain(a)})).join('')||empty(tr('等待新的关系事件','Waiting for relationship events'))}</section>`;
   }
   function pairPage(stockDetail,memeDetail){
     const r=route(),c=r.parts[1],address=r.parts[2],rs=(feed.relations??[]).filter(x=>chain(x)===c&&x.stock===address),selected=rs.find(x=>x.pool===r.q.get('pool'))??rs[0];
@@ -206,7 +289,12 @@ function proof(r,hideLink=false){return `<article class="x-proof"><div class="pa
     for(const child of document.getElementById('view-live').children)child.hidden=true;
     let live=document.getElementById('xlayerLive');if(!live){live=document.createElement('div');live.id='xlayerLive';document.getElementById('view-live').append(live);}live.hidden=false;
     let meme=document.getElementById('xlayerMeme');if(!meme){meme=document.createElement('div');meme.id='xlayerMeme';document.getElementById('view-meme').append(meme);}
-    charts.forEach(c=>c.dispose());charts=[];const r=route(),page=r.parts[0];const turn=++sequence;activeHash=location.hash;
+    const r=route(),page=r.parts[0];
+    // The detail chart updates incrementally across ticks; disposing it here
+    // would rebuild the canvas every poll. Dispose only when leaving detail.
+    if(page!=='detail'&&!chartDead(detailChart)){detailChart.dispose();detailChart=null;}
+    charts.forEach(c=>{if(c!==detailChart)c.dispose();});charts=[];
+    const turn=++sequence;activeHash=location.hash;
     if(page==='live'){preserve(live,overview());(feed.sectors??[]).filter(s=>s.lastValue!=null||s.value!=null).forEach((s,i)=>{const el=live.querySelector(`[data-chart="basket-${i}"]`);if(el){el.id='v2Basket'+i;draw(el.id,[{name:tr(s.sector,sectorNames[s.sector]??s.sector),data:s.history.map(p=>[p.t,p.price])}]);}});}
     if(page==='meme')preserve(meme,memePage());if(page==='stock')preserve(document.getElementById('okxStocks'),stockPage());
     if(page==='events'){const el=document.getElementById('view-events');preserve(el,`<section class="panel"><h2>${tr('发现记录','Discovery log')}${tip('leads','')}</h2><p>${tr('历史持续保存，重复轮询不会生成重复线索。时间表示本站发现时间。','History persists; repeated polling does not duplicate leads. Times represent detection by this product.')}</p><button id="v2NewEvents">${tr('获取最新记录','Load latest records')}</button>${eventError?empty(tr('历史读取失败，请重试。','Could not load history; retry.')):''}${eventRows.map(eventHtml).join('')||empty(tr('正在读取历史…','Loading history…'))}<button id="v2MoreEvents" ${eventBusy||eventsLoaded&&Object.values(eventCursors).every(v=>v===null)?'disabled':''}>${tr('加载更早记录','Load older records')}</button></section>`);if(!eventsLoaded&&!eventBusy&&!eventError)void loadEvents();}
@@ -215,13 +303,26 @@ function proof(r,hideLink=false){return `<article class="x-proof"><div class="pa
       if(!chainNames[c]||!/^0x[\da-f]{40}$/.test(address??'')){preserve(el,`<section class="panel"><h2>${tr('选择资产或配对','Choose an asset or pair')}${tip('pair','')}</h2><form id="v2Search"><input name="q" required placeholder="${tr('输入股票或 CA','Enter ticker or CA')}"><button>${tr('搜索','Search')}</button></form>${(feed.relations??[]).filter(r=>r.status==='verified').slice(0,30).map(r=>`<a class="x-signal" href="${pairLink(r)}">${esc(r.ticker)} · ${chainNames[chain(r)]} · ${short(r.token)} <span>${usd(r.liquidityUsd)}</span></a>`).join('')}</section>`);return;}
       const show=async()=>{try{const d=await cachedDetail(c,address);let md;
         if(page==='pair'){const rs=(feed.relations??[]).filter(x=>chain(x)===c&&x.stock===address),sel=rs.find(x=>x.pool===r.q.get('pool'))??rs[0];if(sel)md=await cachedDetail(c,sel.token);}
-        if(sequence!==turn)return;preserve(el,page==='detail'?detailPage(d):pairPage(d,md));if(page==='detail')draw('v2Price',[{name:tr('美元价格','USD price'),data:(d.samples??[]).map(p=>[p.t,p.price])}]);else plotPair(d,md);
+        if(sequence!==turn)return;
+        if(page==='detail'){
+          lastDetail=d;
+          if(el.dataset.xAsset===d.asset?.token){updateDetailIncremental(d);return;}
+          preserve(el,detailPage(d));el.dataset.xAsset=d.asset?.token??'';
+          lastTradeIds=new Set((d.trades??[]).map(t=>t.id));lastPriceText=d.asset?.price!=null?usd(d.asset.price):'';
+          void paintDetailChart(d,true);
+        }else{preserve(el,pairPage(d,md));plotPair(d,md);}
       }catch{if(sequence===turn)preserve(el,empty(tr('该资产尚未进入可用索引，或暂时读取失败。','This asset is not yet indexed or could not be loaded.')+` <a href="#stock">${tr('返回股票雷达','Back to Stock Radar')}</a>`));}};
       if(!cache.has(c+':'+address))preserve(el,empty(tr('正在读取已保存的数据…','Loading saved data…')));void show();
     }
     const footer=document.querySelector('footer');footer.removeAttribute('data-i18n');footer.textContent=tr('关系有证据，数字有来源。历史持续保存，缺失不等于零。','Evidence for relationships. Sources for numbers. History persists; missing is not zero.');
     lastLang=typeof LANG!=='undefined'?LANG:'zh';
   }
+  document.addEventListener('click',e=>{
+    const cm=e.target.closest('[data-chart-mode]');
+    if(cm){const m=cm.dataset.chartMode;if(m!==chartMode){chartMode=m;if(lastDetail)void paintDetailChart(lastDetail,true);}return;}
+    const cb=e.target.closest('[data-chart-bar]');
+    if(cb){const b=cb.dataset.chartBar;if(b!==chartBar){chartBar=b;if(lastDetail)void paintDetailChart(lastDetail,true);}return;}
+  });
   document.addEventListener('click',e=>{const g=e.target.closest('[data-v2-group]');if(g){const id=g.dataset.v2Group;expandedGroups.has(id)?expandedGroups.delete(id):expandedGroups.add(id);render(snapshot);document.querySelectorAll('[data-v2-group]').forEach(b=>{if(b.dataset.v2Group===id)b.focus({preventScroll:true});});}const f=e.target.closest('[data-v2-filter]');if(f)setQuery({filter:f.dataset.v2Filter,page:null});const p=e.target.closest('[data-v2-page]');if(p)setQuery({page:Math.max(0,Number(p.dataset.v2Page))});if(e.target.id==='v2MoreEvents')void loadEvents(true);if(e.target.id==='v2NewEvents')void loadEvents(false);});
   document.addEventListener('input',e=>{if(['xMemeSearch','xStockSearch'].includes(e.target.id)&&window.RadarV2)setQuery({q:e.target.value,page:null});});
   document.addEventListener('change',e=>{const fields={v2Sort:'sort',v2Chain:'chain',v2Min:'minLiquidity',v2Window:'window'};if(fields[e.target.id])setQuery({[fields[e.target.id]]:e.target.value,page:null});});

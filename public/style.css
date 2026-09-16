@@ -371,4 +371,4 @@ tr.trade-new > td { animation: v2-trade-in 2s ease-out; }
 
 /* Candlestick view needs room for the volume pane. */
 .chart.x-candles { height: 380px; }
-#xChartTabs .tab { padding: 4px 10px; }
+#xChartTabs .tab,#v2ChartTabs .tab { padding: 4px 10px; }
