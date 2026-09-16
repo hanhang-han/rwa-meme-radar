@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Stocksmeme Radar</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot" id="liveDot"></span>
+    <h1>STOCKSMEME RADAR</h1>
+    <span class="sub" data-i18n="subtitle"></span>
+  </div>
+  <div class="header-right">
+    <div class="metric">
+      <span class="label" data-i18n="bnbLabel"></span>
+      <span class="value mono" id="bnbUsd">--</span>
+    </div>
+    <div class="metric">
+      <span class="label" data-i18n="updated"></span>
+      <span class="value mono" id="updatedAt">--</span>
+    </div>
+    <div class="lang-control">
+      <div class="lang-switch" aria-label="语言切换">
+        <button id="langZh" class="lang-btn" type="button">中</button>
+        <button id="langEn" class="lang-btn" type="button">EN</button>
+      </div>
+      <span id="langFeedback" class="lang-feedback" role="status" aria-live="polite" hidden></span>
+    </div>
+    <button id="refresh" title="">↻</button>
+  </div>
+</header>
+
+<div class="healthbar" id="healthbar" hidden></div>
+
+<div class="ticker-wrap" hidden>
+  <span class="ticker-label" data-i18n="tickerTitle"></span>
+  <button id="tickerPause" class="ticker-pause" title="">❚❚</button>
+  <div class="ticker-viewport" id="tickerViewport"><div class="ticker-track" id="tickerTrack"></div></div>
+</div>
+
+<section class="kpis" hidden>
+  <div class="kpi"><span class="kpi-label" data-i18n="kAssets"></span><span class="kpi-value mono" id="kAssets">--</span><span class="kpi-note" data-i18n="kAssetsNote"></span></div>
+  <div class="kpi"><span class="kpi-label" data-i18n="kPools"></span><span class="kpi-value mono" id="kPools">--</span><span class="kpi-note" data-i18n="kPoolsNote"></span></div>
+  <div class="kpi"><span class="kpi-label" data-i18n="kMeme"></span><span class="kpi-value mono" id="kMeme">--</span><span class="kpi-note" data-i18n="kMemeNote"></span></div>
+  <div class="kpi heat">
+    <span class="kpi-label" data-i18n="kAttention"></span>
+    <span class="kpi-value mono" id="kAttention">--</span>
+    <span class="kpi-note" id="kAttentionNote">--</span>
+  </div>
+</section>
+
+<div class="cols main-cols" hidden>
+  <section class="panel">
+    <div class="panel-head">
+      <h2 data-i18n="spreadTitle"></h2>
+      <span class="hint" data-i18n="spreadHint"></span>
+    </div>
+    <div id="spreadChart" class="chart"></div>
+    <table class="tbl sortable" id="spreadTable">
+      <thead>
+        <tr>
+          <th></th>
+          <th data-sort="symbol" data-i18n="thStock"></th>
+          <th data-sort="underlying" data-i18n="thUnderlying"></th>
+          <th data-sort="oracle" class="right" data-i18n="thOracle"></th>
+          <th data-sort="dexPrice" class="right" data-i18n="thDex"></th>
+          <th data-sort="lockedUsd" class="right" data-i18n="thLocked"></th>
+          <th data-sort="pool" data-i18n="thPool"></th>
+          <th data-sort="spreadPct" class="right" data-i18n="thSpread"></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="empty" id="spreadEmpty"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2 data-i18n="spreadChartTitle"></h2><span class="hint" id="spreadChartMeta"></span></div>
+    <div id="historyChart" class="chart tall"></div>
+  </section>
+</div>
+
+<section class="panel">
+  <div class="panel-head">
+    <div class="tab-group" id="radarTabs">
+      <button class="tab active" data-tab="newest" data-i18n="radarNewest"></button>
+      <button class="tab" data-tab="hot" data-i18n="radarHot"></button>
+      <button class="tab" data-tab="match" data-i18n="radarMatch"></button>
+    </div>
+    <span class="hint" id="radarMeta"></span>
+  </div>
+  <div class="empty" id="radarEmpty"></div>
+  <div class="scroll radar">
+    <table class="tbl sortable" id="radarTable">
+      <thead>
+        <tr>
+          <th data-sort="ts" data-i18n="thTime"></th>
+          <th data-sort="symbol" data-i18n="thMeme"></th>
+          <th data-sort="name" data-i18n="thName"></th>
+          <th data-sort="trades" class="right" data-i18n="thTrades"></th>
+          <th data-sort="volumeBnb" class="right" data-i18n="thVolume"></th>
+          <th data-i18n="thStockLink"></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<div class="cols" hidden>
+  <section class="panel">
+    <div class="panel-head"><h2 data-i18n="memeTitle"></h2><span class="hint" id="memeBlocks"></span></div>
+    <div id="memeChart" class="chart small"></div>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2 data-i18n="funnelTitle"></h2><span class="hint" id="funnelMeta"></span></div>
+    <div id="funnelChart" class="chart small"></div>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2 data-i18n="allTitle"></h2><input id="search" /></div>
+    <div class="scroll">
+      <table class="tbl sortable" id="allTable">
+        <thead>
+          <tr>
+            <th></th>
+            <th data-sort="symbol" data-i18n="thStock"></th>
+            <th data-sort="underlying" data-i18n="thUnderlying"></th>
+            <th data-sort="chg24h" class="right" data-i18n="thChg24h"></th>
+            <th data-sort="oracle" class="right" data-i18n="thOracle"></th>
+            <th data-sort="period" data-i18n="thPeriod"></th>
+            <th data-sort="pools" data-i18n="thPool"></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<details class="disclosures">
+  <summary data-i18n="discTitle"></summary>
+  <p data-i18n="discBody"></p>
+</details>
+<footer data-i18n="footer"></footer>
+<script src="/i18n.js"></script>
+<script src="/echarts.min.js" async onload="document.dispatchEvent(new Event('stateupdated'))"></script>
+<script src="/app.js"></script>
+<script src="/xlayer-workspace.js"></script>
+<script src="/radar-v2.js"></script>
+<script src="/workspace.js"></script>
+</body>
+</html>

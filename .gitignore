@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.log
+
+.env
+.env.*
+!.env.example
+# runtime state (sqlite/json snapshots) and ops notes with server details
+data/
+CLAUDE.md
+
+.claude/
+.omc/

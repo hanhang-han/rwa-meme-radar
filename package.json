@@ -1,0 +1,31 @@
+{
+  "name": "memedashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "demo": "tsx scripts/demo.ts",
+    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts",
+    "check": "tsc --noEmit",
+    "deploy": "bash scripts/deploy.sh",
+    "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "jsdom": "^30.0.1",
+    "solc": "^0.8.37",
+    "tsx": "^4.19.0",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "echarts": "^6.1.0",
+    "ethers": "^6.17.0",
+    "hono": "^4.13.5",
+    "js-sha3": "^0.13.0"
+  }
+}
