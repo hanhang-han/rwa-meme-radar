@@ -60,6 +60,10 @@ class ResearchStore:
         rows = await cur.fetchall()
         return [json.loads(r[0]) for r in rows]
 
+    async def all_kv(self, kind: str) -> list[tuple[str, dict]]:
+        cur = await self.db.execute("SELECT id,body FROM facts WHERE kind=?", (self.key(kind),))
+        return [(str(r[0]), json.loads(r[1])) for r in await cur.fetchall()]
+
     async def put(self, kind: str, id: str, value) -> None:
         await self.db.execute(
             "INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body",

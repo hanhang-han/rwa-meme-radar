@@ -23,6 +23,9 @@ class DashboardData:
         self.assets: list[dict] = []
         self.relations: list[dict] = []
         self.stock_tokens: list[dict] = []
+        self.signals: list[dict] = []
+        self.baskets: dict = {}
+        self.basket_last: dict = {}
         self.updated_at: float | None = None
 
     async def reload(self, chain: str = "196") -> None:
@@ -34,6 +37,13 @@ class DashboardData:
 
         candidate_ids = {a["token"] for a in assets if a.get("kind") == "candidate"}
         relations = [r for r in relations if r.get("token") in candidate_ids]
+        self.signals = [
+            {**e, "asset": e.get("asset", "").split(":", 1)[-1]}
+            for e in await s.events(None, 100)
+            if e.get("asset", "").split(":", 1)[-1] in candidate_ids
+        ][:30]
+        self.baskets = {name: body for name, body in await s.all_kv("basket")}
+        self.basket_last = {name: body for name, body in await s.all_kv("basket-last")}
 
         for a in assets:
             a["chainId"] = chain
@@ -116,11 +126,19 @@ class DashboardData:
                 "assets": self.visible_assets(),
                 "stockTokens": self.stock_tokens,
                 "relations": self.relations,
-                "signals": [],
+                "signals": self.signals,
                 "groups": self.groups(),
                 "quality": {},
                 "metrics": self.metrics(),
-                "sectors": [],
+                "sectors": [
+                    {
+                        "sector": name, "baseAt": b.get("baseAt"),
+                        "members": len(b.get("members") or []),
+                        "value": self.basket_last.get(name, {}).get("value"),
+                        "reason": "",
+                    }
+                    for name, b in self.baskets.items()
+                ],
                 "distribution": [],
                 "capabilities": [],
                 "collection": {"updatedAt": self.updated_at},
