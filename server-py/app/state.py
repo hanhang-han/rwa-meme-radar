@@ -28,44 +28,52 @@ class DashboardData:
         self.basket_last: dict = {}
         self.updated_at: float | None = None
 
-    async def reload(self, chain: str = "196") -> None:
-        s = await store(chain)
-        assets = await s.all("asset")
-        relations = await s.all("relation")
-        stocks = await s.all("stock")
-        scans = {r["token"]: r for r in await s.all("scan")}
+    async def reload(self) -> None:
+        self.assets = []
+        self.relations = []
+        self.stock_tokens = []
+        self.signals = []
+        updated = 0
+        for chain_id in ("196", "56", "4663"):
+            s = await store(chain_id)
+            assets = await s.all("asset")
+            relations = await s.all("relation")
+            stocks = await s.all("stock")
 
-        candidate_ids = {a["token"] for a in assets if a.get("kind") == "candidate"}
-        relations = [r for r in relations if r.get("token") in candidate_ids]
-        self.signals = [
-            {**e, "asset": e.get("asset", "").split(":", 1)[-1]}
-            for e in await s.events(None, 100)
-            if e.get("asset", "").split(":", 1)[-1] in candidate_ids
-        ][:30]
-        self.baskets = {name: body for name, body in await s.all_kv("basket")}
-        self.basket_last = {name: body for name, body in await s.all_kv("basket-last")}
+            candidate_ids = {a["token"] for a in assets if a.get("kind") == "candidate"}
+            relations = [r for r in relations if r.get("token") in candidate_ids]
 
-        for a in assets:
-            a["chainId"] = chain
-            a["chain"] = chain
-            a["chainName"] = CHAIN_NAMES.get(chain, chain)
-            a.setdefault("fieldTimes", {})
+            for a in assets:
+                a["chainId"] = chain_id
+                a["chain"] = chain_id
+                a["chainName"] = CHAIN_NAMES.get(chain_id, chain_id)
+                a.setdefault("fieldTimes", {})
+                updated = max(updated, a.get("updatedAt") or 0)
 
-        for r in relations:
-            r["chainId"] = chain
-            r.setdefault("liquidityUsd", None)
+            for r in relations:
+                r["chainId"] = chain_id
+                r.setdefault("liquidityUsd", None)
+                updated = max(updated, r.get("checkedAt") or 0)
 
-        for st in stocks:
-            st["chainId"] = chain
-            st["chain"] = chain
-            st.setdefault("tokenContractAddress", st.get("tokenContractAddress"))
+            for st in stocks:
+                st["chainId"] = chain_id
+                st["chain"] = chain_id
+                st.setdefault("tokenContractAddress", st.get("tokenContractAddress"))
 
-        self.assets = assets
-        self.relations = relations
-        self.stock_tokens = stocks
-        self.updated_at = max(
-            [a.get("updatedAt") or 0 for a in assets] + [r.get("checkedAt") or 0 for r in relations] + [0]
-        ) or None
+            self.signals.extend(
+                {**e, "asset": e.get("asset", "").split(":", 1)[-1]}
+                for e in await s.events(None, 100)
+                if e.get("asset", "").split(":", 1)[-1] in candidate_ids
+            )
+            self.assets.extend(assets)
+            self.relations.extend(relations)
+            self.stock_tokens.extend(stocks)
+
+        self.signals = sorted(self.signals, key=lambda e: -(e.get("t") or 0))[:30]
+        s196 = await store("196")
+        self.baskets = {name: body for name, body in await s196.all_kv("basket")}
+        self.basket_last = {name: body for name, body in await s196.all_kv("basket-last")}
+        self.updated_at = updated or None
 
     # -- unified payload pieces -------------------------------------------------
 
@@ -158,7 +166,20 @@ class DashboardData:
                 "metrics": self.metrics(),
                 "sectors": await self._sectors(),
 
-                "distribution": [],
+                "distribution": [
+                    {
+                        "chainId": cid, "name": CHAIN_NAMES.get(cid, cid),
+                        "assets": len([a for a in self.visible_assets() if a.get("chainId") == cid]),
+                        "volume": {
+                            "value": sum(a.get("volume24h") or 0 for a in self.visible_assets() if a.get("chainId") == cid and a.get("volume24h") is not None) or None,
+                            "known": len([a for a in self.visible_assets() if a.get("chainId") == cid and a.get("volume24h") is not None]),
+                        },
+                        "liquidity": {
+                            "value": sum(r.get("liquidityUsd") or 0 for r in self.verified_relations() if r.get("chainId") == cid and r.get("liquidityUsd") is not None) or None,
+                        },
+                    }
+                    for cid in ("196", "56", "4663")
+                ],
                 "capabilities": [],
                 "collection": {"updatedAt": self.updated_at},
             },
@@ -171,7 +192,7 @@ _loaded_at = 0.0
 
 async def reload_data() -> None:
     global _loaded_at
-    await DATA.reload("196")
+    await DATA.reload()
     _loaded_at = time.time()
 
 

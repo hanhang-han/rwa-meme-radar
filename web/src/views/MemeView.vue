@@ -38,7 +38,10 @@
     </div>
     <p class="hint">{{ tr('重点关系：已核验且配对池流动性 ≥ $1,000。同名折叠，每个 CA 独立保存；交易活跃不代表安全。', 'Priority: verified pairs with pool liquidity ≥ $1,000. Same-name contracts are grouped, but every CA is retained; activity does not prove safety.') }}</p>
     <div class="scroll v2-table-scroll" id="xMemeRows">
-      <div v-if="!pageGroups.length" class="x-empty">{{ tr('当前筛选暂无资产。可切换“全部资产”查看热门榜和已发现的股票配对候选。', 'No assets match this filter. Switch to All assets for the hot list and discovered stock-pair candidates.') }}</div>
+      <div v-if="!pageGroups.length" class="x-empty">
+        <template v-if="filter === 'related'">{{ tr('重点关系当前没有新鲜流动性估值（采集额度恢复后自动更新）。可先查看“已确认配对”或“全部资产”。', 'Priority relations have no fresh liquidity valuation right now (they return automatically once the collection quota resets). See Confirmed pairs or All assets meanwhile.') }}</template>
+        <template v-else>{{ tr('当前筛选暂无资产。可切换“全部资产”查看热门榜和已发现的股票配对候选。', 'No assets match this filter. Switch to All assets for the hot list and discovered stock-pair candidates.') }}</template>
+      </div>
       <table v-else class="tbl v2-meme-table">
         <thead>
           <tr>
