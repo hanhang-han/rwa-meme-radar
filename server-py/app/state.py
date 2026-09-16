@@ -98,6 +98,32 @@ class DashboardData:
         groups.sort(key=lambda g: -(g["volume24h"] or 0))
         return groups
 
+    async def _sectors(self) -> list:
+        out = []
+        store_196 = await store("196")
+        for name, b in self.baskets.items():
+            members = b.get("members") or []
+            total_cap = sum(m.get("baseCap") or 0 for m in members) or 1
+            history_rows = await store_196.samples("basket:" + name, 200)
+            last = self.basket_last.get(name) or {}
+            out.append({
+                "sector": name, "chainId": "196", "baseAt": b.get("baseAt"),
+                "members": len(members),
+                "value": last.get("value"),
+                "lastValue": last.get("value"),
+                "lastAt": last.get("at"),
+                "reason": "",
+                "history": [{"t": r["t"], "price": r["price"]} for r in history_rows],
+                "components": [
+                    {
+                        "token": m.get("token"), "symbol": (await store_196.get("asset", m.get("token")) or {}).get("symbol") or m.get("token", "")[:10],
+                        "weight": (m.get("baseCap") or 0) / total_cap if m.get("baseCap") else None,
+                    }
+                    for m in members
+                ],
+            })
+        return out
+
     def metrics(self) -> dict:
         verified = self.verified_relations()
         valued = [r for r in verified if r.get("liquidityUsd") is not None and fresh(r.get("liquidityAt") or r.get("checkedAt"))]
@@ -117,7 +143,7 @@ class DashboardData:
             "newRelations24h": sum(1 for r in self.relations if (r.get("firstSeen") or 0) >= now - 86_400_000),
         }
 
-    def payload(self) -> dict:
+    async def payload(self) -> dict:
         return {
             "now": time.time() * 1000,
             "unified": {
@@ -130,15 +156,8 @@ class DashboardData:
                 "groups": self.groups(),
                 "quality": {},
                 "metrics": self.metrics(),
-                "sectors": [
-                    {
-                        "sector": name, "baseAt": b.get("baseAt"),
-                        "members": len(b.get("members") or []),
-                        "value": self.basket_last.get(name, {}).get("value"),
-                        "reason": "",
-                    }
-                    for name, b in self.baskets.items()
-                ],
+                "sectors": await self._sectors(),
+
                 "distribution": [],
                 "capabilities": [],
                 "collection": {"updatedAt": self.updated_at},

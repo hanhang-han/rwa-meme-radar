@@ -46,8 +46,12 @@ export const explorer = (a, type = 'address', cid = '196') =>
       ? `https://www.oklink.com/bsc/${type}/${encodeURIComponent(a)}`
       : `https://www.oklink.com/xlayer/${type}/${encodeURIComponent(a)}`;
 
+// Router paths (usable with RouterLink :to and router.push). For plain
+// <a href> anchors use hashLink below.
 export const detailLink = (a) =>
-  `#/detail/${encodeURIComponent(chain(a))}/${encodeURIComponent(a.token)}`;
+  `/detail/${encodeURIComponent(chain(a))}/${encodeURIComponent(a.token)}`;
 
 export const pairLink = (r) =>
-  `#/pair/${encodeURIComponent(chain(r))}/${encodeURIComponent(r.stock)}?pool=${encodeURIComponent(r.pool)}`;
+  `/pair/${encodeURIComponent(chain(r))}/${encodeURIComponent(r.stock)}?pool=${encodeURIComponent(r.pool)}`;
+
+export const hashLink = (path) => `#${path}`;

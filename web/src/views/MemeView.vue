@@ -1,47 +1,71 @@
 <template>
   <section class="panel">
+    <div class="page-heading">
+      <h2>{{ tr('Meme 雷达', 'Meme Radar') }}</h2>
+      <p>{{ tr('已核验配对与同名合约分组；缺失与历史值分别标记。', 'Verified pairs and same-name grouping; missing and historical values are marked separately.') }}</p>
+    </div>
     <div class="tab-group">
       <button v-for="[id, label] in filters" :key="id" class="tab" :class="{ active: filter === id }" @click="setQuery({ filter: id, page: null })">{{ label }}</button>
       <HelpTip :title="tr('Meme 雷达', 'Meme Radar')" :body="tr('按已核验配对与流动性筛选；同名折叠，每个 CA 独立保存。', 'Filter by verified pairs and liquidity; same-name contracts are grouped, every CA is kept.')" />
     </div>
     <div class="x-toolbar">
       <input id="xMemeSearch" v-model="qInput" :placeholder="tr('名称、股票或 CA', 'Name, stock or CA')" @input="onSearch">
-      <select id="v2Sort" v-model="sort" @change="setQuery({ sort: $event.target.value, page: null })" :aria-label="tr('排序', 'Sort')">
+      <select id="v2Sort" v-model="sortInput" @change="setQuery({ sort: $event.target.value, page: null })" :aria-label="tr('排序', 'Sort')">
         <option value="volume24h">{{ tr('24h 成交额', '24h volume') }}</option>
         <option value="liquidity">{{ tr('资产总流动性', 'Asset liquidity') }}</option>
         <option value="marketCap">{{ tr('市值', 'Market cap') }}</option>
         <option value="holders">{{ tr('持币地址数', 'Holder addresses') }}</option>
         <option value="change24h">{{ tr('24h 涨跌', '24h change') }}</option>
+        <option value="firstSeen">{{ tr('首次收录', 'First listed') }}</option>
       </select>
+      <details class="v2-filters">
+        <summary>{{ tr('更多筛选', 'More filters') }}</summary>
+        <div class="v2-filter-fields">
+          <select id="v2Chain" :value="route.query.chain ?? ''" @change="setQuery({ chain: $event.target.value || undefined, page: null })" :aria-label="tr('网络', 'Network')">
+            <option value="">{{ tr('全部网络', 'All networks') }}</option>
+            <option value="196">X Layer</option>
+            <option value="56">BNB Chain</option>
+            <option value="4663">Robinhood Chain</option>
+          </select>
+          <select id="v2Min" :value="route.query.minLiquidity ?? ''" @change="setQuery({ minLiquidity: $event.target.value || undefined, page: null })" :aria-label="tr('最低流动性', 'Min liquidity')">
+            <option value="">{{ tr('最低流动性', 'Min liquidity') }}</option>
+            <option value="1000">≥ $1,000</option>
+            <option value="10000">≥ $10,000</option>
+            <option value="100000">≥ $100,000</option>
+          </select>
+        </div>
+      </details>
     </div>
     <p class="hint">{{ tr('重点关系：已核验且配对池流动性 ≥ $1,000。同名折叠，每个 CA 独立保存；交易活跃不代表安全。', 'Priority: verified pairs with pool liquidity ≥ $1,000. Same-name contracts are grouped, but every CA is retained; activity does not prove safety.') }}</p>
-    <div id="xMemeRows">
+    <div class="scroll v2-table-scroll" id="xMemeRows">
       <div v-if="!pageGroups.length" class="x-empty">{{ tr('当前筛选暂无资产。可切换“全部资产”查看热门榜和已发现的股票配对候选。', 'No assets match this filter. Switch to All assets for the hot list and discovered stock-pair candidates.') }}</div>
-      <div v-for="g in pageGroups" :key="g.symbol">
-        <div v-if="g.members.length === 1" class="scroll">
-          <table class="tbl x-table v2-meme-table">
-            <thead><tr><th>{{ tr('资产', 'Asset') }}</th><th>{{ tr('关联股票', 'Related stock') }}</th><th>{{ tr('资产总流动性', 'Asset liquidity') }}</th><th>{{ tr('资产 24h 成交额', 'Asset 24h volume') }}</th><th>{{ tr('24h 成交次数', '24h trades') }}</th><th>{{ tr('Meme 价格', 'Meme price') }}</th><th>{{ tr('持币地址数', 'Holder addresses') }}</th><th>{{ tr('行情更新时间', 'Quote time') }}</th></tr></thead>
-            <tbody><MemeRow :a="g.members[0]" :relations="relations" :store="store" /></tbody>
-          </table>
-        </div>
-        <details v-else class="x-group" :open="openGroups.has(g.symbol)">
-          <summary @click.prevent="toggleGroup(g.symbol)">
-            <strong>{{ g.symbol }}</strong>
-            <span>{{ g.members.length }} {{ tr('个独立合约 · 展开比较', 'independent contracts · compare') }}</span>
-          </summary>
-          <div class="scroll">
-            <table class="tbl x-table v2-meme-table">
-              <thead><tr><th>{{ tr('资产', 'Asset') }}</th><th>{{ tr('关联股票', 'Related stock') }}</th><th>{{ tr('资产总流动性', 'Asset liquidity') }}</th><th>{{ tr('资产 24h 成交额', 'Asset 24h volume') }}</th><th>{{ tr('24h 成交次数', '24h trades') }}</th><th>{{ tr('Meme 价格', 'Meme price') }}</th><th>{{ tr('持币地址数', 'Holder addresses') }}</th><th>{{ tr('行情更新时间', 'Quote time') }}</th></tr></thead>
-              <tbody><MemeRow v-for="m in g.members" :key="m.token" :a="m" :relations="relations" :store="store" :child="true" /></tbody>
-            </table>
-          </div>
-        </details>
-      </div>
+      <table v-else class="tbl v2-meme-table">
+        <thead>
+          <tr>
+            <th>{{ tr('资产', 'Asset') }}</th>
+            <th>{{ tr('关联股票', 'Related stock') }}</th>
+            <th>{{ tr('资产总流动性', 'Asset liquidity') }}</th>
+            <th>{{ tr('资产 24h 成交额', 'Asset 24h volume') }}</th>
+            <th>{{ tr('24h 成交次数', '24h trades') }}</th>
+            <th>{{ tr('Meme 价格', 'Meme price') }}</th>
+            <th>{{ tr('持币地址数', 'Holder addresses') }}</th>
+            <th>{{ tr('行情更新时间', 'Quote time') }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template v-for="g in pageGroups" :key="g.symbol">
+            <MemeRow :a="g.members[0]" :relations="relations" :store="store" :extra="g.members.length > 1 ? g.members.length - 1 : 0" @toggle-group="toggleGroup(g.symbol)" />
+            <template v-if="openGroups.has(g.symbol)">
+              <MemeRow v-for="m in g.members.slice(1)" :key="m.token" :a="m" :relations="relations" :store="store" :child="true" />
+            </template>
+          </template>
+        </tbody>
+      </table>
     </div>
     <div class="x-pager">
-      <button :disabled="page <= 0" @click="setQuery({ page: Math.max(0, page - 1) })">{{ tr('上一页', 'Previous') }}</button>
-      <span>{{ page + 1 }} / {{ pages }} · {{ groups.length }} {{ tr('组', 'groups') }}</span>
-      <button :disabled="(page + 1) >= pages" @click="setQuery({ page: page + 1 })">{{ tr('下一页', 'Next') }}</button>
+      <button :disabled="safePage <= 0" @click="setQuery({ page: Math.max(0, safePage - 1) })">{{ tr('上一页', 'Previous') }}</button>
+      <span>{{ safePage + 1 }} / {{ pages }} · {{ groups.length }} {{ tr('组', 'groups') }}</span>
+      <button :disabled="(safePage + 1) >= pages" @click="setQuery({ page: safePage + 1 })">{{ tr('下一页', 'Next') }}</button>
     </div>
   </section>
 </template>
@@ -59,6 +83,7 @@ const route = useRoute();
 const router = useRouter();
 const store = useDashboardStore();
 const qInput = ref(route.query.q ?? '');
+const sortInput = ref(route.query.sort ?? 'volume24h');
 const openGroups = reactive(new Set());
 
 const filter = computed(() => route.query.filter ?? 'related');
@@ -85,8 +110,7 @@ const groups = computed(() => {
   const bySymbol = new Map();
   for (const a of store.assets) {
     const rs = verifiedOf(a);
-    const cid = chain(a);
-    if (route.query.chain && cid !== route.query.chain) continue;
+    if (route.query.chain && chain(a) !== route.query.chain) continue;
     const term = [a.name, a.symbol, a.token, ...relationsOf(a).map((r) => r.ticker)].join(' ').toLowerCase();
     if (search.value && !term.includes(search.value)) continue;
     if (Number(route.query.minLiquidity ?? 0) > (a.liquidity ?? -1)) continue;

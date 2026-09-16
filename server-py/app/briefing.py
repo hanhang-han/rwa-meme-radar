@@ -83,8 +83,8 @@ def tier_label(v, lang: str) -> str | None:
     return "池流动性≥$1万" if n >= 10000 else ("池流动性$1千-$1万" if n >= 1000 else "池流动性<$1千")
 
 
-def briefing_base() -> dict:
-    u = state.DATA.payload()["unified"]
+async def briefing_base() -> dict:
+    u = (await state.DATA.payload())["unified"]
     day_ago = time.time() * 1000 - 86_400_000
     verified_relations = [r for r in u["relations"] if r.get("status") == "verified"]
     verified_tokens = {r["token"] for r in verified_relations}
@@ -167,7 +167,7 @@ def briefing_for(base: dict, lang: str) -> dict:
 async def refresh_briefing() -> None:
     if not ai_enabled():
         return
-    base = briefing_base()
+    base = await briefing_base()
     for lang in ("zh", "en"):
         await ai_narrate("briefing", lang, 30 * 60_000, briefing_for(base, lang), BRIEFING_TASK, force=True)
     update_streaks(base["moverSymbols"])
@@ -176,7 +176,7 @@ async def refresh_briefing() -> None:
 async def briefing_endpoint(lang: str) -> dict:
     result = await ai_narrate(
         "briefing", lang, 30 * 60_000,
-        briefing_for(briefing_base(), lang), BRIEFING_TASK,
+        briefing_for(await briefing_base(), lang), BRIEFING_TASK,
     )
     if result:
         return {"text": result["text"], "at": result["at"], "cached": result.get("cached", False)}

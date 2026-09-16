@@ -16,7 +16,7 @@ _cache: dict[str, float | str] = {"at": 0.0, "body": ""}
 async def _snapshot_json() -> str:
     if time.time() - _cache["at"] > 10:
         await reload_data()
-        _cache["body"] = json.dumps(DATA.payload(), ensure_ascii=False, separators=(",", ":"))
+        _cache["body"] = json.dumps(await DATA.payload(), ensure_ascii=False, separators=(",", ":"))
         _cache["at"] = time.time()
     return _cache["body"]
 

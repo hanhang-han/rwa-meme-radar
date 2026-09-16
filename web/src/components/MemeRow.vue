@@ -2,6 +2,7 @@
   <tr :data-asset="a.token" :class="{ 'v2-member-row': child }">
     <td>
       <RouterLink :to="detailLink(a)"><strong>{{ a.symbol }}</strong></RouterLink>
+      <button v-if="extra > 0" class="v2-group-toggle" @click="emit('toggle-group')">{{ tr('+', '+') }} {{ extra }} {{ tr('个同名合约', 'same-name contracts') }}</button>
       <small>{{ chainName(a) }} · {{ short(a.token) }} · {{ a.provider ?? 'OKX' }}</small>
     </td>
     <td>
@@ -31,7 +32,10 @@ const props = defineProps({
   relations: { type: Array, default: () => [] },
   store: { type: Object, required: true },
   child: { type: Boolean, default: false },
+  extra: { type: Number, default: 0 },
 });
+
+const emit = defineEmits(['toggle-group']);
 
 const relOf = computed(() => props.relations.filter((r) => r.token === props.a.token));
 

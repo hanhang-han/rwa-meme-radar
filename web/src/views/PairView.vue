@@ -1,6 +1,19 @@
 <template>
   <div>
-    <section class="panel">
+    <section v-if="!stock" class="panel">
+      <h2>{{ tr('选择资产或配对', 'Choose an asset or pair') }}</h2>
+      <form id="v2Search" @submit.prevent="goSearch">
+        <input v-model="q" :placeholder="tr('输入股票或 CA', 'Enter ticker or CA')" required>
+        <button>{{ tr('搜索', 'Search') }}</button>
+      </form>
+      <div v-if="verifiedRelations.length">
+        <RouterLink v-for="r in verifiedRelations.slice(0, 30)" :key="r.id" class="x-signal" :to="pairLink(r)">
+          {{ r.ticker }} · {{ chainName(r) }} · {{ short(r.token) }} <span>{{ usd(r.liquidityUsd) }}</span>
+        </RouterLink>
+      </div>
+      <div v-else class="x-empty">{{ tr('等待已核验配对。', 'Waiting for verified pairs.') }}</div>
+    </section>
+    <section v-else class="panel">
       <h2>{{ tr('交易池分析', 'Pool analysis') }}</h2>
       <form id="v2Search" @submit.prevent="goSearch">
         <input v-model="q" :placeholder="tr('输入股票或 CA', 'Enter ticker or CA')" required>
@@ -68,12 +81,15 @@ const q = ref('');
 const stockDetail = ref(null);
 
 const verifiedRelations = computed(() =>
-  store.relations.filter((r) => r.status === 'verified' && String(r.chainId ?? '196') === props.chain && r.stock === props.stock.toLowerCase()),
+  props.stock
+    ? store.relations.filter((r) => r.status === 'verified' && String(r.chainId ?? '196') === props.chain && r.stock === props.stock.toLowerCase())
+    : store.relations.filter((r) => r.status === 'verified'),
 );
 const selected = computed(() => verifiedRelations.value.find((r) => r.pool === route.query.pool) ?? verifiedRelations.value[0]);
 const stockAsset = computed(() => stockDetail.value?.asset ?? {});
 
 async function load() {
+  if (!props.stock) return;
   try {
     stockDetail.value = await detail.fetch(props.chain, props.stock.toLowerCase());
   } catch {
