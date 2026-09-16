@@ -11,3 +11,5 @@ CLAUDE.md
 
 .claude/
 .omc/
+server-py/.venv/
+web/dist/
