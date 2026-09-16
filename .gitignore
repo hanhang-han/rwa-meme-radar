@@ -13,3 +13,6 @@ CLAUDE.md
 .omc/
 server-py/.venv/
 web/dist/
+__pycache__/
+*.pyc
+server-py/.venv/
