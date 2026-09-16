@@ -442,4 +442,4 @@ window.addEventListener("resize", () => [barChart, histChart, memeChart, funnelC
 initLang();
 applyLang();
 tick();
-setInterval(tick, 30000);
+setInterval(tick, 20000);
