@@ -29,7 +29,7 @@ _load_env()
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
 
-from .api import candles, dashboard, stream, token
+from .api import ai_route, candles, dashboard, stream, token
 
 
 @asynccontextmanager
@@ -49,6 +49,23 @@ async def lifespan(_: FastAPI):
         stream_hub.broadcast("heartbeat", {"at": int(time.time() * 1000)})
 
     spawn_loop("streamHeartbeat", 25, heartbeat)
+
+    from .registry import sync_registry
+    from . import state as app_state
+
+    async def registry_round():
+        await sync_registry(app_state.DATA.relations)
+
+    spawn_loop("registrySync", 600, registry_round)
+
+    from . import briefing
+
+    spawn_loop("aiBriefing", 1800, briefing.refresh_briefing)
+
+    from .collectors.main_round import refresh_main_round
+
+    spawn_loop("mainRound", 300, refresh_main_round)
+
     try:
         yield
     finally:
@@ -62,6 +79,7 @@ app.include_router(dashboard.router, prefix="/api")
 app.include_router(stream.router, prefix="/api")
 app.include_router(token.router, prefix="/api")
 app.include_router(candles.router, prefix="/api")
+app.include_router(ai_route.router, prefix="/api")
 
 
 @app.get("/api/health")
