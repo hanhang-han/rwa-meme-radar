@@ -7,7 +7,8 @@ PKG=$(mktemp /tmp/memedashboard-release.XXXXXX)
 trap 'rm -f "$PKG"' EXIT
 npm run check
 npm test
-COPYFILE_DISABLE=1 tar --no-xattrs -czf "$PKG" src public scripts tests package.json package-lock.json tsconfig.json ecosystem.config.cjs DATA.md CLAUDE.md IMPLEMENTATION.md PRODUCT_DESIGN.md OPTIMIZATION_PLAN_V2.md .env.example
+(cd web && VITE_BASE=/dashboard/ npm run build)
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "$PKG" src public scripts tests server-py web/dist contracts package.json package-lock.json tsconfig.json ecosystem.config.cjs DATA.md IMPLEMENTATION.md PRODUCT_DESIGN.md OPTIMIZATION_PLAN_V2.md .env.example
 scp "${SSH_OPTS[@]}" "$PKG" "$SERVER:/tmp/memedashboard-release.tar.gz"
 ssh "${SSH_OPTS[@]}" "$SERVER" 'bash -s' <<'REMOTE'
 set -euo pipefail
@@ -53,6 +54,11 @@ RESTARTED=1
 # changes. Recreate this one process from the explicit app configuration.
 pm2 delete memedashboard
 pm2 start ecosystem.config.cjs --only memedashboard
+cd /opt/memedashboard/server-py
+/usr/bin/python3.11 -m venv .venv 2>/dev/null || true
+.venv/bin/pip install -q -r requirements.txt 2>&1 | tail -1
+cd /opt/memedashboard
+pm2 restart pyradar 2>/dev/null || pm2 start "/opt/memedashboard/server-py/.venv/bin/python -m uvicorn app.main:app --app-dir server-py --host 127.0.0.1 --port 8010" --name pyradar --cwd /opt/memedashboard
 pm2 save
 for attempt in {1..12}; do
   if curl --compressed -fsS --max-time 5 http://127.0.0.1:3456/api/state -o /tmp/memedashboard-deployed-state.json; then
