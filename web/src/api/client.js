@@ -1,7 +1,12 @@
-// All upstream calls use literal '/api/' single-quote prefixes: cliperx.com
-// nginx sub_filter rewrites those literals to the /dashboard/ base path.
+// Base path auto-detect: cliperx serves this app under /dashboard/ (the
+// legacy nginx sub_filter trick), any other host uses the root path.
+export const API_BASE =
+  typeof location !== 'undefined' && location.pathname.includes('/dashboard/')
+    ? '/dashboard/api/'
+    : '/api/';
+
 export async function getJSON(path) {
-  const res = await fetch('/api' + path);
+  const res = await fetch(API_BASE + path.replace(/^\//, ''));
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }

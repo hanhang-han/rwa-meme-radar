@@ -1,6 +1,7 @@
 // SSE client over fetch-streaming: cliperx nginx sub_filter rewrites
 // fetch('/api/...') literals but never EventSource URLs, so the stream is
 // read manually. Polling remains the fallback whenever the stream is down.
+import { API_BASE } from '../api/client';
 import { useDashboardStore } from '../stores/dashboard';
 import { useDetailStore } from '../stores/detail';
 
@@ -19,7 +20,7 @@ export function startStream() {
 async function connectStream() {
   for (;;) {
     try {
-      const res = await fetch('/api/stream');
+      const res = await fetch(API_BASE + 'stream');
       if (!res.ok || !res.body) throw new Error('stream unavailable');
       const reader = res.body.getReader();
       const dec = new TextDecoder();
