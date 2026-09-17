@@ -123,6 +123,72 @@ async def _get_reserves(pool: str):
     return int(raw[2:66], 16), int(raw[66:130], 16)
 
 
+_side_turn = 0
+
+
+async def refresh_side_quotes() -> None:
+    """Rotate BSC and Robinhood chains (300s cadence, one chain per round):
+    batched price-info for candidates and stocks, same cool-down rules."""
+    global _side_turn
+    chains = ("56", "4663")
+    cid = chains[_side_turn % len(chains)]
+    _side_turn += 1
+    s = await store(cid)
+    assets = await s.all("asset")
+    work = [
+        a for a in assets
+        if a.get("kind") in ("stock", "candidate")
+        and _quote_miss.get(f"{cid}:{a.get('token')}", 0) < 3
+    ]
+    work.sort(key=lambda a: (a.get("fieldTimes") or {}).get("price", 0))
+    if work:
+        await refresh_quotes_chain(cid, work[:100])
+
+
+async def refresh_quotes_chain(cid: str, assets: list[dict]) -> None:
+    tokens: list[str] = []
+    seen = set()
+    for a in assets:
+        t = a.get("token", "")
+        if t in seen or not (t.startswith("0x") and len(t) == 42):
+            continue
+        seen.add(t)
+        tokens.append(t)
+    if not tokens:
+        return
+    answered: set[str] = set()
+    for i in range(0, len(tokens), 50):
+        batch = tokens[i : i + 50]
+        try:
+            data = await okx_post(
+                "/api/v6/dex/market/price-info",
+                [{"chainIndex": cid, "tokenContractAddress": t} for t in batch],
+                {"skip_round": True, "urgent": True},
+            )
+            if not isinstance(data, list):
+                raise RuntimeError("Invalid quote response")
+        except Exception as e:
+            print(f"[sideQuotes] chunk {i}-{i+50} skipped: {e}", flush=True)
+            continue
+        s = await store(cid)
+        for row in data:
+            token = (row.get("tokenContractAddress") or "").lower()
+            if token:
+                answered.add(token)
+            if str(row.get("chainIndex")) != cid:
+                continue
+            old = await s.get("asset", token)
+            updated = await save_asset(s, row)
+            if price_changed(old, updated):
+                broadcast("price", {
+                    "chainId": cid, "token": token,
+                    "price": updated.get("price"),
+                    "change24h": updated.get("change24h"),
+                    "at": now_ms(),
+                })
+    _cool(tokens, answered)
+
+
 async def refresh_watched() -> None:
     now = time.time()
     for t in list(_watched):

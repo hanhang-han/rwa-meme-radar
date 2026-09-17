@@ -60,6 +60,10 @@ async def save_asset(s, row: dict) -> dict | None:
     asset["updatedAt"] = observed
 
     await s.put("asset", token, asset)
+    # Keep the 5-minute sample line alive on every priced observation,
+    # matching the Node saveAsset semantics.
+    if "price" in row and asset.get("price") is not None:
+        await s.sample(token, asset["price"], asset.get("marketCap"), observed)
     return asset
 
 

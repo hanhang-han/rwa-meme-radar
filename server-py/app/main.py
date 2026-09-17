@@ -36,12 +36,13 @@ from .api import ai_route, candles, dashboard, misc, stream, token
 async def lifespan(_: FastAPI):
     from . import stream_hub
     from .collectors import binance as binance_collector
-    from .collectors.live_quotes import refresh_live_quotes, refresh_watched
+    from .collectors.live_quotes import refresh_live_quotes, refresh_side_quotes, refresh_watched
     from .collectors.scheduler import spawn_loop
 
     binance_collector.start_stream()
     spawn_loop("liveQuotes", 90, refresh_live_quotes)
     spawn_loop("watchedPrice", 15, refresh_watched)
+    spawn_loop("sideQuotes", 300, refresh_side_quotes)
     spawn_loop("binance", 30, binance_collector.refresh_binance)
     spawn_loop("binanceApply", 10, lambda: _sync_apply(binance_collector))
 
