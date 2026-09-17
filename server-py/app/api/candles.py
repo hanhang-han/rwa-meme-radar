@@ -10,7 +10,10 @@ from ..okx_client import okx_get
 
 router = APIRouter()
 
-BAR_TTL = {"1m": 25, "5m": 120, "15m": 300, "1H": 600}  # seconds
+BAR_TTL = {
+    "1m": 25, "5m": 120, "15m": 300, "1H": 600,
+    "4H": 1800, "6H": 2400, "12H": 3600, "1D": 7200, "1W": 86400,
+}  # seconds
 BARS = list(BAR_TTL)
 
 _mem: dict[str, tuple[float, list]] = {}
@@ -73,7 +76,7 @@ async def candle_series(chain: str, address: str, bar: str, limit: int):
 
 
 @router.get("/candles/{chain}/{address}")
-async def get_candles(chain: str, address: str, bar: str = Query(default="5m"), limit: int = Query(default=150, ge=30, le=300)):
+async def get_candles(chain: str, address: str, bar: str = Query(default="5m"), limit: int = Query(default=500, ge=30, le=1000)):
     address = address.lower()
     if bar not in BARS or chain not in ("196", "56", "4663") or not (address.startswith("0x") and len(address) == 42):
         raise HTTPException(status_code=400, detail="bad request")

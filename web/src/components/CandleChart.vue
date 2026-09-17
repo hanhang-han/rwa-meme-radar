@@ -26,7 +26,7 @@ const props = defineProps({
 const el = ref(null);
 const mode = ref('candle');
 const bar = ref('5m');
-const bars = ['1m', '5m', '15m', '1H'];
+const bars = ['1m', '5m', '15m', '1H', '4H', '1D', '1W'];
 const hint = ref('');
 
 let chart = null;
@@ -71,7 +71,7 @@ function decOf(v) {
   return v >= 100 ? 2 : v >= 1 ? 4 : v >= 0.01 ? 6 : 8;
 }
 
-async function loadCandles(address, barSel, limit = 180) {
+async function loadCandles(address, barSel, limit = 500) {
   const key = `${address}:${barSel}`;
   const now = Date.now();
   const hit = candleMem.get(key);
