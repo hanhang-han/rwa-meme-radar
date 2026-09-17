@@ -55,7 +55,8 @@ async def lifespan(_: FastAPI):
     from . import state as app_state
 
     async def registry_round():
-        await sync_registry(app_state.DATA.relations)
+        # The PairRegistry lives on X Layer: only chain-196 pairs belong there.
+        await sync_registry([r for r in app_state.DATA.relations if str(r.get("chainId") or "196") == "196"])
 
     spawn_loop("registrySync", 600, registry_round)
 

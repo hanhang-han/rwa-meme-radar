@@ -57,4 +57,4 @@ async def get_pair(chain: str, stock: str):
 @router.get("/registry")
 async def get_registry():
     await state.reload_if_stale()
-    return await registry_info(state.DATA.relations)
+    return await registry_info([r for r in state.DATA.relations if str(r.get("chainId") or "196") == "196"])
