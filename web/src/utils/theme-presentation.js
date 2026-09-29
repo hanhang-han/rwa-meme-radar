@@ -13,13 +13,16 @@ export function fieldObservedAt(asset, field) {
   return asset?.fieldTimes?.[field] ?? asset?.quoteAt ?? asset?.updatedAt ?? null;
 }
 
-export function buildThemeRows(relations, assets, now = Date.now()) {
-  const assetMap = new Map(
+export function buildThemeAssetMap(assets) {
+  return new Map(
     (assets ?? []).map((asset) => [
       `${String(asset.chainId ?? asset.chain ?? '196')}:${norm(asset.token)}`,
       asset,
     ]),
   );
+}
+
+function themePoolGroups(relations) {
   const pools = new Map();
 
   for (const relation of relations ?? []) {
@@ -27,23 +30,34 @@ export function buildThemeRows(relations, assets, now = Date.now()) {
     const chainId = String(relation.chainId ?? relation.chain ?? '196');
     const poolKey = `${chainId}:${norm(relation.pool || relation.id)}`;
     if (pools.has(poolKey)) continue;
-    const asset = assetMap.get(`${chainId}:${norm(relation.token)}`) ?? null;
-    pools.set(poolKey, {
-      relation,
-      asset,
-      chainId,
-      liquidityState: observationState(relation.liquidityUsd, relation.liquidityAt, now),
-    });
+    pools.set(poolKey, relation);
   }
 
   const grouped = new Map();
-  for (const pool of pools.values()) {
-    const assetKey = `${pool.chainId}:${norm(pool.relation.token)}`;
+  for (const relation of pools.values()) {
+    const assetKey = `${String(relation.chainId ?? relation.chain ?? '196')}:${norm(relation.token)}`;
     if (!grouped.has(assetKey)) grouped.set(assetKey, []);
-    grouped.get(assetKey).push(pool);
+    grouped.get(assetKey).push(relation);
   }
 
-  return [...grouped.entries()].map(([key, assetPools]) => {
+  return grouped;
+}
+
+export function countThemeRows(relations) {
+  return themePoolGroups(relations).size;
+}
+
+export function buildThemeRows(relations, assets, now = Date.now()) {
+  const assetMap = assets instanceof Map ? assets : buildThemeAssetMap(assets);
+  const grouped = themePoolGroups(relations);
+
+  return [...grouped.entries()].map(([key, relationsForAsset]) => {
+    const assetPools = relationsForAsset.map((relation) => ({
+      relation,
+      asset: assetMap.get(key) ?? null,
+      chainId: String(relation.chainId ?? relation.chain ?? '196'),
+      liquidityState: observationState(relation.liquidityUsd, relation.liquidityAt, now),
+    }));
     assetPools.sort((a, b) => {
       const freshDiff = Number(b.liquidityState === 'fresh') - Number(a.liquidityState === 'fresh');
       if (freshDiff) return freshDiff;

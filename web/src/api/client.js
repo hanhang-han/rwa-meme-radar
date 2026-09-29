@@ -18,7 +18,7 @@ export async function getJSON(path, timeoutMs = 25000) {
   } finally { clearTimeout(timer); }
 }
 
-export async function getDashboard(view = 'full') {
+export async function getDashboard(view = 'market') {
   return getJSON(`/dashboard?view=${view}`, view === 'overview' ? 15000 : 45000);
 }
 

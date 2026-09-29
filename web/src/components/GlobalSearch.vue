@@ -49,7 +49,7 @@ function move(delta) { if (!open.value) open.value = true; selected.value = Math
 function submit() {
   const exact = results.value.find(r => String(r.rawAddress).toLowerCase() === term.value.trim().toLowerCase());
   if (exact || results.value[selected.value]) router.push((exact ?? results.value[selected.value]).to);
-  else router.push({path:'/meme',query:{q:term.value.trim(),chain:scope.value}});
+  else router.push({path:'/meme',query:{q:term.value.trim(),chain:scope.value,rel:'all',fresh:'0'}});
   close(); input.value?.blur();
 }
 function onKey(event) { if (event.key === '/' && !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName ?? '')) { event.preventDefault(); input.value?.focus(); } }

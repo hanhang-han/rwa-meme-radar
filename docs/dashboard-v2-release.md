@@ -4,6 +4,8 @@
 
 发布脚本是 [deploy-dashboard-v2.sh](../scripts/deploy-dashboard-v2.sh)，Nginx 路由模板是 [dashboardv2-nginx.conf](../scripts/dashboardv2-nginx.conf)。运行前先看本地 `bash -n scripts/deploy-dashboard-v2.sh` 和 `scripts/deploy-dashboard-v2.sh --prepare-only` 的结果；前者检查语法，后者执行前端、后端测试并构建发布包，但不连接服务器。正常发布用 `scripts/deploy-dashboard-v2.sh`。
 
+首次上线后若只修改 V2 前端，使用 [deploy-dashboard-v2-web.sh](../scripts/deploy-dashboard-v2-web.sh)：先运行 `scripts/deploy-dashboard-v2-web.sh --prepare-only` 验证前端测试与 `/dashboardv2/` 构建，再运行 `scripts/deploy-dashboard-v2-web.sh` 发布。它只切换 `web-v2/dist`，保留上版静态文件在脚本输出的 `Rollback directory`，并核对新 V2 HTML、脚本资源、V2 API 与旧 `/dashboard/`。失败时自动恢复上版 V2 静态目录；不会改动旧站、Nginx 配置、后端或采集进程。若已成功发布后需要手动退回前端，把该目录下的 `dist` 移回 `web-v2/dist` 即可，旧目录请另行保留以供排查。
+
 脚本只打包 `server-py/app/state.py`、`server-py/app/theme_map.py` 和 V2 静态文件。远程会先校验当前 `state.py` 是否与 Git 标签 `dashboard-before-v2-20260929` 完全一致，并校验 Python 依赖文件、API 就绪状态、PM2 服务和实际生效的 Nginx 配置。如果线上代码或站点配置已有额外改动，它会停止，不覆盖未知版本。首次发布只会向 `cliperx.com` 唯一的 HTTPS server 块插入一个 V2 配置 include；发现已有 `/dashboardv2` 路由则停止，后续 V2 迭代需要单独审核更新方案。
 
 切换时只短暂停止并重启 `pyradar-projection` 与 `pyradar`，不停止 `pyradar-worker`。V2 的 Nginx include 固定在 `/opt/memedashboard/nginx/dashboardv2.conf`；若该文件已存在，首次发布会停止，绝不覆盖。脚本保存原 `state.py`、可选旧 `theme_map.py`、旧 V2 静态目录和原 Nginx 站点文件到 `.releases/dashboard-v2-before-*`，然后先测试 Nginx 配置再平滑重载。发布后核验：本机和公网 API 就绪；公网 V2 HTML 与新包哈希一致且脚本资源可读；服务器本机完整数据及公网概览数据均含 `themeMap` 与 `importantChanges`；旧 `/dashboard/api/health/ready` 仍可访问；采集进程 PID 未变化。任一步失败会尝试自动恢复上述文件并重启 API/投影，明确报告回滚是否完整。实际完成与否必须以脚本最终输出和公网浏览器验收为准。

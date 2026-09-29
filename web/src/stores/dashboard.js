@@ -1,5 +1,5 @@
 // Canonical list entities retain identity across snapshots and delta batches.
-// The stream is authoritative; full snapshots are bootstrap/recovery/checks.
+// The stream is authoritative; compact market snapshots bootstrap and reconcile it.
 import { defineStore } from 'pinia';
 import { getDashboard } from '../api/client.js';
 import { applyQuote, assetKey, mergeEntity, normalizeAddress, quoteKey } from '../utils/realtime.js';
@@ -41,7 +41,7 @@ export const useDashboardStore = defineStore('dashboard', {
       this.updatedAt=Date.now(); this.lastSnapshotAt=Date.now(); this.error=null; this._restoreSse();
     },
     async poll(options={}) {
-      const view=options.view ?? 'full';
+      const view=options.view ?? 'market';
       if (pollTasks.has(view)) return pollTasks.get(view);
       const task=(async()=>{
         try { const data=await getDashboard(view); this.acceptSnapshot(data,view); return data; }
@@ -68,7 +68,10 @@ export const useDashboardStore = defineStore('dashboard', {
       if(revision&&revision<=this.revision)return true;
       const unified=this.snapshot.unified;
       for(const group of GROUPS){
-        const removes=new Set((delta.removes?.[group]??[]).map(id=>typeof id==='object'?rowKey(group,id):String(id)));
+        const groupRemoves=delta.removes?.[group]??[];
+        const groupUpserts=delta.upserts?.[group]??[];
+        if(!groupRemoves.length&&!groupUpserts.length)continue;
+        const removes=new Set(groupRemoves.map(id=>typeof id==='object'?rowKey(group,id):String(id)));
         const rows=unified[group]??(unified[group]=[]);
         if(removes.size){
           for(let i=rows.length-1;i>=0;i--)if(removes.has(rowKey(group,rows[i])))rows.splice(i,1);
@@ -76,7 +79,7 @@ export const useDashboardStore = defineStore('dashboard', {
           if(group==='relations')for(const key of removes)this.liveRelations.delete(key);
         }
         const index=new Map(rows.map(row=>[rowKey(group,row),row]));
-        for(const row of delta.upserts?.[group]??[]){
+        for(const row of groupUpserts){
           const key=rowKey(group,row),old=index.get(key);
           if(old)mergeEntity(old,row,revision,true);
           else{const incoming=mergeEntity(null,row,revision);rows.push(incoming);index.set(key,incoming);}

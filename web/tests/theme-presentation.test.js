@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildThemeAssetMap,
   buildThemeRows,
+  countThemeRows,
   fieldCoverage,
   observationState,
   sortThemeRows,
@@ -28,6 +30,18 @@ test('theme rows group pools by chain and asset, then select a fresh representat
   assert.equal(xlayer.relation.id, 'fresh-small');
   assert.equal(xlayer.asset.symbol, 'ONE');
   assert.equal(rows.some(row => row.relation.id === 'unverified-issuer'),false);
+  assert.deepEqual(buildThemeRows(relations, buildThemeAssetMap(assets), NOW), rows);
+  assert.equal(countThemeRows(relations), rows.length);
+});
+
+test('theme count follows first pool observation when duplicate pools claim different assets', () => {
+  const relations = [
+    { id: 'first', level: 'A', chainId: '196', token: '0xa', pool: '0xpool' },
+    { id: 'duplicate', level: 'A', chainId: '196', token: '0xb', pool: '0xpool' },
+    { id: 'other', level: 'A', chainId: '56', token: '0xb', pool: '0xpool' },
+  ];
+  assert.equal(countThemeRows(relations), 2);
+  assert.deepEqual(buildThemeRows(relations, []).map(row => row.key), ['196:0xa', '56:0xb']);
 });
 
 test('historical toggle keeps only rows with a fresh pool estimate', () => {

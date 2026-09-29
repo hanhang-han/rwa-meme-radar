@@ -1,10 +1,10 @@
 <template>
-  <div class="kpi" :data-kpi-key="kpiKey">
+  <component :is="href ? 'a' : 'div'" class="kpi" :href="href || undefined" :data-kpi-key="kpiKey">
     <span class="kpi-label">{{ title }}</span>
-    <a v-if="href" :href="href" class="kpi-value mono" :class="{ 'kpi-flash': flashing }">{{ value }}</a>
-    <strong v-else class="kpi-value mono" :class="{ 'kpi-flash': flashing }">{{ value }}</strong>
+    <strong class="kpi-value mono" :class="{ 'kpi-flash': flashing }">{{ value }}</strong>
     <span class="kpi-note">{{ note }}</span>
-  </div>
+    <span v-if="href" class="kpi-link-cue" aria-hidden="true">↗</span>
+  </component>
 </template>
 
 <script setup>
@@ -29,3 +29,11 @@ watchEffect(() => {
   }
 });
 </script>
+
+<style scoped>
+a.kpi { position: relative; color: inherit; text-decoration: none; padding-right: 34px; cursor: pointer; }
+a.kpi:hover, a.kpi:focus-visible { border-color: var(--accent); }
+a.kpi:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.kpi-link-cue { position: absolute; right: 14px; top: 12px; color: var(--muted); }
+a.kpi:hover .kpi-link-cue, a.kpi:focus-visible .kpi-link-cue { color: var(--accent); }
+</style>

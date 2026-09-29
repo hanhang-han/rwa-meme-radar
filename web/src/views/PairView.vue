@@ -6,12 +6,14 @@
         <input v-model="q" :placeholder="tr('输入股票或 CA', 'Enter ticker or CA')" required>
         <button>{{ tr('搜索', 'Search') }}</button>
       </form>
+      <p v-if="!relationsReady" role="status" :class="verifiedRelations.length ? 'hint' : 'x-empty'">{{ store.error ? tr('完整配对列表读取失败，已显示可用数据。', 'The full pair list failed to load; available data remains visible.') : tr('完整配对列表正在同步，已显示可用数据。', 'The full pair list is syncing; available data is shown.') }} <button v-if="store.error" type="button" @click="store.poll()">{{ tr('重试', 'Retry') }}</button></p>
       <div v-if="verifiedRelations.length">
-        <RouterLink v-for="r in verifiedRelations.slice(0, 30)" :key="r.id" class="x-signal" :to="pairLink(r)">
-          {{ r.ticker }} · {{ chainName(r) }} · {{ short(r.token) }} <RelationBadge :relation="r" /> <span>{{ usd(r.liquidityUsd) }}</span>
-        </RouterLink>
+        <div v-for="r in verifiedRelations.slice(0, 30)" :key="r.id" class="x-signal">
+          <RouterLink class="v2-pair-row-link" :to="pairLink(r)"><span>{{ r.ticker }} · {{ chainName(r) }} · {{ short(r.token) }}</span><span>{{ usd(r.liquidityUsd) }}</span></RouterLink>
+          <RelationBadge :relation="r" />
+        </div>
       </div>
-      <div v-else class="x-empty">{{ tr('等待已核验配对。', 'Waiting for verified pairs.') }}</div>
+      <div v-else-if="relationsReady" class="x-empty">{{ tr('当前没有已核验配对。', 'No verified pairs are available.') }}</div>
     </section>
     <section v-else class="panel">
       <h2>{{ tr('池子', 'Pools') }}</h2>
@@ -19,7 +21,7 @@
         <input v-model="q" :placeholder="tr('输入股票或 CA', 'Enter ticker or CA')" required>
         <button>{{ tr('搜索', 'Search') }}</button>
       </form>
-      <p v-if="!store.snapshot" role="status" class="x-empty">{{ store.error ? tr('配对数据读取失败，请重试。', 'Failed to load pairs. Please retry.') : tr('正在读取配对证据…', 'Loading pair evidence…') }} <button v-if="store.error" @click="store.poll()">{{ tr('重试', 'Retry') }}</button></p>
+      <p v-if="!relationsReady" role="status" class="x-empty">{{ store.error ? tr('配对数据读取失败，请重试。', 'Failed to load pairs. Please retry.') : tr('正在读取配对证据…', 'Loading pair evidence…') }} <button v-if="store.error" type="button" @click="store.poll()">{{ tr('重试', 'Retry') }}</button></p>
       <p v-if="stockError" role="alert">{{ tr('资产详情暂时无法读取，配对证据仍可查看。', 'Asset details unavailable; pair evidence remains available.') }} <button @click="loadStock">{{ tr('重试', 'Retry') }}</button></p>
       <p v-if="memeError" role="alert">{{ tr('流动性池分布读取失败，请重试。', 'Pool distribution unavailable. Please retry.') }} <button @click="loadMeme">{{ tr('重试', 'Retry') }}</button></p>
       <p v-if="stockLoading" role="status">{{ tr('正在读取资产详情…', 'Loading asset details…') }}</p>
@@ -35,11 +37,13 @@
       <SpreadPanel :chain="props.chain" :token="props.stock" :pool="selected?.pool" />
       <div v-if="verifiedRelations.length" class="v2-pair-layout">
         <aside>
-          <RouterLink v-for="r in verifiedRelations.slice(0, 30)" :key="r.id" class="x-signal" :class="{ selected: selected?.id === r.id }"
-             :to="pairLink(r)">
-            <span><strong>{{ memeSymbol(r) }} ↔ {{ r.ticker }}</strong><small>{{ chainName(r) }} · {{ r.protocol }}</small><RelationBadge :relation="r" /></span>
-            <span>{{ usd(r.liquidityUsd) }}<small>{{ poolStateLabel(r) }}</small></span>
-          </RouterLink>
+          <div v-for="r in verifiedRelations.slice(0, 30)" :key="r.id" class="x-signal" :class="{ selected: selected?.id === r.id }">
+            <RouterLink class="v2-pair-row-link" :to="pairLink(r)">
+              <span><strong>{{ memeSymbol(r) }} ↔ {{ r.ticker }}</strong><small>{{ chainName(r) }} · {{ r.protocol }}</small></span>
+              <span>{{ usd(r.liquidityUsd) }}<small>{{ poolStateLabel(r) }}</small></span>
+            </RouterLink>
+            <RelationBadge :relation="r" />
+          </div>
         </aside>
         <div>
           <section v-if="selected" class="panel v3-evidence-panel">
@@ -130,7 +134,7 @@
         </div>
 
       </div>
-      <div v-else-if="store.snapshot" class="x-empty">
+      <div v-else-if="relationsReady" class="x-empty">
         {{ tr('当前资产尚无已核验配对，已有行情仍可查看。', 'This asset has no verified pairs yet. Available market history is shown above.') }}
         <RouterLink to="/stock">{{ tr('返回股票雷达', 'Back to Stock Radar') }}</RouterLink>
       </div>
@@ -163,6 +167,7 @@ const route = useRoute();
 const router = useRouter();
 const store = useDashboardStore();
 const detail = useDetailStore();
+const relationsReady = computed(() => !!store.snapshot && store.snapshot.unified?.snapshotScope !== 'overview');
 const q = ref('');
 const stockDetail = ref(null);
 const now = useMinuteClock();
@@ -272,3 +277,10 @@ function goSearch() {
 
 
 </script>
+
+<style scoped>
+.v2-pair-row-link { display: flex; align-items: center; justify-content: space-between; flex: 1; min-width: 0; gap: 12px; color: inherit; text-decoration: none; }
+.v2-pair-row-link:hover, .v2-pair-row-link:focus-visible { color: var(--accent); }
+.v2-pair-row-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.v2-pair-row-link > span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+</style>

@@ -17,10 +17,10 @@
     </div>
 
     <div id="xStockRows" class="v3-theme-list">
-      <div v-if="!cards.length" class="x-empty">{{ tr('暂无匹配股票主题。', 'No matching stock themes.') }}</div>
+      <div v-if="!cards.length" class="x-empty">{{ !store.snapshot ? tr('正在加载股票行情…', 'Loading stock quotes…') : store.snapshot.unified?.snapshotScope === 'overview' ? tr('股票列表仍在同步。', 'The stock list is still syncing.') : tr('暂无匹配股票主题。', 'No matching stock themes.') }}</div>
       <div v-else-if="!detailMode" class="stock-summary-head"><span>{{ tr('股票','Stock') }}</span><span>{{ tr('价格','Price') }}</span><span>24h</span><span>Meme</span><span>{{ tr('Meme 24h 成交','Meme volume') }}</span><span>{{ tr('配对池流动性','Pair liquidity') }}</span></div>
       <details v-for="card in cards" :key="card.ticker" class="x-stock v3-theme-card" :open="detailMode || autoOpen(card.ticker)">
-        <summary class="stock-summary-row" :aria-label="detailMode ? undefined : tr('查看股票详情', 'View stock detail') + ' ' + card.ticker" @click.prevent="openStock(card)">
+        <summary class="stock-summary-row" :aria-label="detailMode ? undefined : tr('查看股票详情', 'View stock detail') + ' ' + card.ticker" @click="onStockSummary($event, card)">
           <strong>{{ companyTitle(card.ticker, card.list[0]) }}</strong>
           <span><small class="stock-mobile-label">{{ tr('价格','Price') }}</small><LiveNumber :value="officialStock(card)?.price" :currency="officialStock(card)?.priceCurrency ?? ''" format="price" /><small v-if="officialStock(card)?.price != null" class="stock-quote-source">{{ chainName(officialStock(card)) }} · {{ officialStock(card)?.provider ?? tr('来源待核验','Source unverified') }}</small></span>
           <span :class="Number(officialStock(card)?.change24h)>0?'up':Number(officialStock(card)?.change24h)<0?'down':''"><small class="stock-mobile-label">24h</small><LiveNumber :value="officialStock(card)?.change24h" format="percent" /></span>
@@ -39,7 +39,7 @@
             </div>
           </div>
 
-          <div v-if="visibleThemeRows(card).length" class="scroll v3-theme-scroll">
+          <div v-if="card.visibleRows.length" class="scroll v3-theme-scroll">
             <table class="tbl v3-theme-table">
               <thead>
                 <tr>
@@ -53,7 +53,7 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="row in visibleThemeRows(card)" :key="row.key">
+                <tr v-for="row in card.visibleRows" :key="row.key">
                   <td>
                     <strong class="v3-token-name">{{ row.asset?.symbol ?? short(row.relation.token) }}</strong>
                     <small>{{ chainName(row.relation) }} · {{ short(row.relation.token) }}</small>
@@ -65,7 +65,7 @@
                   <td>
                     <strong><LiveNumber :value="row.relation.liquidityUsd" /></strong>
                     <span class="v3-state" :class="`is-${row.liquidityState}`">{{ poolStateLabel(row) }}</span>
-                    <div class="v3-pool-bar"><i :style="{ width: poolBarWidth(card, row) + '%' }"></i></div>
+                    <div class="v3-pool-bar"><i :style="{ width: poolBarWidth(card.poolBarMax, row) + '%' }"></i></div>
                     <small>{{ age(row.relation.liquidityAt) }}<template v-if="row.poolCount > 1"> · {{ row.poolCount }} {{ tr('个池，当前显示代表池', 'pools; representative shown') }}</template></small>
                   </td>
                   <td>
@@ -128,8 +128,8 @@ import { useDashboardStore } from '../stores/dashboard';
 import { tr, useI18n } from '../i18n';
 import { age, chainName, date, num, pairLink, pct, short, usd } from '../utils/format';
 import { chainScope, inChainScope } from '../utils/chain-scope';
-import { relationMatchesStock } from '../utils/relations';
-import { buildThemeRows, fieldObservedAt, sortThemeRows } from '../utils/theme-presentation';
+import { assetKey } from '../utils/realtime';
+import { buildThemeAssetMap, buildThemeRows, countThemeRows, fieldObservedAt, sortThemeRows } from '../utils/theme-presentation';
 import { preferredOfficialStock } from '../utils/product-labels';
 import { themeLabel } from '../utils/theme-labels';
 
@@ -155,37 +155,44 @@ const COMPANY = { AAPL: '苹果', AMD: '超威半导体', AMZN: '亚马逊', BAB
 const search = computed(() => String(detailMode.value ? route.params.ticker : route.query.q ?? '').toLowerCase());
 const PAGE = 20;
 const page = computed(() => Math.max(0, Number(route.query.page) || 0));
+const assetMap = computed(() => buildThemeAssetMap(store.assets));
 
 const allRows = computed(() => {
   const grouped = new Map();
+  const groupsByStock = new Map();
   for (const stock of store.stockTokens) {
     if (!inChainScope(stock,scope.value)) continue;
     const id = stock.stockIdentity?.id || stock.stockCode || stock.assetId || stock.instrumentId;
     const haystack = [stock.stockCode, stock.tokenSymbol, stock.tokenName, stock.tokenContractAddress, stock.stockIdentity?.nameZh, stock.stockIdentity?.nameEn, stock.stockIdentity?.code].filter(Boolean).join(' ').toLowerCase();
     if (search.value && !haystack.includes(search.value)) continue;
-    if (!grouped.has(id)) grouped.set(id, []);
-    grouped.get(id).push(stock);
+    if (!grouped.has(id)) grouped.set(id, { ticker: id, list: [], relations: [] });
+    const group = grouped.get(id);
+    group.list.push(stock);
+    const key = assetKey(stock?.chainId ?? stock?.chain ?? stock?.chainIndex, stock?.tokenContractAddress ?? stock?.instrumentId);
+    if (!groupsByStock.has(key)) groupsByStock.set(key, new Set());
+    groupsByStock.get(key).add(group);
   }
-  return [...grouped.entries()]
-    .map(([ticker, list]) => ({ ticker, list, themeRows: themeRowsFor(list) }))
-    .sort((a, b) => b.themeRows.length - a.themeRows.length || String(a.ticker ?? '').localeCompare(String(b.ticker ?? '')));
+  // Keep the relation's source order, including when several stock tokens share a ticker.
+  for (const relation of store.relations) {
+    const key = assetKey(relation?.chainId ?? relation?.chain ?? relation?.chainIndex, relation?.stock);
+    for (const group of groupsByStock.get(key) ?? []) group.relations.push(relation);
+  }
+  return [...grouped.values()]
+    .map((group) => ({ ...group, themeRowCount: countThemeRows(group.relations) }))
+    .sort((a, b) => b.themeRowCount - a.themeRowCount || String(a.ticker ?? '').localeCompare(String(b.ticker ?? '')));
 });
 const pages = computed(() => Math.max(1, Math.ceil(allRows.value.length / PAGE)));
 const safePage = computed(() => Math.min(page.value, pages.value - 1));
-const cards = computed(() => allRows.value.slice(safePage.value * PAGE, safePage.value * PAGE + PAGE));
-
-function themeRowsFor(list) {
-  const relations = store.relations.filter((relation) => list.some((stock) => relationMatchesStock(relation, stock)));
-  return buildThemeRows(relations, store.assets);
-}
+const cards = computed(() => allRows.value.slice(safePage.value * PAGE, safePage.value * PAGE + PAGE).map((group) => {
+  const themeRows = buildThemeRows(group.relations, assetMap.value);
+  const visibleRows = sortThemeRows(themeRows, sortBy.value, includeHistorical.value);
+  const poolBarMax = Math.max(0, ...visibleRows.map((row) => Number(row.relation.liquidityUsd) || 0));
+  return { ...group, themeRows, visibleRows, poolBarMax };
+}));
 
 function officialStock(card) { return preferredOfficialStock(card.list); }
 function cardMemeVolume(card) { const assets=[...new Map(card.themeRows.map(row => [row.key,row.asset])).values()]; if(!assets.length || assets.some(asset => asset?.volume24h == null || asset?.volumeCurrency !== 'USD'))return null; return assets.reduce((sum,asset)=>sum+Number(asset.volume24h),0); }
 function cardPoolLiquidity(card) { const pools = new Map(); for(const row of card.themeRows) for(const pool of row.pools ?? []) if(pool.pool) pools.set(String(pool.chainId)+':'+String(pool.pool).toLowerCase(),pool.liquidityUsd); if(!pools.size || [...pools.values()].some(value => value == null)) return null; return [...pools.values()].reduce((sum,value)=>sum+Number(value),0); }
-
-function visibleThemeRows(card) {
-  return sortThemeRows(card.themeRows, sortBy.value, includeHistorical.value);
-}
 
 function freshPoolCount(card) {
   return card.themeRows.filter((row) => row.liquidityState === 'fresh').length;
@@ -195,8 +202,7 @@ function poolCount(card) {
   return card.themeRows.reduce((total, row) => total + row.poolCount, 0);
 }
 
-function poolBarWidth(card, row) {
-  const max = Math.max(...visibleThemeRows(card).map((item) => Number(item.relation.liquidityUsd) || 0), 0);
+function poolBarWidth(max, row) {
   return max > 0 ? Math.max(1, Math.min(100, (Number(row.relation.liquidityUsd) || 0) / max * 100)) : 0;
 }
 
@@ -224,8 +230,13 @@ function autoOpen(ticker) {
 }
 
 function openStock(card) {
-  if (detailMode.value) return;
   router.push({ name: 'stockDetail', params: { ticker: card.list[0]?.stockCode ?? card.ticker }, query: { chain: scope.value } });
+}
+
+function onStockSummary(event, card) {
+  if (detailMode.value) return;
+  event.preventDefault();
+  openStock(card);
 }
 
 function setPage(next) {

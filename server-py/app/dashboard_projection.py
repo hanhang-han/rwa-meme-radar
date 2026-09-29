@@ -110,10 +110,91 @@ def overview_dashboard(payload):
     ids = {(str(a.get('chainId')), a.get('token')) for a in related}
     unified['assets'] = related
     unified['relations'] = [r for r in unified.get('relations', []) if (str(r.get('chainId')), r.get('token')) in ids]
-    unified['stockTokens'] = []
+    # The fast overview should also make the Stock tab useful while the full
+    # market catalogue is loading. Only include verified stocks connected to
+    # the overview's already-selected pair relations, bounded to 20 rows.
+    stock_ids = {(str(r.get('chainId')), str(r.get('stock') or '').lower())
+                 for r in unified['relations'] if r.get('level') == 'A' and r.get('status') == 'verified'}
+    unified['stockTokens'] = [s for s in unified.get('stockTokens', [])
+                              if (str(s.get('chainId')), str(s.get('tokenContractAddress') or '').lower()) in stock_ids
+                              and (s.get('issuerIdentity') or {}).get('verificationStatus') == 'official'][:20]
     unified['groups'] = []
     unified['snapshotScope'] = 'overview'
     unified['sectors'] = [{k:v for k,v in row.items() if k!='history'} for row in unified.get('sectors', [])]
+    return {**payload, 'unified': unified}
+
+
+# The durable full projection retains evidence for many fields on every row.
+# Market pages need every identity, but only the columns they actually render;
+# token-detail and comparison endpoints remain the source of detailed evidence.
+MARKET_ASSET_FIELDS = set('chainId token symbol name kind price priceCurrency priceScope quoteType marketId provider venue quoteAt quoteStatus quoteReason volume24h volumeCurrency volumeScope totalLiquidityUsd totalLiquidityAt totalLiquidityStatus totalLiquidityCoverage pairLiquidityUsd marketCap change24h txs24h buys24h sells24h holders firstSeen riskFlags riskStatus relationLevel match projectionKey'.split())
+MARKET_STOCK_FIELDS = set('chainId tokenContractAddress assetId instrumentId stockCode tokenSymbol tokenName issuer price priceCurrency priceScope provider volume24h volumeCurrency change24h quoteAt quoteStatus quoteReason stockPrice referenceAt referenceCurrency referenceProvider referenceStatus referenceReason referenceScope referenceDelayMs referenceRealtime marketSession verificationStatus projectionKey'.split())
+MARKET_RELATION_FIELDS = set('id chainId token stock stockSide ticker pool token0 token1 wrapper protocol feePct firstSeen poolCreatedAt discoveredAt checkedAt block status liquidityUsd liquidityAt level evidenceStatus verificationStatus projectionKey'.split())
+
+
+def _market_nested(row, field, fields):
+    value = pick(row.get(field) or {}, fields)
+    return {field: value} if value else {}
+
+
+def _market_asset(row):
+    out = pick(row, MARKET_ASSET_FIELDS)
+    # Volume/liquidity comparability depends on provenance, not merely values.
+    if isinstance(out.get('totalLiquidityCoverage'), dict):
+        out['totalLiquidityCoverage'] = pick(out['totalLiquidityCoverage'], {'scope', 'coverage', 'provider'})
+    for field, keys in (
+        ('fieldTimes', {'price', 'volume24h', 'change24h', 'holders'}),
+        ('fieldSources', {'price', 'volume24h'}),
+        ('fieldScopes', {'volume24h'}),
+        ('priceProvenance', {'timeKind'}),
+    ):
+        out.update(_market_nested(row, field, keys))
+    quality = row.get('dataQuality') or {}
+    if quality.get('tier'):
+        out['dataQuality'] = {'tier': quality['tier']}
+    if row.get('riskFlags') and row.get('riskAssessment'):
+        out['riskAssessment'] = row['riskAssessment']
+    return out
+
+
+def _market_stock(row):
+    out = pick(row, MARKET_STOCK_FIELDS)
+    for field, keys in (
+        ('fieldTimes', {'price', 'stockPrice', 'volume24h', 'change24h'}),
+        ('fieldSources', {'price'}),
+        ('priceProvenance', {'timeKind'}),
+        ('issuerIdentity', {'verificationStatus', 'eligibleForPair'}),
+        ('stockIdentity', {'id', 'code', 'status', 'nameZh', 'nameEn'}),
+    ):
+        out.update(_market_nested(row, field, keys))
+    # ComparisonMetric uses validity boundaries to avoid presenting an expired
+    # premium as current. Preserve them even though input evidence is omitted.
+    if row.get('premium') is not None:
+        out['premium'] = pick(row['premium'], {'value', 'status', 'reason', 'at', 'validUntil', 'realtimeUntil'})
+        out['premium']['value'] = row['premium'].get('value')
+    return out
+
+
+def _market_relation(row):
+    out = pick(row, MARKET_RELATION_FIELDS)
+    for field in ('stockIdentity', 'sideIdentity'):
+        out.update(_market_nested(row, field, {'verificationStatus', 'eligibleForPair'}))
+    if row.get('priceComparison'):
+        comparison = row['priceComparison']
+        relative = (comparison.get('relative') or {}).get('1h')
+        out['priceComparison'] = {'relative': {'1h': relative} if relative else {}}
+    if row.get('amounts'):
+        out['amounts'] = row['amounts']
+    return out
+
+
+def market_dashboard(payload):
+    """All market identities with list evidence; full/overview remain intact."""
+    unified = dict(payload['unified'])
+    unified['snapshotScope'] = 'market'
+    unified['assets'] = [_market_asset(row) for row in unified.get('assets', [])]
+    unified['stockTokens'] = [_market_stock(row) for row in unified.get('stockTokens', [])]
+    unified['relations'] = [_market_relation(row) for row in unified.get('relations', [])]
     return {**payload, 'unified': unified}
 
 

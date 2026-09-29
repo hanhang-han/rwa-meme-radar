@@ -1,7 +1,7 @@
 <template>
-  <tr :data-asset="a.token" :class="{ 'v2-member-row':child, 'is-stale':isStale }">
+  <tr :data-asset="a.token" :class="{ 'v2-member-row':child, 'is-stale':isStale }" class="meme-clickable-row" tabindex="0" role="link" :aria-label="tr('查看资产详情', 'View asset details') + ' ' + (a.name || a.symbol || short(a.token))" @click="openDetail" @keydown.enter="openDetail">
     <td class="meme-identity-cell">
-      <div class="meme-name-line"><RouterLink :to="detailLink(a)"><strong>{{ a.name || a.symbol || short(a.token) }}</strong></RouterLink></div>
+      <div class="meme-name-line"><RouterLink :to="detailLink(a)"><strong>{{ a.name || a.symbol || short(a.token) }}</strong></RouterLink><RouterLink class="meme-detail-link" :to="detailLink(a)">{{ tr('详情', 'Details') }} →</RouterLink></div>
       <div class="meme-address-line"><span>{{ chainName(a) }}</span><code>{{ short(a.token) }}</code><button type="button" :aria-label="tr('复制合约地址','Copy contract address')" @click="copyAddress">⧉</button><small v-if="copied">{{ tr('已复制','Copied') }}</small></div>
       <button v-if="extra > 0" class="v2-group-toggle" @click="emit('toggle-group')">+{{ extra }} {{ tr('个同名合约', 'same-name contracts') }}</button>
     </td>
@@ -25,6 +25,7 @@
 
 <script setup>
 import { computed, reactive, ref, watchEffect } from 'vue';
+import { useRouter } from 'vue-router';
 import LiveNumber from './LiveNumber.vue';
 import RelationBadge from './RelationBadge.vue';
 import RiskBadge from './RiskBadge.vue';
@@ -34,7 +35,12 @@ import { relationMatchesAsset } from '../utils/relations';
 import { relationLevel, volumeLiquidityRatio } from '../utils/product-labels';
 
 const props=defineProps({ a:{type:Object,required:true}, relations:{type:Array,default:()=>[]}, store:{type:Object,required:true}, child:{type:Boolean,default:false}, extra:{type:Number,default:0} });
+const router=useRouter();
 const emit=defineEmits(['toggle-group']);
+function openDetail(event) {
+  if (event.target !== event.currentTarget && event.target.closest?.('a, button, input, select, textarea, summary')) return;
+  router.push(detailLink(props.a));
+}
 const relOf=computed(()=>props.relations.filter(r=>relationMatchesAsset(r,props.a)).sort((a,b)=>({A:0,C:1,B:2}[relationLevel(a)]??3)-({A:0,C:1,B:2}[relationLevel(b)]??3) || Number(b.liquidityUsd??0)-Number(a.liquidityUsd??0)));
 const ratio=computed(()=>volumeLiquidityRatio(props.a));
 const observedAt=computed(()=>props.a.fieldTimes?.price ?? props.a.quoteAt ?? props.a.updatedAt);

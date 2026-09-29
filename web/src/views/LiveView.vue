@@ -10,7 +10,7 @@
     <div class="kpis">
       <KpiCard kpi-key="actionableAssets" :title="tr('数据达标的活跃 Meme', 'Qualified active memes')" :value="num(scopeMetrics.active)" :note="deltaNote('active') || tr('需有新鲜报价与资产总流动性', 'Requires a fresh quote and asset-wide liquidity')" href="#/meme" />
       <KpiCard kpi-key="verifiedPools" :title="tr('股票配对池', 'Stock pairs')" :value="num(scopeMetrics.pools)" :note="deltaNote('pools')" href="#/pair" />
-      <KpiCard kpi-key="pairedLiquidityUsd" :title="tr('配对池总流动性', 'Pair liquidity')" :value="usd(scopeMetrics.liquidity)" :note="deltaNote('liquidity')" />
+      <KpiCard kpi-key="pairedLiquidityUsd" :title="tr('配对池总流动性', 'Pair liquidity')" :value="usd(scopeMetrics.liquidity)" :note="deltaNote('liquidity')" href="#/pair" />
       <KpiCard kpi-key="newRelations24h" :title="tr('24h 新增配对', 'New pairs (24h)')" :value="num(scopeMetrics.newPairs)" :note="scopeMetrics.newPairs == null ? tr('新池创建时间待采集','Pool creation time pending') : deltaNote('newPairs')" href="#/events" />
     </div>
 

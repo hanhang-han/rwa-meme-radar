@@ -35,6 +35,12 @@
         <template v-if="!loadTimedOut"><div v-for="n in 8" :key="n" class="skeleton-line"></div></template>
         <button v-else @click="retryLoad">{{ tr('加载失败 · 重试', 'Failed to load · Retry') }}</button>
       </section>
+      <p v-else-if="listWaitingForData" class="panel market-load-status" role="status">
+        {{ store.error
+          ? tr('行情列表暂时加载失败，已显示可用数据。', 'Market list failed to load; available data remains visible.')
+          : tr('行情列表正在同步，筛选和导航已可使用。', 'Market list is syncing; filters and navigation are available.') }}
+        <button v-if="store.error" type="button" @click="retryLoad">{{ tr('重试加载', 'Retry loading') }}</button>
+      </p>
       <p v-else-if="isMarketPage && store.error" class="hint" role="status">{{ tr('行情更新失败，暂时保留上一份数据；稍后自动重试。', 'Market update failed; the last snapshot is retained. Retrying automatically.') }}</p>
       <RouterView v-if="!waitingForSnapshot" :key="$route.path" />
     </div>
@@ -55,7 +61,8 @@ const lang = useI18n().lang;
 const store = useDashboardStore();
 const isMarketPage = computed(() => route.meta.marketData !== false);
 const scope = computed(() => chainScope(route.query));
-const waitingForSnapshot = computed(() => ['live', 'meme', 'stock', 'stockDetail'].includes(route.name) && (!store.snapshot || route.name !== 'live' && store.snapshot.unified?.snapshotScope === 'overview'));
+const waitingForSnapshot = computed(() => route.name === 'live' && !store.snapshot);
+const listWaitingForData = computed(() => ['meme', 'stock', 'stockDetail'].includes(route.name) && (!store.snapshot || store.snapshot.unified?.snapshotScope === 'overview'));
 const langFeedback = ref('');
 const clock = ref(Date.now());
 const loadTimedOut = ref(false);
