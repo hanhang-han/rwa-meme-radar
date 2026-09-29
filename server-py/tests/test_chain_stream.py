@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -165,6 +166,7 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.at = 1_790_317_800_000
 
     async def asyncTearDown(self):
+        await self.collector.close()
         await self.store.close()
         self.tmp.cleanup()
 
@@ -729,6 +731,79 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         frames = await cur.fetchall()
         self.assertEqual(sum(row[0] == "trade" for row in frames), 2)
         self.assertEqual(sum(row[0] == "candle" for row in frames), 6)
+
+    async def test_trade_commit_uses_dedicated_connection_while_shared_read_is_busy(self):
+        with patch('app.collectors.chain_stream.store', new=AsyncMock(return_value=self.store)):
+            await self.collector.init()
+        self.assertIsNot(self.collector.trade_db, self.store.db)
+        started, release = threading.Event(), threading.Event()
+
+        def hold_shared_reader():
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError('test shared reader was not released')
+            return 1
+
+        await self.store.db.create_function('hold_shared_reader', 0, hold_shared_reader)
+        blocked = asyncio.create_task(self.store.db.execute_fetchall('SELECT hold_shared_reader()'))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        try:
+            self.assertTrue(await asyncio.wait_for(
+                self.collector.commit_trade(self.market, self.trade('dedicated', 2)), 2))
+        finally:
+            release.set()
+            await blocked
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0],
+                         len(self.collector.bars(self.market)) + 1)
+        await self.collector.close()
+        self.assertIsNone(self.collector.trade_db)
+        self.assertFalse(self.collector.initialized)
+
+    async def test_failed_dedicated_trade_does_not_rollback_shared_read_transaction(self):
+        await self.collector._open_trade_db()
+        await self.store.db.execute("""CREATE TRIGGER fail_dedicated_candle BEFORE INSERT ON candles
+            WHEN NEW.bar='1m' BEGIN SELECT RAISE(ABORT, 'failed-dedicated-candle'); END""")
+        await self.store.db.commit()
+        await self.store.db.execute('BEGIN')
+        await self.store.fetchone('SELECT COUNT(*) FROM facts')
+        self.assertTrue(self.store.db.in_transaction)
+        try:
+            with self.assertRaisesRegex(Exception, 'failed-dedicated-candle'):
+                await self.collector.commit_trade(self.market, self.trade('isolated-failure', 2))
+            self.assertTrue(self.store.db.in_transaction)
+        finally:
+            await self.store.db.rollback()
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 0)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0], 0)
+
+    async def test_cancelled_dedicated_trade_rolls_back_before_releasing_write_lock(self):
+        await self.collector._open_trade_db()
+        started, release = threading.Event(), threading.Event()
+
+        def hold_trade_insert():
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError('test trade insert was not released')
+            return 1
+
+        await self.collector.trade_db.create_function('hold_trade_insert', 0, hold_trade_insert)
+        await self.collector.trade_db.execute('''CREATE TEMP TRIGGER hold_trade_insert_trigger
+            BEFORE INSERT ON trades BEGIN SELECT hold_trade_insert(); END''')
+        task = asyncio.create_task(self.collector.commit_trade(
+            self.market, self.trade('cancelled-dedicated', 2)))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        try:
+            task.cancel()
+            await asyncio.sleep(.02)
+            self.assertTrue(self.store._write_lock.locked())
+        finally:
+            release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        self.assertFalse(self.store._write_lock.locked())
+        self.assertFalse(self.collector.trade_db.in_transaction)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 0)
 
     async def test_chain_trade_preserves_candle_then_trade_event_order_and_observation(self):
         await self.collector.commit_trade(self.market, self.trade('ordered', 2))

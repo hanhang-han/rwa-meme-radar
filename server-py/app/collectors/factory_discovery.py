@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
+import aiosqlite
 import httpx
 from web3 import Web3
 
@@ -338,42 +339,51 @@ class FactoryDiscovery:
         anchors = (cursor["anchors"] + [{"block": end_header["block"], "hash": end_header["hash"]}])[-128:]
         now = int(time.time() * 1000)
         created = []
-        async with self.store._guard_write():
-            await self.store.db.execute("BEGIN IMMEDIATE")
-            try:
-                for item in found:
-                    old = await self.store.fetchone("SELECT status,discovered_at FROM factory_discovery_events WHERE id=?", (item["id"],))
-                    if old:
-                        item["discoveredAt"] = old[1]
-                    if old is None or old[0] == "orphaned":
-                        created.append(dict(item))
-                    await self.store.db.execute("""INSERT INTO factory_discovery_events
-                        (id,chain,factory,pool,block,block_hash,tx_hash,log_index,created_at,discovered_at,status,body)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                        ON CONFLICT(id) DO UPDATE SET status=excluded.status,body=excluded.body,
-                            processing_status=CASE WHEN factory_discovery_events.status='orphaned'
-                                THEN 'pending' ELSE factory_discovery_events.processing_status END,
-                            relation_id=CASE WHEN factory_discovery_events.status='orphaned'
-                                THEN NULL ELSE factory_discovery_events.relation_id END,
-                            retracted_at=CASE WHEN factory_discovery_events.status='orphaned'
-                                THEN NULL ELSE factory_discovery_events.retracted_at END""",
-                        (item["id"], CHAIN_ID, item["factory"], item["pool"], item["creationBlock"],
-                         item["creationBlockHash"], item["creationTx"], item["creationLogIndex"],
-                         item["poolCreatedAt"], item["discoveredAt"], item["confirmationStatus"],
-                         json.dumps(item, separators=(",", ":"))))
-                cutoff = head["block"] - self.confirmations
-                # Previous provisional rows become final only after their
-                # anchored block remains canonical through the latest head.
-                await self.store.db.execute("""UPDATE factory_discovery_events
-                    SET status='confirmed',body=json_set(body,'$.confirmationStatus','confirmed')
-                    WHERE chain=? AND status='provisional' AND block<=?""", (CHAIN_ID, cutoff))
-                await self.store.db.execute("""UPDATE factory_discovery_cursors
-                    SET block=?,hash=?,anchors=?,batch_blocks=?,updated_at=? WHERE chain=?""",
-                    (end_header["block"], end_header["hash"], json.dumps(anchors), batch_blocks, now, CHAIN_ID))
-                await self.store.db.commit()
-            except BaseException:
-                await self.store.db.rollback()
-                raise
+        # The shared X Layer connection serves unrelated reads. Each awaited
+        # statement on it can sit behind those reads while holding the one
+        # process-wide writer lock. A short dedicated connection keeps this
+        # evidence + watermark transaction atomic without that queue.
+        async with aiosqlite.connect(self.store.path, timeout=2) as db:
+            # _guard_write() rolls back store.db on failure. This transaction
+            # lives on db, so hold the same writer lock and roll back db only.
+            async with self.store._write_lock:
+                try:
+                    await db.execute("BEGIN IMMEDIATE")
+                    for item in found:
+                        rows = await db.execute_fetchall(
+                            "SELECT status,discovered_at FROM factory_discovery_events WHERE id=?", (item["id"],))
+                        old = rows[0] if rows else None
+                        if old:
+                            item["discoveredAt"] = old[1]
+                        if old is None or old[0] == "orphaned":
+                            created.append(dict(item))
+                        await db.execute("""INSERT INTO factory_discovery_events
+                            (id,chain,factory,pool,block,block_hash,tx_hash,log_index,created_at,discovered_at,status,body)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                            ON CONFLICT(id) DO UPDATE SET status=excluded.status,body=excluded.body,
+                                processing_status=CASE WHEN factory_discovery_events.status='orphaned'
+                                    THEN 'pending' ELSE factory_discovery_events.processing_status END,
+                                relation_id=CASE WHEN factory_discovery_events.status='orphaned'
+                                    THEN NULL ELSE factory_discovery_events.relation_id END,
+                                retracted_at=CASE WHEN factory_discovery_events.status='orphaned'
+                                    THEN NULL ELSE factory_discovery_events.retracted_at END""",
+                            (item["id"], CHAIN_ID, item["factory"], item["pool"], item["creationBlock"],
+                             item["creationBlockHash"], item["creationTx"], item["creationLogIndex"],
+                             item["poolCreatedAt"], item["discoveredAt"], item["confirmationStatus"],
+                             json.dumps(item, separators=(",", ":"))))
+                    cutoff = head["block"] - self.confirmations
+                    # Previous provisional rows become final only after their
+                    # anchored block remains canonical through the latest head.
+                    await db.execute("""UPDATE factory_discovery_events
+                        SET status='confirmed',body=json_set(body,'$.confirmationStatus','confirmed')
+                        WHERE chain=? AND status='provisional' AND block<=?""", (CHAIN_ID, cutoff))
+                    await db.execute("""UPDATE factory_discovery_cursors
+                        SET block=?,hash=?,anchors=?,batch_blocks=?,updated_at=? WHERE chain=?""",
+                        (end_header["block"], end_header["hash"], json.dumps(anchors), batch_blocks, now, CHAIN_ID))
+                    await db.commit()
+                except BaseException:
+                    await db.rollback()
+                    raise
         return created
 
     async def _confirm_existing(self, head):

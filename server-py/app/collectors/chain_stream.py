@@ -11,6 +11,7 @@ import time
 from collections import OrderedDict
 from decimal import Decimal, localcontext
 
+import aiosqlite
 import httpx
 import websockets
 from web3 import Web3
@@ -140,6 +141,7 @@ class ChainPoolStream:
                                    self.chain == "4663" and os.environ.get(
                                        "ROBINHOOD_STREAM_HTTP_READS", "false").lower() == "true")
         self.http = None
+        self.trade_db = None
         self.pools = {}
         self.assets = {}
         self.relations = {}
@@ -206,7 +208,26 @@ class ChainPoolStream:
             """)
             await self.s.db.commit()
         await self.catalogue()
+        await self._open_trade_db()
         self.initialized = True
+
+    async def _open_trade_db(self):
+        """Keep trade transactions off the shared connection's read queue."""
+        if self.trade_db is not None or self.s.path == ":memory:":
+            return
+        connection = await aiosqlite.connect(self.s.path, timeout=15)
+        try:
+            await connection.execute("PRAGMA busy_timeout=15000")
+        except BaseException:
+            await connection.close()
+            raise
+        self.trade_db = connection
+
+    async def close(self):
+        connection, self.trade_db = self.trade_db, None
+        self.initialized = False
+        if connection is not None:
+            await connection.close()
 
     async def catalogue(self):
         rows = await self.s.all("pool")
@@ -725,19 +746,26 @@ class ChainPoolStream:
         from .market_streams import BAR_MS, trade_to_candle
         from ..realtime_schema import enqueue_events
         s = self.s
+        # Direct unit-test collectors may not have run init(). Production uses
+        # a dedicated connection so unrelated reads cannot queue inside this
+        # global-write-lock transaction.
+        db = self.trade_db or s.db
+        # _guard_write rolls back s.db on failure. A dedicated transaction must
+        # hold the same lock without touching an unrelated shared transaction.
+        write_guard = s._write_lock if db is not s.db else s._guard_write()
         received = trade.get('receivedAt') or now_ms()
-        async with s._guard_write():
+        async with write_guard:
             stamp = now_ms()
             market_frame = market.frame()
             body = {**market_frame, **trade, "provider": "Chain RPC", "source": "Chain RPC",
                     "receivedAt": received, "sourceEventAt": trade["t"], "persistedAt": stamp,
                     "volume": trade["quoteQuantity"] if market.quote_currency == "USD" else None}
-            await s.db.execute("BEGIN IMMEDIATE")
             try:
-                insert = await s.db.execute("INSERT OR IGNORE INTO trades VALUES (?,?,?,?)",
+                await db.execute("BEGIN IMMEDIATE")
+                insert = await db.execute("INSERT OR IGNORE INTO trades VALUES (?,?,?,?)",
                     (s.key(market.storage), trade["id"], trade["t"], json.dumps(body)))
                 if not insert.rowcount:
-                    await s.db.rollback()
+                    await db.rollback()
                     return False
                 fact_rows = [self._fact_params("market-registry", market.storage, market.record())]
                 candle_rows = []
@@ -759,7 +787,7 @@ class ChainPoolStream:
                 for kind, keys in selectors.items():
                     where.append("(kind=? AND id IN (" + ",".join("?" for _ in keys) + "))")
                     args.extend((s.key(kind), *keys))
-                rows = await s.db.execute_fetchall(
+                rows = await db.execute_fetchall(
                     "SELECT kind,id,body FROM facts WHERE " + " OR ".join(where), tuple(args))
                 current = {kind: {} for kind in selectors}
                 kind_names = {s.key(kind): kind for kind in selectors}
@@ -778,7 +806,7 @@ class ChainPoolStream:
                         # Rebuild if the accumulator was pruned or this is a
                         # historical correction. The new trade is already in
                         # this transaction, so it must not be counted twice.
-                        cur = await s.db.execute_fetchall("SELECT body FROM trades WHERE asset=? AND t>=? AND t<? ORDER BY t,id",
+                        cur = await db.execute_fetchall("SELECT body FROM trades WHERE asset=? AND t>=? AND t<? ORDER BY t,id",
                             (s.key(market.storage), opened, opened + width))
                         candle = None
                         for row in cur:
@@ -809,16 +837,16 @@ class ChainPoolStream:
                         **meta, "rowObservedAt": marks, "lastObservationAt": stamp}))
                 # All rows are derived from one transaction snapshot. Grouping
                 # the writes avoids a worker-thread dispatch for every bar.
-                await s.db.executemany(FACT_UPSERT, fact_rows)
-                await s.db.executemany(CANDLE_UPSERT, candle_rows)
+                await db.executemany(FACT_UPSERT, fact_rows)
+                await db.executemany(CANDLE_UPSERT, candle_rows)
                 # Keep the original candle-then-trade event order, with one
                 # aiosqlite worker dispatch and the same transaction boundary.
                 events.append(("trade", body))
-                await enqueue_events(s.db, events)
-                await s.db.commit()
+                await enqueue_events(db, events)
+                await db.commit()
                 return True
             except BaseException:
-                await s.db.rollback()
+                await db.rollback()
                 raise
 
     async def _fact(self, kind, key, value):
@@ -1546,4 +1574,5 @@ async def stop_streams():
         task.cancel()
     await asyncio.gather(*_tasks, return_exceptions=True)
     _tasks.clear()
+    await asyncio.gather(*(collector.close() for collector in _collectors.values()))
     _collectors.clear()

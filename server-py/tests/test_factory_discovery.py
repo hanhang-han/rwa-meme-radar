@@ -1,6 +1,8 @@
+import asyncio
 import json
 import os
 import tempfile
+import threading
 import unittest
 
 from app.db import ResearchStore
@@ -166,6 +168,60 @@ class DurableFactoryTests(unittest.IsolatedAsyncioTestCase):
         self.rpc.invalid_block = None
         result = await watcher.run_once(max_ranges=1)
         self.assertEqual((result["cursor"], len(result["newEvents"])), (12, 1))
+
+    async def test_range_commit_does_not_wait_for_shared_connection_reader(self):
+        watcher = self.collector()
+        await watcher._init()
+        cursor = await watcher._bootstrap({"block": 14})
+        started, release = threading.Event(), threading.Event()
+
+        def hold_read():
+            started.set()
+            release.wait(5)
+            return 1
+
+        await self.store.db.create_function("hold_read", 0, hold_read)
+        reader = asyncio.create_task(self.store.fetchall("SELECT hold_read()"))
+        try:
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            await asyncio.wait_for(watcher._commit_range(
+                [], {"block": 12, "hash": self.rpc.hashes[12]}, 10,
+                {"block": 14}, cursor, 3), 2)
+        finally:
+            release.set()
+            await reader
+        self.assertEqual((await watcher._cursor())["block"], 12)
+
+    async def test_cursor_write_failure_rolls_back_creation_evidence(self):
+        watcher = self.collector()
+        await watcher._init()
+        cursor = await watcher._bootstrap({"block": 14})
+        log = self.rpc.log(FACTORIES[0], 12, POOL_V3)
+        item = decode_factory_log(FACTORIES[0], log, {
+            "block": 12, "hash": self.rpc.hashes[12],
+            "timestamp": 1_790_000_024}, 14, 2, 1234)
+        await self.store.db.execute("""CREATE TRIGGER reject_factory_cursor
+            BEFORE UPDATE ON factory_discovery_cursors
+            BEGIN SELECT RAISE(ABORT, 'cursor-write-failed'); END""")
+        await self.store.db.commit()
+        # A read transaction on the shared connection belongs to its caller;
+        # the dedicated writer's failure must not roll it back.
+        await self.store.db.execute("BEGIN")
+        try:
+            with self.assertRaisesRegex(Exception, "cursor-write-failed"):
+                await watcher._commit_range([item], {"block": 12, "hash": self.rpc.hashes[12]},
+                                            10, {"block": 14}, cursor, 3)
+            self.assertTrue(self.store.db.in_transaction)
+        finally:
+            await self.store.db.rollback()
+        self.assertEqual((await watcher._cursor())["block"], 9)
+        self.assertEqual((await self.store.fetchone("SELECT COUNT(*) FROM factory_discovery_events"))[0], 0)
+        await self.store.db.execute("DROP TRIGGER reject_factory_cursor")
+        await self.store.db.commit()
+        self.assertEqual(len(await watcher._commit_range(
+            [item], {"block": 12, "hash": self.rpc.hashes[12]},
+            10, {"block": 14}, cursor, 3)), 1)
+        self.assertEqual((await watcher._cursor())["block"], 12)
 
     async def test_reorg_orphans_old_log_and_replays_canonical_event(self):
         old = self.rpc.log(FACTORIES[1], 14, POOL_V2, tx=2)
