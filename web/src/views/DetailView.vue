@@ -77,7 +77,7 @@
           <h2>{{ tr('最新市场成交', 'Recent market trades') }}</h2>
           <span class="hint">{{ marketFreshnessLabel }}</span>
         </div>
-        <p class="hint">{{ tr('仅展示已接入市场的逐笔记录；新成交到达时自动插入，不代表全部市场成交。时间为实际成交时间。', 'Per-trade records from connected markets only; new trades appear automatically. This is not all market activity. Times are trade times.') }}</p>
+        <p class="hint">{{ selectedPoolId ? tr('仅展示所选池的已采集逐笔成交；其它池交易不代表这张 K 线变化。时间为实际成交时间。', 'Only collected trades from the selected pool are shown; trades in other pools do not move this chart. Times are trade times.') : tr('仅展示已接入市场的逐笔记录；新成交到达时自动插入，不代表全部市场成交。时间为实际成交时间。', 'Per-trade records from connected markets only; new trades appear automatically. This is not all market activity. Times are trade times.') }}</p>
         <div v-if="marketTrades.length" class="scroll" data-market-trades>
           <table class="tbl">
             <thead><tr><th>{{ tr('时间', 'Time') }}</th><th>{{ tr('来源 / 市场', 'Source / market') }}</th><th>{{ tr('方向', 'Side') }}</th><th>{{ tr('成交价', 'Price') }}</th><th>{{ tr('成交额', 'Quote amount') }}</th></tr></thead>
@@ -92,7 +92,7 @@
             </tbody>
           </table>
         </div>
-        <div v-else class="x-empty">{{ tr('当前没有已接入市场的逐笔成交记录；不代表没有交易。', 'No per-trade records from connected markets yet; this does not mean there were no trades.') }}</div>
+        <div v-else class="x-empty">{{ selectedPoolId ? tr('所选池暂无已采集的逐笔成交；不代表该池没有交易。', 'No collected trades in the selected pool yet; this does not mean the pool had no trades.') : tr('当前没有已接入市场的逐笔成交记录；不代表没有交易。', 'No per-trade records from connected markets yet; this does not mean there were no trades.') }}</div>
       </section>
     </div>
 
@@ -257,7 +257,12 @@ const asset = computed(() => {
 });
 const relations = computed(() => data.value?.relations ?? []);
 const trades = computed(() => data.value?.trades ?? []);
-const marketTrades = computed(() => data.value?.marketTrades ?? []);
+const marketTrades = computed(() => {
+  const rows = data.value?.marketTrades ?? [];
+  if (!selectedPoolId.value) return rows;
+  const pool = selectedPoolId.value.toLowerCase();
+  return rows.filter(row => String(row.poolId ?? row.pool ?? row.marketId ?? '').toLowerCase() === pool);
+});
 const marketTradeKey = t => `${t.venue ?? ''}:${t.marketId ?? ''}:${t.id}`;
 const marketFreshnessLabel = computed(() => {
   marketClock.value;
@@ -480,6 +485,9 @@ function switchAsset() {
 }
 function onMarketChoice(choice){
   marketChoice.value=choice;
+  marketRowsPrimed=false;
+  knownMarketIds.clear();
+  newMarketIds.clear();
   const pool=choice.startsWith('pool:')?choice.slice(5):undefined;
   if(String(route.query.pool??'')!==String(pool??''))router.replace({query:{...route.query,pool}});
 }
