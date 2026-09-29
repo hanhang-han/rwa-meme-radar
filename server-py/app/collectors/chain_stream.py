@@ -8,8 +8,9 @@ import json
 import math
 import os
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from decimal import Decimal, localcontext
 
 import aiosqlite
@@ -42,6 +43,8 @@ REPLAY_RESUME_QUEUE_FRACTION = .25
 REPLAY_PAUSE_QUEUE_CAP = 32
 REPLAY_RESUME_QUEUE_CAP = 8
 WATCHED_POOL_BURST = 8
+LIVE_DIAGNOSTIC_WINDOW = 256
+_live_log_collector = ContextVar("chain_stream_live_log_collector", default=None)
 DEFAULTS = {
     "196": (["wss://ws.xlayer.tech", "wss://xlayerws.okx.com"], "https://xlayerrpc.okx.com"),
     "56": (["wss://bsc-rpc.publicnode.com"], "https://bsc-rpc.publicnode.com"),
@@ -162,10 +165,19 @@ class ChainPoolStream:
         self.http = None
         self.trade_db = None
         self.trade_store = None
+        self.status_db = None
+        self.status_store = None
+        self.status_task = None
+        self.status_pending = None
+        self.status_lock = asyncio.Lock()
+        self.watch_task = None
+        self.bar_close_task = None
         self.pools = {}
         self.assets = {}
         self.relations = {}
         self.headers = OrderedDict()
+        self.live_header_lookups = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
+        self.live_log_durations_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
         self.decimals = {}
         self.queue = asyncio.Queue(maxsize=4096)
         self.retry_event = None
@@ -229,6 +241,7 @@ class ChainPoolStream:
             await self.s.db.commit()
         await self.catalogue()
         await self._open_trade_db()
+        await self._open_status_db()
         self.initialized = True
 
     async def _open_trade_db(self):
@@ -247,10 +260,39 @@ class ChainPoolStream:
                                              busy_timeout_ms=self.s.busy_timeout_ms)
         self.trade_store.db = connection
 
+    async def _open_status_db(self):
+        """Keep telemetry away from both shared reads and live trade writes."""
+        if self.status_db is not None or self.s.path == ":memory:":
+            return
+        connection = await aiosqlite.connect(self.s.path, timeout=2)
+        try:
+            await connection.execute("PRAGMA busy_timeout=2000")
+        except BaseException:
+            await connection.close()
+            raise
+        self.status_db = connection
+        self.status_store = _StreamWriteStore(self.s.path, self.s.scope,
+                                              write_lock=self.s._write_lock,
+                                              busy_timeout_ms=2000)
+        self.status_store.db = connection
+
     async def close(self):
+        task, self.status_task = self.status_task, None
+        self.status_pending = None
+        watch_task, self.watch_task = self.watch_task, None
+        bar_task, self.bar_close_task = self.bar_close_task, None
+        tasks = [work for work in (task, watch_task, bar_task) if work is not None]
+        for work in tasks:
+            work.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        status_connection, self.status_db = self.status_db, None
+        self.status_store = None
         connection, self.trade_db = self.trade_db, None
         self.trade_store = None
         self.initialized = False
+        if status_connection is not None:
+            await status_connection.close()
         if connection is not None:
             await connection.close()
 
@@ -307,13 +349,36 @@ class ChainPoolStream:
         if now_ms() - self.last_watches < 5_000:
             return
         watched_bars = {}
-        for watch in await self.s.all("candle-watch"):
+        for watch in await (self.status_store or self.s).all("candle-watch"):
             if watch.get("pool") and (watch.get("expiresAt") or 0) > now_ms() and watch.get("bar") in BAR_MS:
                 key = (watch["pool"].lower(), watch.get("address", "").lower())
                 watched_bars.setdefault(key, set()).add(watch["bar"])
         self.watched_bars = watched_bars
         self.watched_pools = {pool for pool, _ in watched_bars}
         self.last_watches = now_ms()
+
+    def schedule_housekeeping(self):
+        """Run slow watch reads and candle closure outside the live loop."""
+        if now_ms() - self.last_watches >= 5_000:
+            self.watch_task = self._schedule_housekeeping_task(
+                self.watch_task, self.refresh_watches, 'watches')
+        if now_ms() - self.last_closed >= 5_000:
+            self.bar_close_task = self._schedule_housekeeping_task(
+                self.bar_close_task, self.close_elapsed_bars, 'bars')
+
+    def _schedule_housekeeping_task(self, task, operation, label):
+        if task is not None and not task.done():
+            return task
+
+        async def run():
+            try:
+                await operation()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f'[chain-stream] {label} update failed for {self.chain}: {exc}', flush=True)
+
+        return asyncio.create_task(run())
 
     def bars(self, market):
         return sorted({"1m", "5m", "1H"} | self.watched_bars.get((market.pool_id, market.token), set()))
@@ -441,6 +506,8 @@ class ChainPoolStream:
             if not header:
                 raise ValueError("block-not-available")
             self.remember_header(header)
+        else:
+            self.headers.move_to_end(block_hash)
         return self.headers[block_hash]
 
     def remember_header(self, header):
@@ -449,24 +516,53 @@ class ChainPoolStream:
             return
         self.headers[key] = header
         self.headers.move_to_end(key)
-        while len(self.headers) > 1024:
+        while len(self.headers) > 8192:
             self.headers.popitem(last=False)
         self.latest_head = max(self.latest_head, number(header["number"]))
 
     async def status_fact(self, error=None, force=False):
+        async with self.status_lock:
+            await self._write_status_fact(error, force)
+
+    def schedule_status_fact(self, error=None, force=False):
+        """Coalesce status refreshes without delaying a live queue consumer."""
+        if not force and now_ms() - self.last_status < 10_000:
+            return
+        # A reconnect can request a normal snapshot before the preceding
+        # failure snapshot starts. Keep the failure so lastError is durable.
+        if self.status_pending is None or error is not None or self.status_pending[0] is None:
+            self.status_pending = (error, force)
+        if self.status_task is None or self.status_task.done():
+            self.status_task = asyncio.create_task(self._drain_status_facts())
+
+    async def _drain_status_facts(self):
+        while self.status_pending is not None:
+            error, force = self.status_pending
+            self.status_pending = None
+            try:
+                await self.status_fact(error=error, force=force)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f'[chain-stream] status update failed for {self.chain}: {exc}', flush=True)
+
+    async def _write_status_fact(self, error=None, force=False):
         if not force and now_ms() - self.last_status < 10_000:
             return
         self.last_status = now_ms()
-        checkpoint = await self.s.get("chain-stream-cursor", "pools") or {}
-        near_tip = await self.s.get("chain-stream-cursor", "pools-live") or {}
-        historical_scan = await self.s.get("chain-stream-scan", "pools") or {}
-        near_tip_scan = await self.s.get("chain-stream-scan", "pools-live") or {}
-        previous_status = await self.s.get("chain-stream", "pools") or {}
+        telemetry = self.status_store or self.s
+        checkpoint = await telemetry.get("chain-stream-cursor", "pools") or {}
+        near_tip = await telemetry.get("chain-stream-cursor", "pools-live") or {}
+        historical_scan = await telemetry.get("chain-stream-scan", "pools") or {}
+        near_tip_scan = await telemetry.get("chain-stream-scan", "pools-live") or {}
+        previous_status = await telemetry.get("chain-stream", "pools") or {}
         historical_block = checkpoint.get("block")
         near_tip_block = near_tip.get("block")
         near_tip_from = near_tip.get("coverageFrom")
         last_error = type(error).__name__ + ":" + str(error)[:180] if isinstance(error, Exception) else error
-        await self.s.put("chain-stream", "pools", {
+        header_hits = sum(self.live_header_lookups)
+        durations = sorted(self.live_log_durations_ms)
+        await telemetry.put("chain-stream", "pools", {
             "chainId": self.chain, "provider": "Chain RPC", "status": self.status,
             "poolCount": len(self.pools), "decodedEvents": self.processed,
             "unsupportedEvents": self.unsupported, "lastEventAt": self.last_event or None,
@@ -474,6 +570,13 @@ class ChainPoolStream:
             "lastSourceEventAt": self.last_source_event or None,
             "sourceLagMs": max(0, now_ms() - self.last_source_event) if self.last_source_event else None,
             "queueDepth": self.queue.qsize(), "liveProcessing": self.live_processing,
+            "liveHeaderCacheHitsRecent": header_hits,
+            "liveHeaderRpcMissesRecent": len(self.live_header_lookups) - header_hits,
+            "liveLogProcessingSamplesRecent": len(durations),
+            "liveLogProcessingLastMs": (self.live_log_durations_ms[-1]
+                                        if self.live_log_durations_ms else None),
+            "liveLogProcessingP95Ms": (durations[math.ceil(.95 * len(durations)) - 1]
+                                       if durations else None),
             "replayPausedForLive": self.replay_under_pressure(),
             "rateLimitedAt": self.rpc_rate_limited_at, "cooldownUntil": self.rpc_cooldown_wall,
             "rpcIntervalMs": round(self.rpc_interval * 1000),
@@ -576,6 +679,8 @@ class ChainPoolStream:
         canonical height with another hash identifies a reverted queued log.
         """
         block_hash = str(log['blockHash']).lower()
+        if _live_log_collector.get() is self:
+            self.live_header_lookups.append(block_hash in self.headers)
         try:
             return await self.block(block_hash)
         except ValueError as error:
@@ -584,6 +689,7 @@ class ChainPoolStream:
         for delay in (.2, .5, 1):
             await asyncio.sleep(delay)
             if block_hash in self.headers:
+                self.headers.move_to_end(block_hash)
                 return self.headers[block_hash]
             header = await self.rpc('eth_getBlockByNumber', [log['blockNumber'], False])
             if not header:
@@ -611,7 +717,8 @@ class ChainPoolStream:
         if self.irrelevant_sync(log):
             return
         revision = self.removed_revisions.get(block_hash, 0)
-        existing = await self.s.fetchone("SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?", (self.chain, ident))
+        existing = await (self.trade_store or self.s).fetchone(
+            "SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?", (self.chain, ident))
         if existing and existing[0]:
             return
         # Public-node metadata may take seconds. It must not monopolize the
@@ -638,7 +745,8 @@ class ChainPoolStream:
             # the metadata awaits ran. Never restore an in-flight orphan.
             if self.removed_revisions.get(block_hash, 0) != revision:
                 return
-            existing = await self.s.fetchone("SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?", (self.chain, ident))
+            existing = await (self.trade_store or self.s).fetchone(
+                "SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?", (self.chain, ident))
             if existing and existing[0]:
                 return
             if unsupported:
@@ -676,7 +784,7 @@ class ChainPoolStream:
                 for rel in self.relations.get(pool["pool"], []):
                     ratio = pool_ratio(pool["token0"], rel["token"], d0, d1,
                                        reserves=reserves, sqrt_price_x96=sqrt)
-                    old = await self.s.get("pool-quote", pool["pool"]) or {}
+                    old = await (self.trade_store or self.s).get("pool-quote", pool["pool"]) or {}
                     order = [height, number(log.get("logIndex", "0x0"))]
                     old_order = old.get("eventOrder") or [old.get("block") or 0, -1]
                     if ratio and at >= (old.get("at") or 0) and order >= old_order:
@@ -702,8 +810,8 @@ class ChainPoolStream:
 
     async def pool_asset_quote(self, pool, token, decoded, at, height, ident):
         other = pool["token1"] if token == pool["token0"] else pool["token0"]
-        base = await self.s.get("asset", token)
-        anchor = await self.s.get("asset", other) or {}
+        base = await (self.trade_store or self.s).get("asset", token)
+        anchor = await (self.trade_store or self.s).get("asset", other) or {}
         if not base:
             return
         # Stable, largest verified pool selection prevents thin pools randomly
@@ -751,7 +859,7 @@ class ChainPoolStream:
     async def reserve_valuation(self, pool, reserves, d0, d1, at, height, block_hash=None, log_index=0):
         values, times = [], []
         for token, raw, decimals in zip((pool["token0"], pool["token1"]), reserves, (d0, d1)):
-            row = await self.s.get("asset", token) or {}
+            row = await (self.trade_store or self.s).get("asset", token) or {}
             stamp = (row.get("fieldTimes") or {}).get("price") or 0
             price = row.get("price")
             if not isinstance(price, (int, float)) or price <= 0 or not 0 <= at - stamp <= 900_000 or row.get("priceCurrency", "USD") != "USD":
@@ -762,7 +870,7 @@ class ChainPoolStream:
         if not math.isfinite(total) or not 0 <= total < 1e10:
             return
         for rel in self.relations.get(pool["pool"], []):
-            current = await self.s.get("relation", rel["id"]) or {}
+            current = await (self.trade_store or self.s).get("relation", rel["id"]) or {}
             order = [height, log_index]
             if at < (current.get("reservesAt") or 0) or order < (current.get("valuationOrder") or [current.get("valuationBlock") or 0, -1]):
                 continue
@@ -1083,23 +1191,24 @@ class ChainPoolStream:
 
     async def catch_up(self, lane="pools", max_ranges=3, initial_depth=2, head=None):
         """Persist lane attempts and failures without changing scan priority."""
-        diagnostic = await self.s.get("chain-stream-scan", lane) or {}
+        telemetry = self.status_store or self.s
+        diagnostic = await telemetry.get("chain-stream-scan", lane) or {}
         diagnostic = {**diagnostic, "lastAttemptAt": now_ms()}
-        await self.s.put("chain-stream-scan", lane, diagnostic)
+        await telemetry.put("chain-stream-scan", lane, diagnostic)
         self.scan_page_metrics[lane] = {}
         try:
             result = await self._catch_up(lane, max_ranges, initial_depth, head)
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            await self.s.put("chain-stream-scan", lane, {
+            await telemetry.put("chain-stream-scan", lane, {
                 **diagnostic, **self.scan_page_metrics[lane],
                 "lastErrorAt": now_ms(),
                 "lastError": type(error).__name__ + ":" + str(error)[:180],
             })
             raise
         else:
-            await self.s.put("chain-stream-scan", lane, {
+            await telemetry.put("chain-stream-scan", lane, {
                 **diagnostic, **self.scan_page_metrics[lane], "lastCompletedAt": now_ms(),
             })
             return result
@@ -1398,6 +1507,8 @@ class ChainPoolStream:
 
     async def process_queued(self, event):
         """Keep the removed queue head until its durable processing succeeds."""
+        started = time.perf_counter()
+        live_token = _live_log_collector.set(self)
         self.live_processing = True
         try:
             await self.process_log(event)
@@ -1409,6 +1520,8 @@ class ChainPoolStream:
             self.recovery_needed = True
             raise
         finally:
+            self.live_log_durations_ms.append(round(max(0, time.perf_counter() - started) * 1000, 1))
+            _live_log_collector.reset(live_token)
             self.live_processing = False
 
     def take_live_event(self):
@@ -1469,7 +1582,7 @@ class ChainPoolStream:
         if not self.recovery_needed and self.retry_event is None and self.queue.empty():
             return
         self.status = "catching-up"
-        await self.status_fact(force=True)
+        self.schedule_status_fact(force=True)
         await self.refresh_watches()
         drained = 0
         while self.retry_event is not None or not self.queue.empty():
@@ -1485,7 +1598,7 @@ class ChainPoolStream:
             drained += 1
             if drained % 64 == 0:
                 await self.refresh_watches()
-                await self.status_fact(force=True)
+                self.schedule_status_fact(force=True)
             await asyncio.sleep(0)
         if not self.recovery_needed:
             return
@@ -1496,7 +1609,7 @@ class ChainPoolStream:
             await reader
             raise RuntimeError("chain-stream-recovery-connection-closed")
         self.recovery_needed = False
-        await self.status_fact(force=True)
+        self.schedule_status_fact(force=True)
 
     async def reconcile(self):
         while True:
@@ -1533,7 +1646,7 @@ class ChainPoolStream:
                         for offset in range(0, len(pools), 64):
                             await self.ws_call(ws, "eth_subscribe", ["logs", {"address": pools[offset:offset + 64], "topics": [TOPICS]}])
                         self.status = "catching-up"
-                        await self.status_fact(force=True)
+                        self.schedule_status_fact(force=True)
                         replay = asyncio.create_task(self.reconcile())
                         while not reader.done():
                             try:
@@ -1547,9 +1660,8 @@ class ChainPoolStream:
                                 pass
                             if now_ms() - self.last_catalogue > 60_000 and await self.catalogue():
                                 break  # reconnect with the full updated address filter
-                            await self.refresh_watches()
-                            await self.close_elapsed_bars()
-                            await self.status_fact()
+                            self.schedule_housekeeping()
+                            self.schedule_status_fact()
                         if reader.done():
                             await reader
                 except asyncio.CancelledError:
@@ -1557,7 +1669,7 @@ class ChainPoolStream:
                 except Exception as error:
                     self.status = "reconnecting"
                     self.reconnects += 1
-                    await self.status_fact(type(error).__name__+":"+str(error)[:180], force=True)
+                    self.schedule_status_fact(type(error).__name__+":"+str(error)[:180], force=True)
                 finally:
                     if self.retry_event is not None or not self.queue.empty():
                         self.recovery_needed = True

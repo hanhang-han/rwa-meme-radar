@@ -189,6 +189,81 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await asyncio.to_thread(started.wait, 1))
         return release, blocked
 
+    async def test_status_and_scan_diagnostics_bypass_busy_shared_connection(self):
+        await self.collector._open_status_db()
+        await self.store.put('chain-stream-cursor', 'pools', {'block': 50})
+        await self.store.put('chain-stream-cursor', 'pools-live', {'block': 75})
+        self.collector.latest_head = 75
+        self.collector._catch_up = AsyncMock(return_value={'caughtUp': True})
+        release, blocked = await self.busy_shared_reader()
+        task = asyncio.create_task(self.collector.status_fact(force=True))
+        completed_while_blocked = False
+        try:
+            done, _ = await asyncio.wait({task}, timeout=1.5)
+            completed_while_blocked = task in done
+            if completed_while_blocked:
+                await task
+                await self.collector.catch_up('pools-live')
+                status = await self.collector.status_store.get('chain-stream', 'pools')
+                diagnostic = await self.collector.status_store.get('chain-stream-scan', 'pools-live')
+                self.assertEqual((status['lastProcessedBlock'], status['lastNearTipBlock']), (50, 75))
+                self.assertIn('lastCompletedAt', diagnostic)
+        finally:
+            release.set()
+            await blocked
+            await task
+        self.assertTrue(completed_while_blocked)
+
+    async def test_scheduled_status_does_not_hold_live_processing(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_status(**_):
+            started.set()
+            await release.wait()
+
+        self.collector.status_fact = slow_status
+        self.collector.process_log = AsyncMock()
+        self.collector.schedule_status_fact(force=True)
+        await asyncio.wait_for(started.wait(), .5)
+        try:
+            await asyncio.wait_for(self.collector.process_queued({'id': 'live'}), .5)
+            self.collector.process_log.assert_awaited_once_with({'id': 'live'})
+        finally:
+            release.set()
+            await self.collector.status_task
+
+    async def test_scheduled_status_preserves_queued_failure(self):
+        errors = []
+
+        async def record_status(*, error=None, force=False):
+            errors.append(error)
+
+        self.collector.status_fact = record_status
+        self.collector.schedule_status_fact('provider-unavailable', force=True)
+        self.collector.schedule_status_fact(force=True)
+        await self.collector.status_task
+        self.assertEqual(errors, ['provider-unavailable'])
+
+    async def test_scheduled_bar_close_does_not_hold_live_processing(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_close():
+            started.set()
+            await release.wait()
+
+        self.collector.close_elapsed_bars = slow_close
+        self.collector.process_log = AsyncMock()
+        self.collector.last_watches = self.at
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            self.collector.schedule_housekeeping()
+        await asyncio.wait_for(started.wait(), .5)
+        try:
+            await asyncio.wait_for(self.collector.process_queued({'id': 'live'}), .5)
+            self.collector.process_log.assert_awaited_once_with({'id': 'live'})
+        finally:
+            release.set()
+            await self.collector.bar_close_task
+
     async def prepare_logs(self):
         await self.store.db.execute('''CREATE TABLE chain_stream_logs (
             chain TEXT NOT NULL, id TEXT NOT NULL, pool TEXT NOT NULL,
@@ -283,33 +358,22 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
             'fieldTimes': {'price': self.at - 1000},
             'fieldSources': {'price': 'independent-provider'},
         })
-        real_get = self.store.get
-        release = blocked = None
-
-        async def intercept_get(kind, ident):
-            nonlocal release, blocked
-            result = await real_get(kind, ident)
-            if kind == 'asset' and ident == TOKEN1:
-                release, blocked = await self.busy_shared_reader()
-            return result
-
+        release, blocked = await self.busy_shared_reader()
         decoded = decode_swap(log, TOKEN0, TOKEN0, 18, 6)
-        with patch.object(self.store, 'get', new=intercept_get):
-            task = asyncio.create_task(self.collector.pool_asset_quote(
-                self.collector.pools[POOL], TOKEN0, decoded, self.at, 200, event_key(log)))
-            completed_while_blocked = False
-            quote = None
-            try:
-                done, _ = await asyncio.wait({task}, timeout=1.5)
-                completed_while_blocked = task in done and release is not None
-                if completed_while_blocked:
-                    await task
-                    quote = await self.collector.trade_store.get('asset', TOKEN0)
-            finally:
-                if release is not None:
-                    release.set()
-                    await blocked
+        task = asyncio.create_task(self.collector.pool_asset_quote(
+            self.collector.pools[POOL], TOKEN0, decoded, self.at, 200, event_key(log)))
+        completed_while_blocked = False
+        quote = None
+        try:
+            done, _ = await asyncio.wait({task}, timeout=1.5)
+            completed_while_blocked = task in done
+            if completed_while_blocked:
                 await task
+                quote = await self.collector.trade_store.get('asset', TOKEN0)
+        finally:
+            release.set()
+            await blocked
+            await task
         self.assertTrue(completed_while_blocked)
         self.assertEqual(quote['price'], 6)
         self.assertEqual(quote['fieldSources']['price'], 'Chain RPC')
@@ -322,31 +386,20 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
                 'topics': [SYNC_V2], 'data': encoded(2 * 10 ** 18, 6_000_000)}
         self.collector.relations[POOL] = [{'id': 'relation', 'pool': POOL,
                                             'token': TOKEN0, 'stockSide': TOKEN1}]
-        real_get = self.store.get
-        release = blocked = None
-
-        async def intercept_get(kind, ident):
-            nonlocal release, blocked
-            result = await real_get(kind, ident)
-            if kind == 'pool-quote':
-                release, blocked = await self.busy_shared_reader()
-            return result
-
-        with patch.object(self.store, 'get', new=intercept_get), \
-             patch.object(self.collector, 'reserve_valuation', new=AsyncMock()):
+        release, blocked = await self.busy_shared_reader()
+        with patch.object(self.collector, 'reserve_valuation', new=AsyncMock()):
             task = asyncio.create_task(self.collector.process_log(sync))
             completed_while_blocked = False
             quote = None
             try:
                 done, _ = await asyncio.wait({task}, timeout=1.5)
-                completed_while_blocked = task in done and release is not None
+                completed_while_blocked = task in done
                 if completed_while_blocked:
                     await task
                     quote = await self.collector.trade_store.get('pool-quote', POOL)
             finally:
-                if release is not None:
-                    release.set()
-                    await blocked
+                release.set()
+                await blocked
                 await task
         self.assertTrue(completed_while_blocked)
         self.assertAlmostEqual(quote['memePerStock'], 1 / 3)
@@ -362,33 +415,22 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         await self.store.put('asset', TOKEN1, {'price': 3, 'priceCurrency': 'USD',
                              'fieldTimes': {'price': self.at - 1000}})
         await self.store.put('relation', 'relation', {'id': 'relation', 'name': 'existing'})
-        real_get = self.store.get
-        release = blocked = None
-
-        async def intercept_get(kind, ident):
-            nonlocal release, blocked
-            result = await real_get(kind, ident)
-            if kind == 'relation':
-                release, blocked = await self.busy_shared_reader()
-            return result
-
-        with patch.object(self.store, 'get', new=intercept_get):
-            task = asyncio.create_task(self.collector.reserve_valuation(
-                self.collector.pools[POOL], (2 * 10 ** 18, 6_000_000), 18, 6,
-                self.at, 200, '0xabc', 2))
-            completed_while_blocked = False
-            relation = None
-            try:
-                done, _ = await asyncio.wait({task}, timeout=1.5)
-                completed_while_blocked = task in done and release is not None
-                if completed_while_blocked:
-                    await task
-                    relation = await self.collector.trade_store.get('relation', 'relation')
-            finally:
-                if release is not None:
-                    release.set()
-                    await blocked
+        release, blocked = await self.busy_shared_reader()
+        task = asyncio.create_task(self.collector.reserve_valuation(
+            self.collector.pools[POOL], (2 * 10 ** 18, 6_000_000), 18, 6,
+            self.at, 200, '0xabc', 2))
+        completed_while_blocked = False
+        relation = None
+        try:
+            done, _ = await asyncio.wait({task}, timeout=1.5)
+            completed_while_blocked = task in done
+            if completed_while_blocked:
                 await task
+                relation = await self.collector.trade_store.get('relation', 'relation')
+        finally:
+            release.set()
+            await blocked
+            await task
         self.assertTrue(completed_while_blocked)
         self.assertEqual(relation['liquidityUsd'], 22)
         self.assertEqual(relation['name'], 'existing')
@@ -807,7 +849,8 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.collector.catch_up = AsyncMock(return_value={'caughtUp': False})
         reader = asyncio.get_running_loop().create_future()
         await self.collector.recover_live_queue(reader)
-        self.assertEqual(sizes, [65, 1, 0])
+        await self.collector.status_task
+        self.assertEqual(sizes[-1], 0)
         self.assertFalse(self.collector.recovery_needed)
         self.collector.catch_up.assert_not_awaited()
 
@@ -1460,6 +1503,80 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.collector.reconnects, 0)
         self.assertEqual(self.collector.rpc.await_args_list[1].args,
                          ('eth_getBlockByNumber', [log['blockNumber'], False]))
+
+    async def test_fresh_log_reuses_cached_new_head_without_rpc(self):
+        log = await self.prepare_logs()
+        self.collector.headers.clear()
+        self.collector.ws = object()
+        self.collector.latest_head = 199
+        self.collector.rpc = AsyncMock(side_effect=AssertionError('unneeded header RPC'))
+        header = {'number': log['blockNumber'], 'hash': log['blockHash'],
+                  'timestamp': hex(self.at // 1000)}
+        self.collector.remember_header(header)
+        self.assertEqual(await self.collector.log_header(log), header)
+        self.collector.rpc.assert_not_awaited()
+
+    async def test_fresh_log_without_new_head_uses_rpc_immediately(self):
+        log = await self.prepare_logs()
+        self.collector.headers.clear()
+        self.collector.ws = object()
+        self.collector.latest_head = 200
+        header = {'number': log['blockNumber'], 'hash': log['blockHash'],
+                  'timestamp': hex(self.at // 1000)}
+        self.collector.rpc = AsyncMock(return_value=header)
+        self.assertEqual(await asyncio.wait_for(self.collector.log_header(log), 1), header)
+        self.collector.rpc.assert_awaited_once_with('eth_getBlockByHash', ['0xabc', False])
+
+    async def test_live_status_counts_header_cache_and_rpc_with_processing_duration(self):
+        cached = await self.prepare_logs()
+        uncached = {**cached, 'blockHash': '0xabe', 'blockNumber': '0xc9',
+                    'transactionHash': '0xeee'}
+        header = {'number': '0xc9', 'hash': '0xabe', 'timestamp': hex(self.at // 1000)}
+        self.collector.rpc = AsyncMock(return_value=header)
+
+        await self.collector.process_queued(cached)
+        await self.collector.process_queued(uncached)
+        await self.collector.status_fact(force=True)
+
+        status = await self.store.get('chain-stream', 'pools')
+        self.assertEqual((status['liveHeaderCacheHitsRecent'],
+                          status['liveHeaderRpcMissesRecent'],
+                          status['liveLogProcessingSamplesRecent']), (1, 1, 2))
+        self.assertGreaterEqual(status['liveLogProcessingLastMs'], 0)
+        self.assertGreaterEqual(status['liveLogProcessingP95Ms'],
+                                status['liveLogProcessingLastMs'])
+        self.collector.rpc.assert_awaited_once_with('eth_getBlockByHash', ['0xabe', False])
+
+    async def test_live_diagnostic_window_is_bounded_and_excludes_replay_lookups(self):
+        cached = {'number': '0xc8', 'hash': '0xabc', 'timestamp': hex(self.at // 1000)}
+        uncached = {'number': '0xc9', 'hash': '0xabe', 'timestamp': hex(self.at // 1000)}
+        self.collector.remember_header(cached)
+        self.collector.rpc = AsyncMock(return_value=uncached)
+
+        async def process_header(event):
+            await self.collector.log_header(event)
+
+        self.collector.process_log = process_header
+        await self.collector.log_header({'blockHash': '0xabc'})  # Replay is outside the live queue.
+        for _ in range(256):
+            await self.collector.process_queued({'blockHash': '0xabc'})
+        await self.collector.process_queued({'blockHash': '0xabe'})
+        await self.collector.status_fact(force=True)
+
+        status = await self.store.get('chain-stream', 'pools')
+        self.assertEqual((status['liveHeaderCacheHitsRecent'],
+                          status['liveHeaderRpcMissesRecent'],
+                          status['liveLogProcessingSamplesRecent']), (255, 1, 256))
+        self.collector.rpc.assert_awaited_once_with('eth_getBlockByHash', ['0xabe', False])
+
+    async def test_header_cache_spans_more_than_a_thousand_blocks(self):
+        for height in range(8192):
+            self.collector.remember_header({'number': hex(height), 'hash': hex(height)})
+        self.assertEqual(len(self.collector.headers), 8192)
+        self.assertIn('0x0', self.collector.headers)
+        self.collector.remember_header({'number': '0x2000', 'hash': '0x2000'})
+        self.assertEqual(len(self.collector.headers), 8192)
+        self.assertNotIn('0x0', self.collector.headers)
 
     async def test_missing_hash_of_reverted_queued_log_is_retracted_not_reconnected(self):
         log = await self.prepare_logs()
