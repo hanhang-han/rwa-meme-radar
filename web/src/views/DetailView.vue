@@ -42,10 +42,15 @@
     </section>
 
     <div class="kpis">
+      <div v-if="selectedPoolId" class="kpi" data-kpi-key="pool-price">
+        <span class="kpi-label">{{ tr('所选池最近成交价', 'Selected pool last trade price') }}</span>
+        <strong class="kpi-value mono"><LiveNumber :value="selectedPoolQuote?.price" :currency="marketSelection.pool.priceCurrency" :format="marketSelection.pool.priceCurrency === 'USD' ? 'price' : 'money'" /></strong>
+        <span class="kpi-note">{{ short(selectedPoolId) }} · {{ marketSelection.pool.priceCurrency ?? tr('币种未知', 'Currency unknown') }} · {{ selectedPoolQuote ? `${selectedPoolQuote.source} · ${date(selectedPoolQuote.at)} · ${poolQuoteAge}` : tr('等待该池真实成交', 'Waiting for a real trade in this pool') }}</span>
+      </div>
       <div class="kpi" data-kpi-key="price">
-        <span class="kpi-label">{{ tr('最新价格', 'Latest price') }}</span>
+        <span class="kpi-label">{{ selectedPoolId ? tr('资产整体最新价格', 'Asset-wide latest price') : tr('最新价格', 'Latest price') }}</span>
         <strong class="kpi-value mono" :class="{ 'kpi-flash': priceFlash }"><LiveNumber :value="asset.price" :currency="asset.priceCurrency" format="price" /></strong>
-        <span class="kpi-note">{{ pct(asset.change24h) }} · 24h</span><QuoteStatus :row="asset" />
+        <span class="kpi-note">{{ asset.fieldSources?.price ?? asset.provider ?? asset.venue ?? tr('来源待核实', 'Source unverified') }} · {{ pct(asset.change24h) }} · 24h</span><QuoteStatus :row="asset" />
       </div>
       <div class="kpi"><span class="kpi-label">{{ tr('24h 成交额', '24h volume') }}</span><strong class="kpi-value mono"><LiveNumber :value="asset.volume24h" :currency="asset.volumeCurrency ?? asset.priceCurrency" /></strong><span class="kpi-note">{{ volumeScopeLabel }}</span></div>
       <div class="kpi"><span class="kpi-label">{{ tr('24h 交易', '24h trades') }}</span><strong class="kpi-value mono">{{ num(asset.priceScope === 'exchange' ? asset.exchangeTrades24h : asset.txs24h) }}</strong><span class="kpi-note">{{ asset.priceScope === 'exchange' ? tr('交易所成交总数；未提供买卖方向', 'Exchange trades; buy/sell split unavailable') : `${num(asset.buys24h)} / ${num(asset.sells24h)}` }}</span></div>
@@ -57,14 +62,14 @@
       <section class="panel">
         <div class="panel-head">
           <h2>{{ tr('价格走势', 'Price history') }}<template v-if="selectedPoolId"> · {{ tr('池内成交价', 'Pool trade price') }}</template></h2>
-          <label v-if="exchangeMarkets.length || poolMarkets.length">{{ tr('图表市场', 'Chart market') }} <select data-chart-market :value="marketSelection.id" @change="marketChoice=$event.target.value">
+          <label v-if="exchangeMarkets.length || poolMarkets.length">{{ tr('图表市场', 'Chart market') }} <select data-chart-market :value="marketSelection.id" @change="onMarketChoice($event.target.value)">
             <option v-if="baseAsset.priceScope==='exchange'" value="base">{{ baseAsset.provider ?? baseAsset.venue }} · {{ baseAsset.marketId ?? baseAsset.symbol }} · {{ baseAsset.priceCurrency }}</option>
             <option v-else value="dex">{{ tr('DEX 聚合行情', 'Aggregated DEX') }}</option>
             <option v-for="market in exchangeMarkets" :key="`${market.venue}:${market.marketId}`" :value="`${market.venue}:${market.marketId}`">{{ market.provider ?? market.venue }} · {{ market.marketId }} · {{ market.priceCurrency }}</option>
             <option v-for="pool in poolMarkets" :key="pool.poolId ?? pool.marketId" :value="`pool:${pool.poolId ?? pool.pool ?? pool.marketId}`">{{ tr('链上池', 'On-chain pool') }} {{ short(pool.poolId ?? pool.pool ?? pool.marketId) }} · {{ pool.priceCurrency }}</option>
           </select></label>
         </div>
-        <p v-if="selectedPoolId" class="hint" data-pool-unit>{{ tr('每枚代币以', 'Each token is quoted in') }} {{ marketSelection.pool.priceCurrency }}{{ tr('计价；上方指标仍为资产整体行情。', '; metrics above remain asset-wide quotes.') }}</p>
+        <p v-if="selectedPoolId" class="hint" data-pool-unit>{{ tr('每枚代币以', 'Each token is quoted in') }} {{ marketSelection.pool.priceCurrency }}{{ tr('计价；其它 24h 指标仍为资产整体行情。', '; other 24h metrics remain asset-wide.') }}</p>
         <CandleChart :asset="asset" :samples="data.samples ?? []" :pool="selectedPoolId" />
       </section>
       <section class="panel">
@@ -166,11 +171,13 @@ import RelationBadge from '../components/RelationBadge.vue';
 import EventRow from '../components/EventRow.vue';
 import { useDetailStore } from '../stores/detail';
 import { useDashboardStore } from '../stores/dashboard';
+import { useCandleStore } from '../stores/candles';
 import { getInsight } from '../api/client';
 import { tr, useI18n } from '../i18n';
 import { age, chain, chainName, date, detailLink, explorer, num, pct, short, usd, money } from '../utils/format';
 import { applyQuote } from '../utils/realtime';
 import { selectDetailMarket } from '../utils/market-selection';
+import { candlePacketMatches } from '../utils/candles';
 import { RISK_LABELS, riskFlags, relationStockIdentityStatus } from '../utils/product-labels';
 
 const props = defineProps({
@@ -182,6 +189,7 @@ const route = useRoute();
 const router = useRouter();
 const detail = useDetailStore();
 const dash=useDashboardStore();
+const candleStreams=useCandleStore();
 const data = ref(null);
 const error = ref(null);
 const insight = ref(null);
@@ -211,6 +219,36 @@ const exchangeMarkets=computed(()=>baseAsset.value.exchangeMarkets??[]);
 const poolMarkets=computed(()=>data.value?.poolMarkets??baseAsset.value.poolMarkets??[]);
 const marketSelection=computed(()=>selectDetailMarket(baseAsset.value,exchangeMarkets.value,poolMarkets.value,marketChoice.value));
 const selectedPoolId=computed(()=>marketSelection.value.kind==='pool'?String(marketSelection.value.pool.poolId??marketSelection.value.pool.pool??marketSelection.value.pool.marketId):'');
+const selectedPoolQuote=computed(()=>{
+  if(!selectedPoolId.value)return null;
+  const poolId=selectedPoolId.value.toLowerCase();
+  const currency=String(marketSelection.value.pool.priceCurrency??'').toUpperCase();
+  if(!currency)return null;
+  const matchesTrade=t=>
+    String(t.venue??'').toLowerCase()==='dex' &&
+    String(t.chainId??props.chain)===String(props.chain) &&
+    String(t.token??props.address).toLowerCase()===props.address.toLowerCase() &&
+    String(t.poolId??t.pool??t.marketId??'').toLowerCase()===poolId &&
+    String(t.priceCurrency??'').toUpperCase()===currency &&
+    Number.isFinite(Number(t.price)) && Number(t.price)>0 &&
+    Number(t.t??t.sourceEventAt)>0;
+  const trade=marketTrades.value.filter(matchesTrade).sort((a,b)=>Number(b.t??b.sourceEventAt)-Number(a.t??a.sourceEventAt))[0];
+  const tradeAt=Number(trade?.t??trade?.sourceEventAt)||0;
+  const tradeQuote=trade&&tradeAt>0?{price:Number(trade.price),at:tradeAt,source:trade.source??trade.provider??tr('链上池逐笔成交', 'On-chain pool trade')}:null;
+  // Native pool candles carry the last real trade time. A bare OHLC row does
+  // not establish a trade price for this KPI.
+  candleStreams.version;
+  const candleQuotes=[...candleStreams.series.values()].flatMap(packet=>{
+    if(String(packet.priceCurrency??'').toUpperCase()!==currency || !candlePacketMatches(packet,{chainId:props.chain,token:props.address,venue:'dex',bar:packet.bar,poolId:selectedPoolId.value}))return [];
+    const row=(packet.rows??[]).at(-1);
+    const at=Number(row?.lastEventAt)||0;
+    const price=Number(row?.c);
+    return at>0&&Number.isFinite(price)&&price>0?[{price,at,receivedAt:Number(packet.at)||0,source:packet.source??tr('链上池成交 K 线', 'On-chain pool trade candle')}]:[];
+  }).sort((a,b)=>b.at-a.at||b.receivedAt-a.receivedAt);
+  const candleQuote=candleQuotes[0];
+  return candleQuote&&(!tradeQuote||candleQuote.at>tradeQuote.at)?candleQuote:tradeQuote;
+});
+const poolQuoteAge=computed(()=>{marketClock.value;return age(selectedPoolQuote.value?.at);});
 const activeMarket=computed(()=>marketSelection.value.kind==='exchange'?marketSelection.value.exchange:null);
 const asset = computed(() => {
   const base=baseAsset.value,market=activeMarket.value;if(!market)return base;
@@ -425,7 +463,7 @@ function switchAsset() {
   error.value = null;
   insight.value = null;
   insightStatus.value = 'queued';
-  marketChoice.value = null;
+  marketChoice.value = route.query.pool ? `pool:${route.query.pool}` : null;
   marketRowsPrimed = false;
   knownMarketIds.clear();
   newMarketIds.clear();
@@ -440,6 +478,15 @@ function switchAsset() {
   priceFlash.value = false;
   load();
 }
+function onMarketChoice(choice){
+  marketChoice.value=choice;
+  const pool=choice.startsWith('pool:')?choice.slice(5):undefined;
+  if(String(route.query.pool??'')!==String(pool??''))router.replace({query:{...route.query,pool}});
+}
+watch(() => route.query.pool, pool => {
+  if(pool)marketChoice.value=`pool:${pool}`;
+  else if(marketChoice.value?.startsWith('pool:'))marketChoice.value=baseAsset.value.priceScope==='exchange'?'base':'dex';
+});
 function onResourceChange(event){
   const r=event.detail??{};
   if(r.chainId&&String(r.chainId)!==props.chain||r.token&&String(r.token).toLowerCase()!==props.address.toLowerCase())return;

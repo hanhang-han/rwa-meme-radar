@@ -11,6 +11,7 @@ try{
  const relation={id:'p',projectionKey:'196:p',chainId:'196',token:'0xabc',stock:'0xstock',pool:'0xpool',ticker:'AAPL',status:'verified',level:'A',evidenceStatus:'qualified',liquidityUsd:10000,liquidityAt:now,checkedAt:now};
  const snapshot={realtime:{schema:1,cursor:10,revision:1},unified:{snapshotScope:'full',assets:[asset],stockTokens:[stock],relations:[relation],sectors:[],sources:[],metrics:{verifiedPools:1},signals:[],quality:{summary:{total:1,eligible:{}}}}};
  let dashboardCalls=0,registryReady=false,poolMode=false;
+ const poolRestTrade={chainId:'196',token:'0xabc',venue:'dex',marketId:'0xpool',poolId:'0xpool',id:'pool-rest',t:now-1000,source:'X Layer native pool',price:0.01,priceCurrency:'WETH',quoteQuantity:0.02,volumeCurrency:'WETH',type:'buy'};
  await page.addInitScript(()=>{
   // Observe the real chart instance and its viewport; rendering stays unchanged.
   let chartApi;window.__chartInstances=[];
@@ -28,7 +29,7 @@ try{
   const url=new URL(route.request().url());
   if(!url.pathname.startsWith('/api/'))return route.continue();
   if(url.pathname.endsWith('/dashboard')){dashboardCalls++;return route.fulfill({json:snapshot});}
-  if(url.pathname.includes('/token/'))return route.fulfill({json:{asset:{...asset},relations:[relation],trades:[],events:[],samples:[],pools:[],poolMarkets:poolMode?[{poolId:'0xpool',marketId:'0xpool',priceCurrency:'WETH',lastTradeAt:now-1000,liquidityUsd:100}]:[],analysis:{},marketTrades:[]}});
+  if(url.pathname.includes('/token/'))return route.fulfill({json:{asset:{...asset},relations:[relation],trades:[],events:[],samples:[],pools:[],poolMarkets:poolMode?[{poolId:'0xpool',marketId:'0xpool',priceCurrency:'WETH',lastTradeAt:now-1000,liquidityUsd:100},{poolId:'0xpoolb',marketId:'0xpoolb',priceCurrency:'USDG',lastTradeAt:now-1000,liquidityUsd:200}]:[],analysis:{},marketTrades:poolMode?[poolRestTrade]:[]}});
   if(url.pathname.includes('/candles/')&&url.searchParams.get('pool'))return route.fulfill({json:{source:'X Layer native pool',venue:'dex',marketId:'0xpool',pool:'0xpool',priceCurrency:'WETH',volumeCurrency:'WETH',status:'current',marketStatus:'quiet',scanAt:await page.evaluate(()=>Date.now()),lastTradeAt:now-1000,rows:[{t:barAt-300000,o:0.01,h:0.01,l:0.01,c:0.01,v:1,confirmed:true},{t:barAt,o:0.01,h:0.01,l:0.01,c:0.01,v:1,confirmed:false}]}});
   if(url.pathname.includes('/candles/'))return route.fulfill({json:{source:'OKX DEX',lastSuccessfulAt:now,venue:'dex',marketId:'aggregate',priceCurrency:'USD',volumeCurrency:'USD',status:'current',rows:[{t:barAt-300000,o:1,h:2,l:1,c:2,v:10,confirmed:true},{t:barAt,o:2,h:2,l:2,c:2,v:1,confirmed:false}]}});
   if(url.pathname.endsWith('/registry'))return route.fulfill({json:{configured:true,contract:'0xregistry',explorer:'#',pairs:registryReady?[{meme:'0xabc',stock:'0xstock'}]:[]}});
@@ -102,25 +103,48 @@ try{
  await page.clock.fastForward(21000);
  assert.equal(dashboardCalls,before,'healthy projection stream must not request a 20s full snapshot');
  poolMode=true;
+ await page.evaluate(()=>location.hash='#/detail/196/0xabc?pool=0xpool');
  await page.reload();
  await page.locator('[data-chart-market]').waitFor();
  await page.waitForFunction(()=>document.querySelector('[data-chart-market]')?.value==='pool:0xpool');
  assert.match(await page.locator('[data-kpi-key="price"] .kpi-value').innerText(),/\$1/);
+ assert.match(await page.locator('[data-kpi-key="price"]').innerText(),/Asset-wide latest price.*OKX/s);
+ assert.equal(await page.locator('[data-kpi-key="pool-price"] .kpi-value span').getAttribute('title'),'0.01 WETH');
+ assert.match(await page.locator('[data-kpi-key="pool-price"] .kpi-note').innerText(),/X Layer native pool/);
  assert.match(await page.locator('[data-pool-unit]').innerText(),/WETH/);
  assert.match(await page.locator('[data-chart-status]').innerText(),/Collection healthy/);
+ await page.locator('[data-chart-market]').selectOption('pool:0xpoolb');
+ await page.waitForFunction(()=>document.querySelector('[data-chart-market]')?.value==='pool:0xpoolb');
+ await page.waitForURL(/pool=0xpoolb/);
+ assert.equal(await page.locator('[data-kpi-key="pool-price"] .kpi-value').innerText(),'—','no trade in the selected pool must remain pending');
+ assert.match(await page.locator('[data-kpi-key="pool-price"] .kpi-note').innerText(),/USDG.*Waiting for a real trade/s);
+ await page.evaluate(packet=>window.__send('trade',packet,30),{...poolRestTrade,id:'wrong-unit',poolId:'0xpoolb',marketId:'0xpoolb',price:0.5,priceCurrency:'WETH',t:now+10});
+ await page.waitForTimeout(100);
+ assert.equal(await page.locator('[data-kpi-key="pool-price"] .kpi-value').innerText(),'—','a different quote unit must not set the pool price');
+ await page.evaluate(packet=>window.__send('trade',packet,31),{...poolRestTrade,id:'pool-b-live',poolId:'0xpoolb',marketId:'0xpoolb',price:0.75,priceCurrency:'USDG',volumeCurrency:'USDG',t:now+11});
+ await page.waitForFunction(()=>document.querySelector('[data-kpi-key="pool-price"] .kpi-value span')?.title==='0.75 USDG');
+ assert.match(await page.locator('[data-kpi-key="price"] .kpi-value').innerText(),/\$1/,'pool trades must not overwrite the asset-wide quote');
+ await page.evaluate(packet=>window.__send('trade',packet,32),{...poolRestTrade,id:'pool-b-next',poolId:'0xpoolb',marketId:'0xpoolb',price:0.7501,priceCurrency:'USDG',volumeCurrency:'USDG',t:now+12});
+ await page.waitForFunction(()=>document.querySelector('[data-kpi-key="pool-price"] .kpi-value')?.textContent.includes('0.7501 USDG'));
+ await page.locator('[data-chart-market]').selectOption('pool:0xpool');
+ await page.waitForFunction(()=>document.querySelector('[data-kpi-key="pool-price"] .kpi-value span')?.title==='0.01 WETH');
  const nativeNow=await page.evaluate(()=>Date.now());
- await page.evaluate(packet=>window.__send('candle',packet,31),{chainId:'196',token:'0xabc',venue:'dex',marketId:'0xpool',poolId:'0xpool',bar:'5m',source:'X Layer native pool',priceCurrency:'WETH',volumeCurrency:'WETH',sourceEventAt:nativeNow,row:{t:barAt,o:0.01,h:0.02,l:0.01,c:0.02,v:2,vu:0.04,confirmed:false}});
+ await page.evaluate(packet=>window.__send('candle',packet,33),{chainId:'196',token:'0xabc',venue:'dex',marketId:'0xpool',poolId:'0xpool',bar:'5m',source:'X Layer native pool',priceCurrency:'WETH',volumeCurrency:'WETH',sourceEventAt:nativeNow,row:{t:barAt,o:0.01,h:0.02,l:0.01,c:0.02,v:2,vu:0.04,lastEventAt:nativeNow,confirmed:false}});
  await page.waitForFunction(()=>document.querySelector('[data-chart-ohlc]')?.textContent.includes('C 0.02'));
+ await page.waitForFunction(()=>document.querySelector('[data-kpi-key="pool-price"] .kpi-value span')?.title==='0.02 WETH');
  assert.match(await page.locator('[data-kpi-key="price"] .kpi-value').innerText(),/\$1/);
  const livePoolStatus=await page.locator('[data-chart-status]').innerText();
  assert.match(livePoolStatus,/Live trades connected; historical data is being backfilled/);
- await page.evaluate(packet=>window.__send('candle',packet,32),{chainId:'196',token:'0xabc',venue:'dex',marketId:'0xpool',poolId:'0xpool',bar:'5m',source:'X Layer native pool',priceCurrency:'WETH',volumeCurrency:'WETH',sourceEventAt:nativeNow-3600000,row:{t:barAt-300000,o:0.01,h:0.015,l:0.01,c:0.015,v:2,vu:0.03,confirmed:true}});
+ await page.evaluate(packet=>window.__send('candle',packet,34),{chainId:'196',token:'0xabc',venue:'dex',marketId:'0xpool',poolId:'0xpool',bar:'5m',source:'X Layer native pool',priceCurrency:'WETH',volumeCurrency:'WETH',sourceEventAt:nativeNow-3600000,row:{t:barAt-300000,o:0.01,h:0.015,l:0.01,c:0.015,v:2,vu:0.03,lastEventAt:nativeNow-3600000,confirmed:true}});
  await page.waitForTimeout(150);
  assert.equal(await page.locator('[data-chart-status]').innerText(),livePoolStatus,'historical correction must preserve latest trade time and live/coverage state');
  assert.match(await page.locator('[data-chart-ohlc]').innerText(),/C 0.02/);
+ assert.equal(await page.locator('[data-kpi-key="pool-price"] .kpi-value span').getAttribute('title'),'0.02 WETH','historical correction must not roll back the pool quote');
  await page.locator('[data-chart-market]').selectOption('dex');
  await page.waitForFunction(()=>document.querySelector('[data-chart-ohlc]')?.textContent.includes('C 2'));
  assert.equal(await page.locator('[data-pool-unit]').count(),0);
+ assert.equal(await page.locator('[data-kpi-key="pool-price"]').count(),0);
+ assert.doesNotMatch(page.url(),/pool=/);
  assert.deepEqual(errors,[]);
- console.log('PASS browser: all fields/DEX stock/reference/candle/trade+reorg/registry/language/cursor/no20s snapshot/native pool default + units + aggregate switch + no quote-induced OHLC clearing + zoom/pan preserved + historical correction preserves live/coverage status');
+ console.log('PASS browser: all fields/DEX stock/reference/candle/trade+reorg/registry/language/cursor/no20s snapshot/selected pool quote from REST and live trades + units + market isolation + aggregate switch + no quote-induced OHLC clearing + zoom/pan preserved + historical correction preserves live/coverage status');
 }finally{await browser.close();}
