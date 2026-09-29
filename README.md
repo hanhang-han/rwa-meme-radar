@@ -3,7 +3,7 @@
 > Discover, verify, and register meme-token ↔ stock-token pairs on X Layer.
 > 把「meme 币蹭股票」的模糊叙事，变成可核验、可复现、上链存证的配对证据。
 
-**在线体验**：https://cliperx.com/dashboard/ （X Layer 主网数据实时更新）
+**在线体验**：https://cliperx.com/dashboard/ （X Layer、BNB Smart Chain 与 Robinhood Chain 数据统一展示）
 
 ## 这是什么
 
@@ -57,24 +57,32 @@ curl https://cliperx.com/dashboard/api/registry
 | **交易池分析** | 已核验配对的证据页：池地址、核验区块、流动性分布、双合约、链上登记状态 |
 | **事件历史** | 配对维度的发现/价格异动事件流（谁 ↔ 谁） |
 
-## 技术栈
+## 当前运行架构
 
-- **前端**：原生 JavaScript + ECharts，零框架零构建，单页 hash 路由，中英双语
-- **后端**：Node 22 + Hono + TypeScript（tsx 直跑），`node:sqlite` 持久化研究事实与采样
+- **前端**：Vue 3 + Vite + ECharts，单页 hash 路由，中英双语，SSE 实时增量更新
+- **查询后端**：Python 3.11 + FastAPI，负责统一查询、K 线、健康检查与 SSE 断线重放
+- **采集后端**：独立 Python worker，独占 OKX/X Layer、Binance、报价、成交、简报和登记任务；API 重启不会复制采集任务
+- **页面计算**：独立 `pyradar-projection` 进程处理增量视图、价差及行业篮子，避免全站汇总占用实时采集的事件循环；不增加上游调用
+- **兼容适配器**：Node 22 + Hono 保留目录、Robinhood/EODHD 等尚未迁移的数据适配能力
+- **存储**：SQLite/WAL 持久化研究事实、采样、成交、K 线、AI 产物、任务状态与实时事件账本
 - **链上**：ethers v6 + solc-js 编译部署；X Layer RPC `https://xlayerrpc.okx.com`
-- **数据源**（全部公共端点）：OKX DEX API（行情/池/交易）、EODHD（股价）、DeepSeek（AI 简报，Anthropic 兼容接口）
-- **部署**：nginx 反代 + pm2，https://cliperx.com/dashboard/
+- **数据源**：OKX DEX、Binance、Robinhood、EODHD、DexScreener、GeckoTerminal、DeepSeek
+- **部署**：Nginx + PM2，分别管理兼容服务、查询 API、单实例采集 worker 和单实例页面计算进程
 
 ## 快速开始
 
 ```bash
 npm install
-npm start          # http://localhost:3456 ，零配置（公共数据源无需 key）
-npm test           # 端到端 UI 测试（jsdom 模拟真实脚本加载顺序）
-npm run demo       # 数据层验证脚本
+npm start          # 兼容适配服务：http://localhost:3456
+npm test           # Node 数据与接口测试
+npm run check      # TypeScript 静态检查
+(cd web && npm run dev)  # Vue 开发服务器
+PYTHONPATH=server-py server-py/.venv/bin/python -m uvicorn app.main:app --port 8010
+PYTHONPATH=server-py server-py/.venv/bin/python -m app.worker
+PYTHONPATH=server-py server-py/.venv/bin/python -m app.projection_worker
 ```
 
-AI 简报为可选功能：`.env` 中配置 `DEEPSEEK_API_KEY` 后自动启用（见 `.env.example`）。合约登记需要 `REGISTRY_CONTRACT` + `REGISTRY_OWNER_KEY`，不配置时系统正常运行、仅跳过上链。
+AI 简报和资产解读为后台定时任务；页面请求只读取已持久化结果。`.env` 中配置 `DEEPSEEK_API_KEY` 后启用（见 `.env.example`）。合约登记需要 `REGISTRY_CONTRACT` + `REGISTRY_OWNER_KEY`，不配置时系统正常运行、仅跳过上链。
 
 重新编译合约：
 

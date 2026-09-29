@@ -4,6 +4,7 @@
 import { ethers } from 'ethers';
 import { readFileSync } from 'node:fs';
 import type { XRelation } from './xlayer';
+import { officialStockIdentity } from './stock-identity';
 
 const artifact = JSON.parse(readFileSync(new URL('../../contracts/artifacts/PairRegistry.json', import.meta.url), 'utf8')) as { abi: any[]; bytecode: string };
 const RPC = () => process.env.XLAYER_RPC ?? 'https://xlayerrpc.okx.com';
@@ -11,6 +12,23 @@ const RPC = () => process.env.XLAYER_RPC ?? 'https://xlayerrpc.okx.com';
 const CONTRACT = () => process.env.REGISTRY_CONTRACT ?? '';
 const KEY = () => process.env.REGISTRY_OWNER_KEY ?? '';
 const CHAIN = 196;
+const ADDRESS = /^0x[0-9a-f]{40}$/i;
+
+function currentQualified(r: XRelation): boolean {
+  if (r.status !== 'verified' || String(r.chainId ?? CHAIN) !== String(CHAIN)) return false;
+  if (![r.token, r.stock, r.stockSide, r.pool, r.token0, r.token1].every(value => ADDRESS.test(value))) return false;
+  if (new Set([r.token.toLowerCase(), r.stockSide.toLowerCase()]).size !== 2) return false;
+  if (new Set([r.token0.toLowerCase(), r.token1.toLowerCase()]).size !== 2) return false;
+  const sides = new Set([r.token0.toLowerCase(), r.token1.toLowerCase()]);
+  if (!sides.has(r.token.toLowerCase()) || !sides.has(r.stockSide.toLowerCase())) return false;
+  const stock = officialStockIdentity(CHAIN, r.stock, r.ticker);
+  const side = officialStockIdentity(CHAIN, r.stockSide, r.ticker);
+  const now = Date.now();
+  return stock.eligibleForPair && side.eligibleForPair && stock.underlyingId === side.underlyingId
+    && Number.isFinite(Number(r.liquidityUsd)) && (r.liquidityUsd ?? 0) >= 1000
+    && Number.isFinite(Number(r.liquidityAt)) && (r.liquidityAt ?? 0) <= now
+    && now - (r.liquidityAt ?? 0) <= 900_000;
+}
 
 export function registryConfigured() {
   return /^0x[0-9a-fA-F]{40}$/.test(CONTRACT()) && /^0x[0-9a-fA-F]{64}$/.test(KEY());
@@ -55,16 +73,20 @@ export async function onchainPairs(): Promise<any[]> {
 }
 
 export async function registryInfo(relations: XRelation[]) {
-  const configured = registryConfigured();
+  const configured = /^0x[0-9a-fA-F]{40}$/.test(CONTRACT());
   const rows = configured ? await onchainPairs().catch(() => []) : [];
   const known = new Set(relations.map(r => `${r.token.toLowerCase()}:${r.stock.toLowerCase()}`));
+  const qualified = relations.filter(currentQualified);
+  const qualifiedKeys = new Set(qualified.map(r => `${r.token.toLowerCase()}:${r.stock.toLowerCase()}`));
+  const done = new Set(rows.map(p => `${p.meme}:${p.stock}`));
   return {
     contract: CONTRACT() || null, chainId: CHAIN, configured,
+    writeConfigured: registryConfigured(), autoSyncEnabled: false,
     explorer: CONTRACT() ? `https://www.okx.com/explorer/xlayer/address/${CONTRACT()}` : null,
-    onchainCount: rows.length,
-    pendingLocal: relations.filter(r => r.status === 'verified' && !rows.some(p => p.meme === r.token.toLowerCase() && p.stock === r.stock.toLowerCase())).length,
-    localVerified: relations.filter(r => r.status === 'verified').length,
-    pairs: rows.map(p => ({ ...p, evidenceSource: relations.find(r => r.token.toLowerCase() === p.meme && r.stock.toLowerCase() === p.stock && r.status === 'verified') ? evidenceJson(relations.find(r => r.token.toLowerCase() === p.meme && r.stock.toLowerCase() === p.stock)!) : null })),
+    onchainCount: rows.length, onchainCountMeaning: 'historical-records-not-current-verification',
+    pendingLocal: [...qualifiedKeys].filter(key => !done.has(key)).length,
+    localVerified: qualifiedKeys.size,
+    pairs: rows.map(p => ({ ...p, evidenceSource: qualified.find(r => r.token.toLowerCase() === p.meme && r.stock.toLowerCase() === p.stock) ? evidenceJson(qualified.find(r => r.token.toLowerCase() === p.meme && r.stock.toLowerCase() === p.stock)!) : null })),
     knownUntracked: rows.filter(p => !known.has(`${p.meme}:${p.stock}`)).length,
   };
 }
@@ -74,13 +96,13 @@ export async function registryInfo(relations: XRelation[]) {
 const withTimeout = <T>(p: Promise<T>, ms: number) => Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error('registry rpc timeout')), ms))]);
 let syncing = false, syncStartedAt = 0;
 export async function syncRegistry(relations: XRelation[]) {
-  if (!registryConfigured()) return;
+  if (!registryConfigured() || process.env.REGISTRY_MANUAL_SYNC_APPROVED !== 'true') return;
   if (syncing && Date.now() - syncStartedAt < 900_000) return;
   syncing = true; syncStartedAt = Date.now();
   try {
     const onchain = await onchainPairs();
     const done = new Set(onchain.map(p => `${p.meme}:${p.stock}`));
-    const pending = relations.filter(r => r.status === 'verified' && !done.has(`${r.token.toLowerCase()}:${r.stock.toLowerCase()}`));
+    const pending = relations.filter(r => currentQualified(r) && !done.has(`${r.token.toLowerCase()}:${r.stock.toLowerCase()}`));
     if (!pending.length) return;
     const wallet = new ethers.Wallet(KEY(), provider ??= new ethers.JsonRpcProvider(RPC(), CHAIN, { staticNetwork: true }));
     const balance = await wallet.provider!.getBalance(wallet.address);

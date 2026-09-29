@@ -278,19 +278,11 @@ export async function refreshQuotes(assets:XAsset[]) {
   coolStale(tokens, answered);
 }
 
-// Detail views drive their own collection: refresh trades for the asset a
-// user is watching so the activity feed keeps rolling between scan rounds.
+// Query paths only renew a shared lease. The Python worker owns all
+// provider calls, regardless of whether this legacy endpoint is visited.
 export async function refreshAssetOnDemand(address:string){
-  watchAsset(address);
-  await inNetwork('196', okxState, async () => {
-    const asset=db().get<XAsset>('asset',address);
-    if(!asset||asset.kind!=='candidate')return;
-    if(asset.tradeAt&&Date.now()-asset.tradeAt<45_000)return;
-    try{
-      const fresh=await refreshTrades(asset);
-      if(fresh.length)broadcastStream('trade',{chainId:chainId(),token:address,fresh});
-    }catch(e){console.error('[ondemand]',e instanceof Error?e.message:e);}
-  });
+  const token=addr(address);if(!token)return;
+  db().put('watch',token,{token,chainId:chainId(),expiresAt:Date.now()+90_000});
 }
 
 // Watched assets (detail pages) get their price straight from the pair
@@ -376,12 +368,7 @@ export async function refreshXLayer() {
   try {
     if(BigInt(await xRpc('eth_chainId',[])).toString()!==chainId()) throw new Error('RPC chain identity mismatch');
     const block=await xRpc('eth_blockNumber',[]);
-    // Reference prices are persisted independently from the moving RWA table.
-    for(const stock of catalog().tokens) {
-      db().put('stock',stock.tokenContractAddress.toLowerCase(),stock);
-      if(!db().get('asset',stock.tokenContractAddress.toLowerCase()))saveAsset({...stock,time:catalog().updatedAt,volume:stock.volume24h});
-      if(stock.price && fresh(catalog().updatedAt)) db().sample(stock.tokenContractAddress.toLowerCase(),stock.price,stock.marketCap,catalog().updatedAt!);
-    }
+    persistStockCatalogue();
     // Recheck old pool endpoints even if they leave OKX's top five listing.
     const relations=db().all<XRelation>('relation').sort((a,b)=>a.checkedAt-b.checkedAt).filter(r=>!fresh(r.checkedAt,600000)).slice(0,16);
     for(const r of relations) {
@@ -450,6 +437,30 @@ export async function refreshXLayer() {
   }
 }
 
+// During the Node -> Python transition Node remains the catalogue adapter for
+// OKX RWA rows, while Python is the sole X Layer quote/relation collector.
+// Keeping this narrow operation separate prevents the five-minute Node round
+// from re-running Python-owned scans and trades.
+export function catalogueSchedule(){return db().get<any>('collector-job','catalogue:all')??{};}
+export function catalogueCheckpoint(success:boolean,reason:string|null=null){
+  const old=catalogueSchedule(),now=Date.now();const failures=success?0:Math.min(10,(old.failureCount??0)+1);
+  db().put('collector-job','catalogue:all',{id:'catalogue:all',domain:'catalogue',key:'all',lastAttemptAt:now,
+    lastSuccessAt:success?now:old.lastSuccessAt??null,failureCount:failures,reason,
+    nextRetryAt:success?0:now+Math.min(3600000,60000*2**failures)});
+}
+
+export function persistStockCatalogue() {
+  for (const stock of catalog().tokens) {
+    db().put('stock', stock.tokenContractAddress.toLowerCase(), stock);
+    const previous=db().get<XAsset>('asset',stock.tokenContractAddress.toLowerCase());
+    if (!previous) {
+      saveAsset({ ...stock, time: catalog().updatedAt, volume: stock.volume24h });
+    } else if(previous.kind!=='stock') {
+      db().put('asset',stock.tokenContractAddress.toLowerCase(),{token:previous.token,kind:'stock'});
+    }
+  }
+}
+
 export function groupCandidates(assets:XAsset[],relations:XRelation[]) {
   const groups=new Map<string,XAsset[]>();
   for(const a of assets.filter(a=>a.kind==='candidate')) {
@@ -461,30 +472,13 @@ export function groupCandidates(assets:XAsset[],relations:XRelation[]) {
   return [...groups.values()].map(list=>{list.sort((a,b)=>score(b)-score(a));return {symbol:list[0].symbol,count:list.length,members:list};})
     .sort((a,b)=>score(b.members[0])-score(a.members[0]));
 }
-function sectorViews(assets:XAsset[],relations:XRelation[]) {
-  return Object.entries(sectors).map(([name,tickers])=>{
-    const addresses=[...new Set(relations.filter(r=>r.status==='verified'&&tickers.includes(r.ticker)&&(r.liquidityUsd??0)>=1000).map(r=>r.token))];
-    // Relationship membership is durable. With a quota-friendly five-minute
-    // pipeline, each candidate quote is rotated rather than refreshed every
-    // round, so do not hide a previously observed component merely because its
-    // latest quote is older than the display freshness window. Keep the index
-    // value null until every base component has a fresh quote.
-    const members=assets.filter(a=>addresses.includes(a.token)&&a.price!=null&&a.marketCap!=null&&a.price>0&&a.marketCap>0);
-    const freshMembers=members.filter(a=>fresh(a.fieldTimes?.price??a.updatedAt));
-    let base=db().get<any>('basket',name);
-    if(!base&&members.length>=3&&freshMembers.length>=3) {
-      base={baseAt:Date.now(),members:freshMembers.map(a=>({token:a.token,basePrice:a.price,baseCap:a.marketCap})),version:1};
-      db().put('basket',name,base);
-    }
-    if(!base) return {sector:name,value:null,members:members.length,reason:members.length>=3&&freshMembers.length<3?`已具备 ${members.length}/3 个合格成分；等待 ${members.length-freshMembers.length} 个行情更新`:`已具备 ${members.length}/3 个合格成分`,components:members.map(a=>({token:a.token,symbol:a.symbol}))};
-    const complete=base.members.every((m:any)=>members.some(a=>a.token===m.token));
-    const freshComplete=base.members.every((m:any)=>freshMembers.some(a=>a.token===m.token));
-    const metric=complete&&freshComplete?basketIndex(base.members.map((m:any)=>({...m,price:freshMembers.find(a=>a.token===m.token)!.price}))):null;
-    if(metric?.value!=null){const at=Math.min(...base.members.map((m:any)=>{const a=freshMembers.find(a=>a.token===m.token)!;return a.fieldTimes?.price??a.updatedAt;}));db().put('basket-last',name,{value:metric.value,at});db().sample('basket:'+name,metric.value,null,at);}
-    const last=db().get<any>('basket-last',name);
-    return {sector:name,value:metric?.value??null,lastValue:last?.value??null,lastAt:last?.at??null,history:db().samples('basket:'+name),chainId:chainId(),members:base.members.length,baseAt:base.baseAt,
-      reason:!complete?'成分过期或不再合格，指数暂停':freshComplete?'OKX 市值权重 · 固定首版成分':`固定首版成分；等待 ${base.members.filter((m:any)=>!freshMembers.some(a=>a.token===m.token)).length} 个行情更新`,
-      components:base.members.map((m:any)=>({token:m.token,symbol:assets.find(a=>a.token===m.token)?.symbol??m.token,weight:m.baseCap/base.members.reduce((n:number,x:any)=>n+x.baseCap,0)}))};
+function sectorViews(_assets:XAsset[],_relations:XRelation[]) {
+  // The worker owns basket membership, baseline and samples. GET requests
+  // must never establish or reset an index merely because someone visits.
+  const views=new Map(db().all<any>('basket-view').map(v=>[v.sector,v]));
+  return Object.keys(sectors).map(sector=>views.get(sector)??{
+    sector,chainId:chainId(),value:null,members:0,components:[],history:[],
+    status:'pending',reason:'等待行业篮子定时计算',
   });
 }
 export function xLayerState() {

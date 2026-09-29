@@ -1,47 +1,51 @@
 import { createHmac } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { readSnapshot, writeSnapshot } from './snapshot';
+import { sharedUsage, reserveRequestSlot } from './request-ledger';
 export const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 let queue: Promise<unknown> = Promise.resolve();
 let nextAt = 0;
-let loaded = false;
+
 type Allowance={remaining:number;parent?:Allowance};
 const allowance=new AsyncLocalStorage<Allowance>();
+const lane=new AsyncLocalStorage<{name:string;limit:number}>();
+export function withRequestLane<T>(name:string,limit:number,action:()=>T):T{return lane.run({name,limit},action);}
 export function withRequestAllowance<T>(limit:number,action:()=>T):T{return allowance.run({remaining:limit,parent:allowance.getStore()},action);}
 const usage={day:'',daily:0,round:0,startedAt:0,completedAt:0,nextAt:0,lastError:null as string|null};
 const positive=(value:string|undefined,fallback:number)=>Number.isFinite(Number(value))&&Number(value)>0?Math.floor(Number(value)):fallback;
-export function collectionStatus(){return {...usage,dailyLimit:positive(process.env.OKX_DAILY_REQUEST_LIMIT,8000),roundLimit:positive(process.env.OKX_ROUND_REQUEST_LIMIT,70),intervalMs:300000};}
+const reserve=(name:string,daily:number,fallback:number,ratio:number)=>process.env[name]
+  ?Math.min(daily,positive(process.env[name],fallback)):Math.min(fallback,Math.max(0,Math.floor(daily*ratio)));
+export function collectionStatus(){
+  if(process.env.NODE_ENV!=='test'){usage.day=new Date().toISOString().slice(0,10);usage.daily=sharedUsage(usage.day);}
+  const dailyLimit=positive(process.env.OKX_DAILY_REQUEST_LIMIT,8000);
+  const backgroundReserve=reserve('OKX_BACKGROUND_RESERVE',dailyLimit,1200,.15);
+  const criticalReserve=Math.min(backgroundReserve,reserve('OKX_CRITICAL_RESERVE',dailyLimit,400,.05));
+  return {...usage,dailyLimit,roundLimit:positive(process.env.OKX_ROUND_REQUEST_LIMIT,70),intervalMs:300000,
+    backgroundCap:Math.max(0,dailyLimit-backgroundReserve),interactiveCap:Math.max(0,dailyLimit-criticalReserve),
+    backgroundReserve,criticalReserve};
+}
 export function startCollection(){usage.round=0;usage.startedAt=Date.now();usage.lastError=null;usage.nextAt=0;}
 export function endCollection(error:string|null=null){usage.completedAt=Date.now();usage.nextAt=Date.now()+300000;usage.lastError=error;}
-let lastPersist=0,persistTimer:ReturnType<typeof setTimeout>|null=null;
-// Usage is a local protective counter; writing it on every request blocks the
-// event loop (writeFileSync+renameSync). Persist at most every 30s.
-function persistUsage(){
-  if(process.env.NODE_ENV==='test')return;
-  const now=Date.now();
-  if(now-lastPersist>=30_000){lastPersist=now;writeSnapshot('data/okx-usage.json',usage);return;}
-  if(!persistTimer)persistTimer=setTimeout(()=>{persistTimer=null;lastPersist=Date.now();writeSnapshot('data/okx-usage.json',usage);},30_000);
-}
-function chargeRequest(opts?:{skipRound?:boolean}){
-  if(!loaded){if(process.env.NODE_ENV!=='test')Object.assign(usage,readSnapshot('data/okx-usage.json')??{}, {round:usage.round,startedAt:usage.startedAt});loaded=true;}
+function chargeRequest(opts?:{skipRound?:boolean;priority?:'background'|'interactive'|'critical'}){
   const day=new Date().toISOString().slice(0,10);if(usage.day!==day){usage.day=day;usage.daily=0;}
   const limits=collectionStatus();
   const budgets:Allowance[]=[];for(let b=allowance.getStore();b;b=b.parent)budgets.push(b);
   if(budgets.some(b=>b.remaining<=0))throw new Error('OKX network request allowance exhausted');
-  if(usage.daily>=limits.dailyLimit||(!opts?.skipRound&&usage.round>=limits.roundLimit))throw new Error('OKX local request budget exhausted');
+  const cap=opts?.priority==='critical'?limits.dailyLimit:opts?.priority==='interactive'?limits.interactiveCap:limits.backgroundCap;
+  if(usage.daily>=cap||(!opts?.skipRound&&usage.round>=limits.roundLimit))throw new Error('OKX local request budget exhausted');
+  const channel=lane.getStore();
+  usage.daily=process.env.NODE_ENV==='test'?usage.daily+1:sharedUsage(day,cap,channel?.name,channel?.limit);
   for(const budget of budgets)budget.remaining--;
-  usage.daily++;if(!opts?.skipRound)usage.round++;
-  persistUsage();
+  if(!opts?.skipRound)usage.round++;
 }
 
 // All workers share one rate limiter. Never send these headers to another host.
 export function okxGet(endpoint: string, params: Record<string, string>): Promise<any> {
   return okxRequest(endpoint + '?' + new URLSearchParams(params), 'GET');
 }
-export function okxPost(endpoint: string, data: unknown, opts?: { skipRound?: boolean; urgent?: boolean }): Promise<any> {
+export function okxPost(endpoint: string, data: unknown, opts?: { skipRound?: boolean; urgent?: boolean; priority?:'background'|'interactive'|'critical' }): Promise<any> {
   return okxRequest(endpoint, 'POST', JSON.stringify(data), opts);
 }
-function okxRequest(path: string, method: 'GET' | 'POST', body = '', opts?: { skipRound?: boolean; urgent?: boolean }): Promise<any> {
+function okxRequest(path: string, method: 'GET' | 'POST', body = '', opts?: { skipRound?: boolean; urgent?: boolean; priority?:'background'|'interactive'|'critical' }): Promise<any> {
   const task = async () => {
     const key = process.env.OKX_API_KEY, secret = process.env.OKX_SECRET_KEY, passphrase = process.env.OKX_PASSPHRASE;
     if (!key || !secret || !passphrase) throw new Error('OKX credentials not configured');
@@ -49,6 +53,7 @@ function okxRequest(path: string, method: 'GET' | 'POST', body = '', opts?: { sk
     for (let attempt = 0; attempt < 4; attempt++) {
       await pause(Math.max(0, nextAt - Date.now()));
       chargeRequest(opts);
+      if(process.env.NODE_ENV!=='test')await pause(reserveRequestSlot(positive(process.env.OKX_REQUEST_INTERVAL_MS,500)));
       const timestamp = new Date().toISOString();
       const response = await fetch('https://web3.okx.com' + path, {
         method, ...(body ? {body} : {}),

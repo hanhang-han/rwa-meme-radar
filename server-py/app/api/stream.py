@@ -1,35 +1,152 @@
-"""SSE stream: one queue per client; collectors broadcast through the hub."""
+"""Cursor-consistent SSE with bounded replay and one shared process tailer."""
 import asyncio
 import json
 import time
+import zlib
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header
 from fastapi.responses import StreamingResponse
 
-from ..stream_hub import clients, hello
+from ..stream_hub import clients, cursor, hello, replay_batch, replay_page, _frame
 
 router = APIRouter()
 
 
-@router.get("/stream")
-async def get_stream():
-    q: asyncio.Queue = asyncio.Queue(maxsize=256)
+def accepts_gzip(value):
+    """Use gzip only when the client explicitly accepts a positive quality."""
+    if not isinstance(value, str):
+        return False
+    for entry in value.split(','):
+        encoding, *parameters = entry.strip().lower().split(';')
+        if encoding.strip() != 'gzip':
+            continue
+        quality = 1.0
+        for parameter in parameters:
+            name, separator, raw = parameter.strip().partition('=')
+            if name.strip() == 'q':
+                try:
+                    quality = float(raw.strip()) if separator else 0
+                except ValueError:
+                    quality = 0
+        if 0 < quality <= 1:
+            return True
+    return False
+
+
+async def gzip_frames(source):
+    """Flush each SSE frame immediately while retaining the gzip dictionary."""
+    compressor = zlib.compressobj(wbits=31)
+    try:
+        async for frame in source:
+            yield compressor.compress(frame) + compressor.flush(zlib.Z_SYNC_FLUSH)
+        trailer = compressor.flush(zlib.Z_FINISH)
+        if trailer:
+            yield trailer
+    finally:
+        # Closing the response must reach frames()'s subscriber cleanup even
+        # when cancellation arrives while this wrapper is suspended at yield.
+        await source.aclose()
+
+
+@router.get('/stream')
+async def get_stream(last_event_id: str | None = Header(default=None, alias='Last-Event-ID'),
+                     snapshot: bool = True, after: str | None = None,
+                     protocol: int = 0, candles: str | None = None,
+                     accept_encoding: str | None = Header(default=None, alias='Accept-Encoding')):
+    q: asyncio.Queue = asyncio.Queue(maxsize=1024)
     clients().add(q)
     hello(q)
+    # Browser reconnect headers take precedence over the original URL cursor.
+    try:
+        last_id = int(last_event_id if isinstance(last_event_id, str) else after)
+    except (TypeError, ValueError):
+        last_id = None
+    upper = cursor()
+    candle_keys = set(candles.split(',')) if isinstance(candles, str) and candles != 'all' else None
+
+    def visible(frame):
+        return frame_visible(frame, protocol=protocol, candle_keys=candle_keys)
 
     async def frames():
         try:
+            seen = upper if last_id is None else last_id
+            if last_id is not None:
+                while True:
+                    page, seen, done = replay_page(seen, upper)
+                    skipped = False
+                    for frame in page:
+                        if visible(frame):
+                            yield frame
+                        else:
+                            skipped = True
+                    if skipped:
+                        yield _frame('checkpoint', {'cursor': seen}, seen)
+                    if done:
+                        break
+                    await asyncio.sleep(0)
+            if snapshot and protocol != 1:
+                latest, _ = replay_batch(None, include_latest=True)
+                for frame in latest:
+                    yield frame
+            last_checkpoint = time.monotonic()
+            pending_checkpoint = False
             while True:
                 try:
-                    frame = await asyncio.wait_for(q.get(), timeout=25)
+                    queued = await asyncio.wait_for(q.get(), timeout=25)
+                    if queued is None:
+                        break
+                    seq, frame = queued
+                    if seq is not None and seq <= seen:
+                        continue
+                    if seq is not None:
+                        seen = seq
+                    if not visible(frame):
+                        pending_checkpoint = True
+                        if time.monotonic() - last_checkpoint >= 5:
+                            yield _frame('checkpoint', {'cursor': seen}, seen)
+                            pending_checkpoint = False
+                            last_checkpoint = time.monotonic()
+                        continue
                     yield frame
+                    if seq is not None:
+                        pending_checkpoint = False
+                        last_checkpoint = time.monotonic()
                 except asyncio.TimeoutError:
-                    yield f"event: heartbeat\ndata: {json.dumps({'at': int(time.time() * 1000)})}\n\n".encode()
+                    # No database work per connected browser. Checkpoints also
+                    # advance through intentionally filtered quote/candle ids.
+                    if pending_checkpoint:
+                        yield _frame('checkpoint', {'cursor': seen}, seen)
+                        pending_checkpoint = False
+                        last_checkpoint = time.monotonic()
+                    yield _frame('heartbeat', {'at': int(time.time()*1000)})
         finally:
             clients().discard(q)
 
-    return StreamingResponse(
-        frames(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+               'Vary': 'Accept-Encoding'}
+    body = frames()
+    if accepts_gzip(accept_encoding):
+        headers['Content-Encoding'] = 'gzip'
+        body = gzip_frames(body)
+    return StreamingResponse(body, media_type='text/event-stream', headers=headers)
+
+
+def frame_visible(frame, protocol=0, candle_keys=None):
+    lines = frame.split(b'\n', 3)
+    event_line = lines[1] if lines[0].startswith(b'id:') else lines[0]
+    event = event_line.partition(b':')[2].strip().decode()
+    if protocol == 1 and event in ('price', 'stock-quote'):
+        return False
+    if candle_keys is not None and event in ('candle', 'candle.upsert', 'candle.close', 'candle.correct'):
+        if 'none' in candle_keys:
+            return False
+        try:
+            data_line = next(line for line in lines if line.startswith(b'data:'))
+            data = json.loads(data_line.partition(b':')[2])
+            key = ':'.join((str(data.get('chainId') or ''), str(data.get('token') or '').lower(),
+                            str(data.get('venue') or '').lower(),
+                            str(data.get('poolId') or data.get('marketId') or '').lower(), str(data.get('bar') or '')))
+            return key in candle_keys
+        except (ValueError, StopIteration):
+            return True  # do not silently hide an unknown new event shape
+    return True

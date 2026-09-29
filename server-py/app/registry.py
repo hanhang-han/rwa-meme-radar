@@ -9,6 +9,8 @@ from pathlib import Path
 
 from web3 import Web3
 
+from .stock_identity import assess_pool_relation
+
 CHAIN = 196
 ARTIFACT = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "artifacts" / "PairRegistry.json").read_text())
 ABI = ARTIFACT["abi"]
@@ -46,7 +48,14 @@ def evidence_json(r: dict) -> str:
 
 
 def evidence_hash(r: dict) -> str:
-    return Web3.keccak(text=evidence_json(r)).hex()
+    return Web3.to_hex(Web3.keccak(text=evidence_json(r)))
+
+
+def evidence_digest(r: dict) -> bytes:
+    digest = bytes(Web3.keccak(text=evidence_json(r)))
+    if len(digest) != 32:
+        raise RuntimeError("invalid evidence digest length")
+    return digest
 
 
 _w3: Web3 | None = None
@@ -75,7 +84,7 @@ async def onchain_pairs() -> list:
         return [
             {
                 "meme": p[0].lower(), "stock": p[1].lower(), "ticker": p[2],
-                "evidence": p[3].hex(), "registeredAt": p[4],
+                "evidence": Web3.to_hex(p[3]), "registeredAt": p[4],
             }
             for p in c.functions.all().call()
         ]
@@ -86,23 +95,27 @@ async def onchain_pairs() -> list:
 
 
 async def registry_info(relations: list) -> dict:
-    configured = registry_configured()
+    configured = Web3.is_address(_contract())
     try:
         rows = await onchain_pairs() if configured else []
     except Exception:
         rows = []
     done = {(p["meme"], p["stock"]) for p in rows}
-    verified = [r for r in relations if r.get("status") == "verified"]
+    verified = [r for r in relations if str(r.get("chainId") or CHAIN) == str(CHAIN)
+                and assess_pool_relation(r).get("level") == "A"]
     by_pair = {(r["token"].lower(), r["stock"].lower()): r for r in verified}
     contract = _contract()
     return {
         "contract": contract or None,
         "chainId": CHAIN,
         "configured": configured,
+        "writeConfigured": registry_configured(),
+        "autoSyncEnabled": False,
         "explorer": f"https://www.okx.com/explorer/xlayer/address/{contract}" if contract else None,
         "onchainCount": len(rows),
-        "pendingLocal": sum(1 for r in verified if (r["token"].lower(), r["stock"].lower()) not in done),
-        "localVerified": len(verified),
+        "onchainCountMeaning": "historical-records-not-current-verification",
+        "pendingLocal": len({(r["token"].lower(), r["stock"].lower()) for r in verified} - done),
+        "localVerified": len({(r["token"].lower(), r["stock"].lower()) for r in verified}),
         "pairs": [
             {**p, "evidenceSource": evidence_json(by_pair[(p["meme"], p["stock"])]) if (p["meme"], p["stock"]) in by_pair else None}
             for p in rows
@@ -116,7 +129,10 @@ _sync_started = 0.0
 
 async def sync_registry(relations: list) -> None:
     global _syncing, _sync_started
-    if not registry_configured():
+    # Only an explicit, reviewed manual invocation may write to mainnet. The
+    # historical worker schedule is removed; this guard prevents a stray
+    # caller from treating a stored `verified` flag as approval to transact.
+    if not registry_configured() or os.environ.get("REGISTRY_MANUAL_SYNC_APPROVED") != "true":
         return
     if _syncing and time.time() - _sync_started < 900:
         return
@@ -125,7 +141,9 @@ async def sync_registry(relations: list) -> None:
     try:
         onchain = await onchain_pairs()
         done = {(p["meme"], p["stock"]) for p in onchain}
-        pending = [r for r in relations if r.get("status") == "verified" and (r["token"].lower(), r["stock"].lower()) not in done]
+        pending = [r for r in relations if str(r.get("chainId") or CHAIN) == str(CHAIN)
+                   and assess_pool_relation(r).get("level") == "A"
+                   and (r["token"].lower(), r["stock"].lower()) not in done]
         if not pending:
             return
         key = _key()
@@ -142,7 +160,7 @@ async def sync_registry(relations: list) -> None:
                         Web3.to_checksum_address(r["token"].lower()),
                         Web3.to_checksum_address(r["stock"].lower()),
                         r.get("ticker", ""),
-                        bytes.fromhex(evidence_hash(r)[2:]),
+                        evidence_digest(r),
                     ).build_transaction({
                         "from": account.address,
                         "nonce": w3().eth.get_transaction_count(account.address),

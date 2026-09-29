@@ -15,7 +15,7 @@ function createPage(hash='#live') {
   w.state=data;
   w.escapeHtml=(s:any)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   w.fmtNum=(v:any)=>String(v);w.fmtBnb=(v:any)=>String(v);
-  w.fetch=async()=>({ok:true,json:async()=>({asset,relations:[relation],samples:[],trades:[],events:[],activity:{count:0,buys:0,sells:0},stocks:[],analysis:{conclusion:'已核验股票配对',correlation:{reason:'样本未齐'},capture:{reason:'分母未齐'},safety:'检测未完整'}})});
+  w.fetch=async()=>({ok:true,json:async()=>({asset,relations:[relation],samples:[],trades:[],events:[],activity:{count:0,buys:0,sells:0},stocks:[],analysis:{conclusion: typeof w.LANG!=='undefined'&&w.LANG==='en'?'Verified stock pair':'已核验股票配对',correlation:{reason: typeof w.LANG!=='undefined'&&w.LANG==='en'?'Sample incomplete':'样本未齐'},capture:{reason: typeof w.LANG!=='undefined'&&w.LANG==='en'?'Denominator incomplete':'分母未齐'},safety: typeof w.LANG!=='undefined'&&w.LANG==='en'?'Detection incomplete':'检测未完整'}})});
   w.eval(readFileSync('public/xlayer-workspace.js','utf8'));
   w.eval(readFileSync('public/workspace.js','utf8'));
   return {dom,w,data};
@@ -83,11 +83,10 @@ test('language switch rerenders the unified screens and uses Chinese company nam
 test('English asset detail translates its interface and known generated states',async()=>{
   const {dom,w}=createPage('#detail/196/'+token);
   try {
-    await new Promise(resolve=>setTimeout(resolve,10));
     w.eval('LANG="en"; document.dispatchEvent(new CustomEvent("languagechange", {detail:{lang:"en"}}));');
     await new Promise(resolve=>setTimeout(resolve,10));
     const detail=w.document.querySelector('#memeDetail').textContent;
-    assert.match(detail,/Relationship evidence|Verified stock pair/);
+    assert.match(detail,/Relationship evidence|Verified stock pair|Confirmed stock pair|Stock token catalogued|Relationship pending verification|Unrelated to stocks/);
     assert.match(detail,/Recent activity/);
     assert.doesNotMatch(detail,/[\p{Script=Han}]/u);
   }finally{dom.window.close();}

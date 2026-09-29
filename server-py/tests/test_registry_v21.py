@@ -1,0 +1,46 @@
+import os
+import time
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from app import registry
+
+MEME = '0x' + '1' * 40
+POOL = '0x' + '3' * 40
+NATIVE = '0xc845b2894dbddd03858fd2d643b4ef725fe0849d'
+WRAPPER = '0xa8ddb5cd96b5222afe198316e9a57caa642850d5'
+
+
+def relation(**changes):
+    now = int(time.time() * 1000)
+    row = {'chainId': '196', 'token': MEME, 'stock': NATIVE,
+           'stockSide': WRAPPER, 'pool': POOL, 'token0': MEME,
+           'token1': WRAPPER, 'ticker': 'NVDA', 'status': 'verified',
+           'liquidityUsd': 2500, 'liquidityAt': now - 1000,
+           'checkedAt': now - 1000, 'block': 1}
+    row.update(changes)
+    return row
+
+
+class RegistryV21Test(unittest.IsolatedAsyncioTestCase):
+    async def test_historical_onchain_record_is_not_current_evidence_when_relation_downgrades(self):
+        rows = [{'meme': MEME, 'stock': NATIVE, 'ticker': 'NVDA',
+                 'evidence': '0x' + '0' * 64, 'registeredAt': 1}]
+        with patch.object(registry, '_contract', return_value='0x' + 'a' * 40), \
+             patch.object(registry, '_key', return_value=''), \
+             patch.object(registry, 'onchain_pairs', AsyncMock(return_value=rows)):
+            current = await registry.registry_info([relation()])
+            self.assertEqual(current['localVerified'], 1)
+            self.assertIsNotNone(current['pairs'][0]['evidenceSource'])
+            degraded = await registry.registry_info([relation(liquidityAt=1)])
+            self.assertEqual(degraded['onchainCount'], 1)
+            self.assertEqual(degraded['localVerified'], 0)
+            self.assertIsNone(degraded['pairs'][0]['evidenceSource'])
+            self.assertFalse(degraded['autoSyncEnabled'])
+
+    async def test_manual_sync_is_disabled_without_explicit_flag(self):
+        with patch.dict(os.environ, {'REGISTRY_MANUAL_SYNC_APPROVED': ''}), \
+             patch.object(registry, 'registry_configured', return_value=True), \
+             patch.object(registry, 'onchain_pairs', AsyncMock()) as read:
+            await registry.sync_registry([relation()])
+            read.assert_not_awaited()

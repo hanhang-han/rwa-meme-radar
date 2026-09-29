@@ -42,6 +42,9 @@ test('cross-market premium requires independent, positive, aligned prices and an
  assert.equal(marketPremium(100,100,null,now,now,true,now).value,null);
  assert.equal(marketPremium(100,0,1,now,now,true,now).value,null);
  assert.equal(marketPremium(100,100,1,now,now-900001,true,now).value,null);
+ assert.equal(marketPremium(100,100,1,now,now+10000,true,now).value,null);
+ assert.equal(marketPremium(Infinity,100,1,now,now,true,now).value,null);
+ assert.equal(marketPremium(100,100,1,now,now-7200001,true,now).value,null);
  assert.deepEqual(sumKnown([{v:null},{v:0}],'v'),{value:0,known:1,total:2});assert.equal(sumKnown([{v:null}],'v').value,null);
 });
 

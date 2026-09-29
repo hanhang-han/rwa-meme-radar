@@ -23,9 +23,9 @@ import { assessRelation, relationTypes } from "./lib/relations";
 import { refreshXLayer, refreshLiveQuotes, refreshSideQuotes, refreshAssetOnDemand, refreshWatched, xLayerState, xLayerDetail } from "./lib/xlayer";
 import { unifiedFromXLayer } from "./lib/unified-state";
 import { refreshRobinhood, robinhoodState, robinhoodToken } from "./lib/robinhood";
-import { refreshMarketEnrichment } from "./lib/market-enrichment";
+import { refreshCoinGeckoEnrichment, refreshMarketEnrichment } from "./lib/market-enrichment";
 import { aiEnabled, aiNarrate } from "./lib/ai";
-import { registryConfigured, registryInfo, syncRegistry } from "./lib/registry";
+import { registryInfo } from "./lib/registry";
 import { candleSeries, CANDLE_BARS } from "./lib/candles";
 import { streamClients } from "./lib/stream";
 
@@ -473,23 +473,33 @@ if (cachedState && Array.isArray(cachedState.assets) && cachedState.assets.every
 ts.load();
 tsHourly.load();
 seedBstocks();
-void loop("relationshipSamples", 300_000, sampleRelations);
-void loop("relations", 120_000, refreshRelations);
 // Keep the OKX/X Layer collection cadence conservative for API quotas.
 // The pipeline runs immediately at startup, then waits five minutes after
 // each completed round (the round itself may take additional time).
 void loop("dashboard", 300_000, collectDashboard);
 void loop("marketEnrichment", 300_000, async () => refreshMarketEnrichment(dashboardState()));
-void loop("robinhood", 300_000, refreshRobinhood);
+// Rotate token-wide liquidity and official pool valuations independently of
+// slower supplemental providers. The conservative five-minute pause avoids
+// sustained public-API 429s and does not use OKX or EODHD call budgets.
+void loop("coinGeckoEnrichment", 300_000, async () => refreshCoinGeckoEnrichment(dashboardState()));
+// The issuer price endpoint caches for 15s. Catalogue/multiplier refreshes
+// remain independently bounded to five minutes inside this collector.
+void loop("robinhood", 15_000, refreshRobinhood);
 void loop("bnb", 60_000, refreshBnb);
-startBinanceStream();
-void loop("binanceApply", 10_000, async () => { applyBinanceLive(); });
-void loop("binance", 30_000, refreshBinance);
-// Sub-minute price freshness for displayed assets; quota is enforced inside okxPost.
-void loop("liveQuotes", 90_000, refreshLiveQuotes);
-// Detail-page assets: on-chain reserve read every 15s, no OKX quota.
-void loop("watchedPrice", 15_000, refreshWatched);
-void loop("sideQuotes", 300_000, refreshSideQuotes);
+// Python owns Binance live/REST collection and the shared snapshot.  Node
+// continues to read that snapshot for the rollback UI but must not be a
+// second writer or open a duplicate stream.
+// Collection ownership (P0-3): the Python backend owns OKX quote lanes now —
+// liveQuotes / watchedPrice / sideQuotes run in server-py/app/collectors.
+// This Node process keeps the stock catalogue (refreshOkx via the dashboard
+// loop), 56/4663 pool scans, EODHD reference enrichment and Robinhood/Binance
+// feeds, which Python consumes through data/*.json snapshots.
+// The watched reserve-ratio estimator was wrong (false jumps for unchanged
+// reserves) and is retired on both sides until pool pricing returns as a
+// separate quoteType.
+// void loop("liveQuotes", 90_000, refreshLiveQuotes);
+// void loop("watchedPrice", 15_000, refreshWatched);
+// void loop("sideQuotes", 300_000, refreshSideQuotes);
 void loop("assets", 600_000, refreshAssets);
 void loop("oracles", 30_000, refreshOracles);
 void loop("scan", 500, scanPools);
@@ -513,6 +523,24 @@ void loop("persist", 300_000, async () => {
 void sampleHourly();
 
 const app = new Hono();
+// Both public entry points use one data contract. Legacy HTML/state remains
+// available for rollback; it must not expose a second quote/AI/candle writer.
+app.use('/api/*',async(c,next)=>{
+  if(process.env.NODE_ENV==='test')return next();
+  const path=new URL(c.req.url).pathname;
+  if(!/^\/api\/(dashboard|token|pair|events|feed|candles|comparisons|stream|ai|health)(\/|$)/.test(path))return next();
+  try{
+    const incoming=new URL(c.req.url);
+    const forwarded=new Headers({Accept:c.req.header('Accept')??'application/json'});
+    for(const name of ['Last-Event-ID','Content-Type']){const value=c.req.header(name);if(value)forwarded.set(name,value);}
+    const method=c.req.method;
+    const upstream=await fetch('http://127.0.0.1:8010'+incoming.pathname+incoming.search,{method,
+      ...(method==='GET'||method==='HEAD'?{}:{body:await c.req.arrayBuffer()}),signal:c.req.raw.signal,headers:forwarded});
+    const headers=new Headers(upstream.headers);
+    for(const name of ['content-encoding','content-length','transfer-encoding','connection'])headers.delete(name);
+    return new Response(upstream.body,{status:upstream.status,headers});
+  }catch{return c.json({error:'query-service-unavailable'},503);}
+});
 app.use('/api/*',compress());
 let dashboardJson='',dashboardJsonAt=0;
 const etag=(v:string)=>'"'+createHash('sha1').update(v).digest('base64url').slice(0,20)+'"';
@@ -692,18 +720,18 @@ function briefingFor(base:ReturnType<typeof briefingBase>,lang:string){
  }
  return {...base,verifiedAssetMovers24h:movers,newVerifiedPairs24h:verified};
 }
-app.get('/api/ai/briefing',async c=>{
- const lang=aiLang(c);
- const r=await aiNarrate('briefing',lang,30*60_000,briefingFor(briefingBase(),lang),BRIEFING_TASK);
- return r?c.json({text:r.text,at:r.at,cached:(r as any).cached??false}):c.json({text:null,reason:aiEnabled()?'upstream_failed':'disabled'});
-});
-void loop("aiBriefing", 30*60_000, async () => {
-  if (!aiEnabled()) return;
-  const base = briefingBase();
-  // One snapshot for both languages, force-refreshed together so zh/en never
-  // disagree on numbers across cache generations.
-  for (const lang of ["zh", "en"]) await aiNarrate("briefing", lang, 30*60_000, briefingFor(base, lang), BRIEFING_TASK, true);
-  updateStreaks(base.moverSymbols);
+// Python owns scheduled generation and persistence for both website entrypoints.
+// A GET must never trigger a paid AI call or start a second generation loop.
+app.get('/api/ai/briefing', async c => {
+  try {
+    const response = await fetch(`http://127.0.0.1:8010/api/ai/briefing?lang=${aiLang(c)}`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) throw new Error('Briefing store unavailable');
+    return c.json(await response.json());
+  } catch {
+    return c.json({ text: null, reason: 'unavailable', status: 'unavailable' }, 503);
+  }
 });
 // On-chain PairRegistry (X Layer 196): public read API + idempotent sync of
 // verified pairs. Unconfigured (no REGISTRY_CONTRACT) degrades to metadata only.
@@ -739,10 +767,6 @@ app.get("/api/candles/:chain/:address", async (c) => {
 void loop("streamHeartbeat", 25_000, async () => {
   const { broadcastStream } = await import("./lib/stream");
   broadcastStream("heartbeat", { at: Date.now() });
-});
-void loop("registrySync", 600_000, async () => {
-  if (!registryConfigured()) return;
-  await syncRegistry(xLayerState().relations);
 });
 let stateJson='',stateJsonAt=0;
 app.get("/api/state", (c) => {

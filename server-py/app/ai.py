@@ -30,18 +30,18 @@ def ai_enabled() -> bool:
 
 class _Cache:
     def __init__(self, cap=500, low=400):
-        self.map: dict[str, tuple[str, float, str]] = {}
+        self.map: dict[tuple[str, str], tuple[str, float, str]] = {}
         self.cap = cap
         self.low = low
 
     def get(self, key, lang):
-        hit = self.map.get(key)
-        if hit and hit[2] == lang and time.time() - hit[1] < float("inf"):
+        hit = self.map.get((key, lang))
+        if hit:
             return hit
         return None
 
     def set(self, key, text, lang, ttl):
-        self.map[key] = (text, time.time(), lang)
+        self.map[(key, lang)] = (text, time.time() * 1000, lang)
         while len(self.map) > self.cap:
             self.map.pop(next(iter(self.map)))
             if len(self.map) <= self.low:
@@ -49,6 +49,11 @@ class _Cache:
 
 
 CACHE = _Cache()
+LAST_FAILURE: dict[tuple[str, str], dict] = {}
+
+
+def ai_failure(key: str, lang: str) -> dict | None:
+    return LAST_FAILURE.get((key, lang))
 
 
 async def ai_narrate(key: str, lang: str, ttl_ms: int, data, task: str, force: bool = False):
@@ -60,7 +65,10 @@ async def ai_narrate(key: str, lang: str, ttl_ms: int, data, task: str, force: b
     if not token:
         return None
 
+    no_immediate_retry = False
+
     async def attempt():
+        nonlocal no_immediate_retry
         try:
             payload = {
                 "model": MODEL,
@@ -81,6 +89,25 @@ async def ai_narrate(key: str, lang: str, ttl_ms: int, data, task: str, force: b
                 })
             if resp.status_code >= 400:
                 print(f"[ai] {key}/{lang} HTTP {resp.status_code} {resp.text[:150]}")
+                now_ms = int(time.time() * 1000)
+                if resp.status_code == 402:
+                    reason, delay = "insufficient_balance", 6 * 3_600_000
+                    no_immediate_retry = True
+                elif resp.status_code in (401, 403):
+                    reason, delay = "authentication_failed", 6 * 3_600_000
+                    no_immediate_retry = True
+                elif resp.status_code == 429:
+                    reason, delay = "rate_limited", 5 * 60_000
+                    no_immediate_retry = True
+                elif resp.status_code in (400, 404, 422):
+                    reason, delay = "invalid_request", 60 * 60_000
+                    no_immediate_retry = True
+                else:
+                    reason, delay = "provider_error", 60_000
+                LAST_FAILURE[(key, lang)] = {
+                    "reason": reason, "statusCode": resp.status_code,
+                    "retryAt": now_ms + delay,
+                }
                 return None
             body = resp.json()
             text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text").strip()
@@ -90,13 +117,14 @@ async def ai_narrate(key: str, lang: str, ttl_ms: int, data, task: str, force: b
             if lang == "en" and CJK.search(text):
                 print(f"[ai] {key}/{lang} leaked CJK characters")
                 return None
+            LAST_FAILURE.pop((key, lang), None)
             return text
         except Exception as e:
             print(f"[ai] {key}/{lang} {e}")
             return None
 
     result = await attempt()
-    if not result:
+    if not result and not no_immediate_retry:
         await asyncio.sleep(3)
         result = await attempt()
     if not result:

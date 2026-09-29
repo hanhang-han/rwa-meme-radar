@@ -1,0 +1,17 @@
+{
+  "version": "stock-name-keywords-v1-2026-09-25",
+  "rules": [
+    {"ticker": "9992", "terms": ["9992", "POPMART", "POP MART", "泡泡玛特", "LABUBU", "拉布布"]},
+    {"ticker": "TSLA", "terms": ["TSLA", "TESLA", "特斯拉", "CYBERTRUCK"]},
+    {"ticker": "MSTR", "terms": ["MSTR", "MICROSTRATEGY", "STRATEGY", "SAYLOR"]},
+    {"ticker": "NVDA", "terms": ["NVDA", "NVIDIA", "英伟达"]},
+    {"ticker": "GME", "terms": ["GME", "GAMESTOP"]},
+    {"ticker": "AMC", "terms": ["AMC", "AMC ENTERTAINMENT"]},
+    {"ticker": "CRCL", "terms": ["CRCL", "CIRCLE INTERNET GROUP"]},
+    {"ticker": "1024", "terms": ["1024", "KUAISHOU", "快手"]},
+    {"ticker": "1038", "terms": ["1038", "CK INFRASTRUCTURE", "长江基建"]},
+    {"ticker": "3690", "terms": ["3690", "MEITUAN", "美团"]},
+    {"ticker": "700", "terms": ["700", "TENCENT", "腾讯"]},
+    {"ticker": "1810", "terms": ["1810", "XIAOMI", "小米"]}
+  ]
+}

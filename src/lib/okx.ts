@@ -1,13 +1,15 @@
 import { createHmac } from 'node:crypto';
 import { okxGet } from './okx-client';
 import { readSnapshot, writeSnapshot } from './snapshot';
+import { canonicalStockCode } from './stock-identity';
 
 export interface RwaToken {
   chainIndex: string; tokenContractAddress: string; tokenSymbol: string;
   tokenName: string; stockCode: string; issuer: string; price: number | null;
   stockPrice: number | null; volume24h: number | null; marketCap: number | null;
   change24h?: number | null; tokenToAssetRatio?: number | null;
-  logoUrl?:string;
+  logoUrl?:string; reportedStockCode?:string; stockCodeSource?:string;
+  stockCodeSourceUrl?:string|null;
 }
 export const okxState: { status: string; updatedAt: number | null; tokens: RwaToken[]; error: string | null } = {
   status: 'unconfigured', updatedAt: null, tokens: [], error: null,
@@ -26,7 +28,11 @@ export async function refreshOkx(chain='196') {
   if (!restored || chain!=='196' && !target.updatedAt) {
     restored = true;
     const saved = process.env.NODE_ENV === 'test' ? null : readSnapshot<typeof target>(`data/okx${chain==='196'?'':'-'+chain}.json`);
-    if (saved?.updatedAt && Array.isArray(saved.tokens)) Object.assign(target, saved, { status: 'stale' });
+    if (saved?.updatedAt && Array.isArray(saved.tokens)) Object.assign(target, saved, {
+      // Reconcile the persisted catalogue before the next upstream refresh,
+      // which may be six hours away or temporarily quota blocked.
+      tokens:saved.tokens.map(token=>({...token,...canonicalStockCode(token)})),status:'stale',
+    });
   }
   const key = process.env.OKX_API_KEY, secret = process.env.OKX_SECRET_KEY, passphrase = process.env.OKX_PASSPHRASE;
   if (!key || !secret || !passphrase) { target.status = 'unconfigured'; return; }
@@ -47,7 +53,9 @@ export async function refreshOkx(chain='196') {
         tokens.push({ chainIndex: chain, tokenContractAddress: r.tokenContractAddress,
           tokenSymbol: String(r.tokenSymbol ?? ''), tokenName: String(r.tokenName ?? ''),
           logoUrl:typeof r.logoUrl==='string'?r.logoUrl:undefined,
-          stockCode: String(r.stockCode ?? ''), issuer: String(r.issuer ?? ''),
+          ...canonicalStockCode({chainIndex:chain,tokenContractAddress:r.tokenContractAddress,
+            tokenSymbol:String(r.tokenSymbol??''),stockCode:String(r.stockCode??'')}),
+          issuer: String(r.issuer ?? ''),
           price: numeric(r.price), stockPrice: numeric(r.stockPrice),
           volume24h: numeric(r.volume24h), marketCap: numeric(r.marketCap),
           change24h: numeric(r.priceChange24H), tokenToAssetRatio: numeric(r.tokenToAssetRatio) });

@@ -1,11 +1,11 @@
 import { okxState, extraOkx, refreshOkx } from './okx';
 import { robinhoodState } from './robinhood';
 import { binanceState } from './bstocks';
-import { inNetwork, networks, refreshXLayer, xLayerState, xLayerDetail, networkEvents, groupCandidates } from './xlayer';
+import { inNetwork, networks, persistStockCatalogue, catalogueSchedule, catalogueCheckpoint, xLayerState, xLayerDetail, networkEvents, groupCandidates } from './xlayer';
 import { unifiedFromXLayer } from './unified-state';
 import { dataQuality } from './data-quality';
 import { stockIdentity } from './stock-identity';
-import { startCollection, endCollection, collectionStatus, withRequestAllowance } from './okx-client';
+import { startCollection, endCollection, collectionStatus, withRequestAllowance, withRequestLane } from './okx-client';
 import { enrichAsset, enrichRelation, enrichStock, enrichmentCapabilities, enrichmentSources } from './market-enrichment';
 
 export const identity=(chain:unknown,address:unknown)=>`${chain}:${String(address).toLowerCase()}`;
@@ -18,20 +18,29 @@ export async function collectDashboard(){
   try {
     // Rotate first service for fairness; one shared budget bounds all chains.
     const chains=['196','56','4663'];const offset=cycle++%3;
+    const failures:string[]=[];
     for(const chain of [...chains.slice(offset),...chains.slice(0,offset)]){
-      await withRequestAllowance(Math.max(1,Math.floor(collectionStatus().roundLimit/3)),async()=>{
-        if(!source(chain).updatedAt||Date.now()-source(chain).updatedAt!>3600000)await refreshOkx(chain);
-        await inNetwork(chain,source(chain),refreshXLayer);
-      });
+      const catalogueDue=!source(chain).updatedAt||Date.now()-source(chain).updatedAt!>6*3600000;
+      // Node owns catalogue adaptation only. Python owns discovery, quotes,
+      // trades and relationship maintenance for every chain.
+      const job=inNetwork(chain,source(chain),catalogueSchedule);
+      if(catalogueDue&&Date.now()>=(job.nextRetryAt??0)){
+        await withRequestLane('discovery',1800,()=>withRequestAllowance(24,async()=>refreshOkx(chain)));
+        const accepted=source(chain).status==='ready'&&source(chain).tokens.length>0;
+        const error=accepted?null:source(chain).error??'No catalogue rows accepted';
+        inNetwork(chain,source(chain),()=>catalogueCheckpoint(accepted,error));
+        if(error)failures.push(`${chain}: ${error}`);
+      }
+      await inNetwork(chain,source(chain),async()=>persistStockCatalogue());
     }
-    endCollection();
+    endCollection(failures.length?failures.join('; ').slice(0,400):null);
   }catch(error){endCollection(String(error));}
 }
 export function marketPremium(token:number|null,reference:number|null,ratio:number|null,at:number|null,referenceAt:number|null,independent=true,now=Date.now()){
   if(!independent)return {value:null,reason:'dependent-reference'};
-  if(token==null||reference==null||ratio==null||token<=0||reference<=0||ratio<=0)return {value:null,reason:'missing-price-or-ratio'};
-  if(!current(at,now,14_400_000)||!current(referenceAt,now,14_400_000)||Math.abs(at!-referenceAt!)>7_200_000)return {value:null,reason:'unaligned-or-stale'};
-  return {value:(token/(ratio*reference)-1)*100,reason:null};
+  if(token==null||reference==null||ratio==null||![token,reference,ratio].every(Number.isFinite)||token<=0||reference<=0||ratio<=0)return {value:null,reason:'missing-price-or-ratio'};
+  if(!at||!referenceAt||![at,referenceAt].every(Number.isFinite)||at>now+1000||referenceAt>now+1000||!current(at,now,300_000)||!current(referenceAt,now,300_000)||Math.abs(at-referenceAt)>60_000)return {value:null,reason:'unaligned-or-stale'};
+  return {value:(token/(ratio*reference)-1)*100,reason:null,status:'snapshot',at:Math.min(at,referenceAt),validUntil:Math.min(at,referenceAt)+300_000};
 }
 export function sumKnown(rows:any[],field:string){const values=rows.map(r=>r[field]).filter(v=>typeof v==='number'&&Number.isFinite(v));return {value:values.length?values.reduce((a,b)=>a+b,0):null,known:values.length,total:rows.length};}
 // Quote-style base assets are passive counterparts of a stock token's own
@@ -69,7 +78,10 @@ export function dashboardState(){
     const reference=ordered.find(o=>o.stockPrice!=null&&current(o.referenceAt??o.updatedAt));
     const enriched=enrichStock({...row,stockIdentity:stockIdentity({...row,assetId}),stockPrice:reference?.stockPrice??row.stockPrice,referenceProvider:reference?.provider,referenceAt:reference?.referenceAt??reference?.updatedAt,
       assetId,observations:observations.map(o=>({provider:o.provider,price:o.price,stockPrice:o.stockPrice,volume24h:o.volume24h,volumeScope:o.volumeScope,updatedAt:o.updatedAt})),providers:[...new Set(observations.map(o=>o.provider))],premium:marketPremium(row.price,reference?.stockPrice??null,row.tokenToAssetRatio??null,row.updatedAt,reference?.referenceAt??reference?.updatedAt??null,row.priceScope==='dex')});
-    return {...enriched,premium:marketPremium(enriched.price,enriched.stockPrice??null,enriched.tokenToAssetRatio??null,enriched.updatedAt,enriched.referenceAt??null,enriched.priceScope==='dex')};
+    // Legacy consumers use the same short freshness window. USD DEX quotes
+    // cannot be compared with HKD or USDT without an observed conversion.
+    const comparable=enriched.priceScope==='dex'&&enriched.referenceCurrency==='USD'&&enriched.referenceProvider==='EODHD'&&enriched.multiplierValid!==false;
+    return {...enriched,premium:marketPremium(enriched.price,enriched.stockPrice??null,enriched.tokenToAssetRatio??null,enriched.fieldTimes?.price??null,enriched.referenceAt??null,comparable)};
   });
   const verified=relations.filter(r=>r.status==='verified'&&Date.now()-r.checkedAt<=3600000);
   const pools=[...new Map(verified.map(r=>[identity(r.chainId,r.pool),r])).values()];

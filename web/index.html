@@ -7,7 +7,41 @@
     <title>STOCKSMEME RADAR</title>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <section id="boot-status" role="status" style="max-width:560px;margin:15vh auto;padding:28px;font-family:system-ui,sans-serif;line-height:1.7;color:#334155">
+        <h1 style="font-size:22px">STOCKSMEME RADAR</h1>
+        <p id="boot-message">正在加载页面，请稍候… / Loading dashboard…</p>
+        <button id="boot-retry" type="button" style="padding:8px 16px;cursor:pointer">重新加载 / Reload</button>
+        <noscript><p>请启用 JavaScript 后查看行情页面。 / Please enable JavaScript.</p></noscript>
+      </section>
+    </div>
+    <script>
+      (() => {
+        const boot = document.getElementById('boot-status');
+        const message = document.getElementById('boot-message');
+        const failed = () => {
+          if (boot.isConnected) message.textContent = '页面资源加载失败或连接较慢，请检查网络或代理连接后重试。 / Loading failed or is taking longer than expected. Check your connection and retry.';
+        };
+        document.getElementById('boot-retry').onclick = () => {
+          const url = new URL(location.href);
+          url.searchParams.set('_reload', Date.now());
+          location.replace(url.href);
+        };
+        const onError = event => {
+          if (event.target?.tagName === 'SCRIPT' || event.error) failed();
+        };
+        window.addEventListener('error', onError, true);
+        const timer = setTimeout(failed, 15000);
+        const observer = new MutationObserver(() => {
+          if (!boot.isConnected) {
+            clearTimeout(timer);
+            window.removeEventListener('error', onError, true);
+            observer.disconnect();
+          }
+        });
+        observer.observe(document.getElementById('app'), { childList: true });
+      })();
+    </script>
     <script src="./lightweight-charts.js" async></script>
     <script type="module" src="/src/main.js"></script>
   </body>

@@ -5,27 +5,45 @@ export const API_BASE =
     ? '/dashboard/api/'
     : '/api/';
 
-export async function getJSON(path) {
-  const res = await fetch(API_BASE + path.replace(/^\//, ''));
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+export async function getJSON(path, timeoutMs = 25000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(API_BASE + path.replace(/^\//, ''), {signal: controller.signal});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('request-timeout');
+    throw error;
+  } finally { clearTimeout(timer); }
 }
 
-export async function getDashboard() {
-  return getJSON('/dashboard');
+export async function getDashboard(view = 'full') {
+  return getJSON(`/dashboard?view=${view}`, view === 'overview' ? 15000 : 45000);
+}
+
+export async function getFeed(chainId) {
+  return getJSON(`/feed${chainId ? `?chain=${encodeURIComponent(chainId)}` : ''}`);
+}
+
+export async function getDataHealth() {
+  return getJSON('/health/data');
 }
 
 export async function getDetail(chain, address) {
   return getJSON(`/token/${encodeURIComponent(chain)}/${encodeURIComponent(address)}`);
 }
 
-export async function getCandles(chain, address, bar, limit = 180) {
-  return getJSON(`/candles/${encodeURIComponent(chain)}/${encodeURIComponent(address)}?bar=${bar}&limit=${limit}`);
+export async function getCandles(chain, address, bar, limit = 180, venue = 'dex', options = {}) {
+  const query = new URLSearchParams({bar,limit:String(limit),venue});
+  if(options.marketId)query.set('market',options.marketId);
+  if(options.poolId)query.set('pool',options.poolId);
+  return getJSON(`/candles/${encodeURIComponent(chain)}/${encodeURIComponent(address)}?${query}`);
 }
 
 export async function getEvents(chain, before) {
   const q = new URLSearchParams({ chain });
-  if (before?.t) { q.set('before', String(before.t)); q.set('id', before.id); }
+  if (before) q.set('before', typeof before === 'string' ? before : JSON.stringify(before));
   return getJSON(`/events?${q}`);
 }
 

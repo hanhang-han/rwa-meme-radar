@@ -1,61 +1,42 @@
-const EXTRA_TICKERS = [
-  "AAPL", "TSLA", "NVDA", "GOOG", "GOOGL", "AMZN", "META", "MSFT", "AMD", "INTC", "COIN",
-  "PLTR", "SOFI", "HIMS", "GME", "AMC", "DJT", "MSTR", "RIVN", "LCID", "OPEN", "AI",
-  "SHEIN", "NIKE", "NKE", "DIS", "NFLX", "BA", "F", "GM", "SBUX", "MCD", "NIO", "XPEV", "LI",
-  "BABA", "JD", "PDD", "BIDU", "NTES", "TME", "IQ", "TSLA", "BYDDY", "MOUTAI",
-];
-const COMPANY_KEYWORDS: Record<string, string[]> = {
-  TSLA: ["tesla"],
-  NVDA: ["nvidia"],
-  AAPL: ["apple", "iphone"],
-  GME: ["gamestop"],
-  AMC: ["amc"],
-  HIMS: ["hims"],
-  DJT: ["trump"],
-  SHEIN: ["shein"],
-  PLTR: ["palantir"],
-  MSTR: ["microstrategy"],
-  NIO: ["nio", "weilai"],
-  BABA: ["alibaba"],
-  PDD: ["pinduoduo", "temu"],
-  JD: ["jingdong", "jd.com"],
-  COIN: ["coinbase"],
-};
+import { readFileSync } from 'node:fs';
+
+// B-grade name leads are deliberately curated. Catalogue tickers are not
+// automatically keywords: generic words such as BTC created false relations.
+type KeywordRule={ticker:string;terms:string[]};
+type KeywordManifest={version:string;rules:KeywordRule[]};
+const keywords:KeywordManifest=JSON.parse(readFileSync(new URL('../catalogues/stock-keywords.v1.json',import.meta.url),'utf8'));
+const forbidden=new Set(['BTC','BITCOIN','比特币','ETH','ETHEREUM','AI','CRYPTO']);
+const seen=new Set<string>();
+for(const rule of keywords.rules){
+  if(seen.has(rule.ticker)||!rule.terms.length||rule.terms.some(term=>forbidden.has(term.toUpperCase())))throw new Error('Invalid stock name keyword rule');
+  seen.add(rule.ticker);
+}
 
 export interface StockMatch {
   ticker: string;
-  matchType: "exact" | "startsWith" | "contains" | "company";
+  matchType: 'exact'|'company';
+  keyword: string;
+  ruleVersion: string;
+  level: 'B';
+  evidenceStatus: 'name-only';
 }
 
-const norm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
+const escape=(word:string)=>word.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+function exactTerm(haystack:string,term:string):boolean {
+  if(/[A-Za-z0-9]/.test(term))return new RegExp(`(?<![A-Za-z0-9])${escape(term)}(?![A-Za-z0-9])`,'i').test(haystack);
+  // Written Chinese has no spaces between words. Match an exact curated
+  // phrase, without fuzzy spelling or automatic prefix expansion.
+  return haystack.includes(term);
+}
 
-export function matchStock(symbol: string, name: string, knownTickers: Set<string>): StockMatch | null {
-  const s = norm(symbol);
-  const n = name.toLowerCase();
-  if (!s || s.length < 2) return null;
-
-  for (const t of knownTickers) {
-    if (t.length < 3) continue;
-    if (s === t) return { ticker: t, matchType: "exact" };
-  }
-  for (const t of knownTickers) {
-    if (t.length < 3) continue;
-    if (s.startsWith(t) && s.length - t.length <= 3) return { ticker: t, matchType: "startsWith" };
-  }
-  for (const t of knownTickers) {
-    if (t.length >= 5 && s.includes(t)) return { ticker: t, matchType: "contains" };
-  }
-  for (const [t, kws] of Object.entries(COMPANY_KEYWORDS)) {
-    if (kws.some((k) => n.includes(k))) return { ticker: t, matchType: "company" };
-  }
+export function matchStock(symbol:string,name:string,_knownTickers:Set<string>):StockMatch|null {
+  for(const [haystack,matchType] of [[String(symbol??''),'exact'],[String(name??''),'company']] as const)
+    for(const row of keywords.rules)for(const term of row.terms)
+      if(exactTerm(haystack,term))return {ticker:row.ticker,matchType,keyword:term,
+        ruleVersion:keywords.version,level:'B',evidenceStatus:'name-only'};
   return null;
 }
 
-export function buildTickerSet(underlyingSymbols: string[]): Set<string> {
-  const set = new Set<string>(EXTRA_TICKERS);
-  for (const u of underlyingSymbols) {
-    const n = norm(u);
-    if (n.length >= 2 && n.length <= 8 && /^[A-Z0-9]+$/.test(n)) set.add(n);
-  }
-  return set;
+export function buildTickerSet(underlyingSymbols:string[]):Set<string>{
+  return new Set([...keywords.rules.map(row=>row.ticker),...underlyingSymbols.map(symbol=>String(symbol).trim().toUpperCase())]);
 }

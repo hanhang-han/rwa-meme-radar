@@ -1,11 +1,12 @@
-"""Binance bStocks collector: shared miniTicker WebSocket for live prices plus
-a 30s REST fallback for the catalogue rows and 24h statistics. Ports the Node
-binance-ws/bstocks pair; state is kept in memory and snapshotted to
-data/binance.json for restart continuity."""
+"""bStocks ticker, individual trade and official open-kline streams.
+A shared bounded writer persists each observation before publishing it.
+The JSON snapshot remains a compatibility overlay, not the stream ledger.
+"""
 import asyncio
 import json
 import os
 import time
+import math
 
 import httpx
 import websockets
@@ -49,7 +50,10 @@ SNAPSHOT = "data/binance.json"
 
 state: dict = {"status": "starting", "updatedAt": None, "tokens": [], "error": None}
 _live: dict[str, dict] = {}
+_last_bcast: dict[str, float] = {}
 _started = False
+
+BSTOCK_BY_SYMBOL = {b["symbol"]: b for b in BSTOCKS}
 
 
 def _restore() -> None:
@@ -75,6 +79,24 @@ def _save() -> None:
         pass
 
 
+def status_snapshot() -> dict:
+    """Read worker-owned status from disk in the separate API process."""
+    current = dict(state)
+    if os.environ.get("NODE_ENV") != "test" and os.path.exists(SNAPSHOT):
+        try:
+            saved = json.load(open(SNAPSHOT))
+            if (saved.get("updatedAt") or 0) >= (current.get("updatedAt") or 0):
+                current = saved
+        except Exception:
+            pass
+    updated = current.get("updatedAt")
+    if updated and int(time.time() * 1000) - updated > 120_000:
+        current["status"] = "stale"
+    elif updated and current.get("status") in (None, "starting", "stale"):
+        current["status"] = "ready"
+    return current
+
+
 async def refresh_binance() -> None:
     """REST fallback: 24h statistics for the known bStocks pairs."""
     _restore_once()
@@ -86,6 +108,8 @@ async def refresh_binance() -> None:
             resp.raise_for_status()
             rows = resp.json()
         quotes = {}
+        if not isinstance(rows,list):
+            raise ValueError('Invalid Binance response schema')
         for t in rows:
             quotes[t["symbol"].replace("USDT", "")] = t
         now = int(time.time() * 1000)
@@ -101,24 +125,36 @@ async def refresh_binance() -> None:
                 "volume24h": _f(q.get("quoteVolume")) if q else None,
                 "marketCap": None,
                 "change24h": _f(q.get("priceChangePercent")) if q else None,
-                "tokenToAssetRatio": 1,
-                "quoteAt": now if q else None,
+                "tokenToAssetRatio": None,
+                "quoteAt": _i(q.get("closeTime")) if q else None,
                 "exchangeTrades24h": _i(q.get("count")) if q else None,
                 "volumeScope": "exchange", "onchain": True,
             })
+        # A slower REST response must not overwrite the just-committed WS quote.
+        previous={t.get('tokenContractAddress','').lower():t for t in state.get('tokens',[])}
+        for token in tokens:
+            live=previous.get(token['tokenContractAddress'].lower())
+            if live and (live.get('quoteAt') or 0)>(token.get('quoteAt') or 0):
+                token.update({key:live[key] for key in ('price','quoteAt','change24h','volume24h','exchangeTrades24h') if key in live})
         state["tokens"] = tokens
         state["updatedAt"] = now
         state["status"] = "ready"
         state["error"] = None
         _save()
+        accepted=sum(t.get('price') is not None for t in tokens)
+        return {'requested':1,'accepted':accepted,'failed':int(not accepted)}
     except Exception as e:
         state["status"] = "stale" if state.get("updatedAt") else "error"
-        state["error"] = str(e)[:120]
+        state["error"] = type(e).__name__
+        _save()
+        return {'requested':1,'accepted':0,'failed':1}
+
 
 
 def _f(v):
     try:
-        return float(v)
+        n=float(v)
+        return n if math.isfinite(n) else None
     except (TypeError, ValueError):
         return None
 
@@ -134,6 +170,7 @@ def apply_live() -> None:
     """Fold stream prices into the shared state (10s cadence from the loop)."""
     if not _live or not state["tokens"]:
         return
+    changed=False
     for t in state["tokens"]:
         hit = _live.get(str(t.get("tokenSymbol", "")).upper())
         if not hit:
@@ -146,6 +183,10 @@ def apply_live() -> None:
         if hit.get("quoteVol24h") is not None:
             t["volume24h"] = hit["quoteVol24h"]
         t["quoteAt"] = hit["at"]
+        changed=True
+    if changed:
+        state.update(updatedAt=int(time.time()*1000),status='ready',error=None)
+        _save()
 
 
 _restored = False
@@ -158,38 +199,61 @@ def _restore_once() -> None:
         _restore()
 
 
-def start_stream() -> None:
-    """Subscribe to all bStocks miniTicker streams; reconnect with backoff."""
-    global _started
-    if _started or os.environ.get("NODE_ENV") == "test":
-        return
-    _started = True
-    streams = "/".join(b["symbol"].lower() + "usdt@miniTicker" for b in BSTOCKS)
+_feed = None
+_last_save_at = 0
 
-    async def connect():
-        retry = 0
-        while True:
-            try:
-                async with websockets.connect(
-                    f"wss://stream.binance.com:9443/stream?streams={streams}", ping_interval=20
-                ) as ws:
-                    async for message in ws:
-                        try:
-                            d = json.loads(message).get("data") or {}
-                            sym = str(d.get("s", "")).replace("USDT", "")
-                            close = _f(d.get("c"))
-                            if sym and close is not None:
-                                _live[sym] = {
-                                    "price": close,
-                                    "open24h": _f(d.get("o")) or 0,
-                                    "quoteVol24h": _f(d.get("q")),
-                                    "at": int(time.time() * 1000),
-                                }
-                                retry = 0
-                        except Exception:
-                            continue
-            except Exception:
-                pass
-            retry = min(retry + 1, 6)
-            await asyncio.sleep(2 ** retry)
-    asyncio.create_task(connect(), name="binance-ws")
+
+async def markets():
+    from .market_streams import Market
+    return [Market('56',b['addr'].lower(),'binance',b['symbol']+'USDT','USDT',
+                   b['symbol'],underlying=b['underlying']) for b in BSTOCKS]
+
+
+def _committed_quote(market, quote):
+    global _last_save_at
+    # Called only after the transaction containing quote + SSE outbox commits.
+    _restore_once()
+    if not state.get('tokens'):
+        state['tokens']=[{'chainIndex':'56','tokenContractAddress':b['addr'],
+            'assetCode':b['symbol'],'tokenSymbol':b['symbol'],'tokenName':b['name']+' bStock',
+            'stockCode':b['underlying'],'issuer':'BTech Holdings Limited',
+            'stockPrice':None,'tokenToAssetRatio':None,'volumeScope':'exchange','onchain':True}
+            for b in BSTOCKS]
+    at=quote['marketAt']
+    for token in state['tokens']:
+        if token.get('tokenContractAddress','').lower()!=market.token:
+            continue
+        if (token.get('quoteAt') or 0)>at:
+            return
+        token.update(price=quote['price'],quoteAt=at,priceCurrency='USDT',volumeCurrency='USDT',
+                     venue='binance',marketId=market.market_id)
+        for field in ('change24h','volume24h','exchangeTrades24h'):
+            if quote.get(field) is not None:
+                token[field]=quote[field]
+        break
+    state.update(status='ready',updatedAt=int(time.time()*1000),error=None)
+    if state['updatedAt']-_last_save_at>=1000:
+        _save()
+        _last_save_at=state['updatedAt']
+
+
+def start_stream():
+    """Worker lifecycle hook: all 29 assets, regardless of page watches."""
+    global _feed, _started
+    if os.environ.get('NODE_ENV')=='test':
+        return
+    from .exchange_stream import BinanceMarketFeed
+    if _feed is None:
+        _feed=BinanceMarketFeed('binance','wss://stream.binance.com:9443/stream',
+                                markets,on_quote=_committed_quote)
+    _started=True
+    return _feed.start()
+
+
+async def stop_stream():
+    global _started, _feed
+    if _feed:
+        await _feed.stop()
+        _feed=None
+    _started=False
+    _save()

@@ -1,33 +1,30 @@
-"""Aggregated snapshot endpoint backed by the research store."""
+"""Read the durable dashboard and its exact event cursor in one database row."""
 import hashlib
 import json
-import time
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi import APIRouter, Request, HTTPException
+from fastapi.responses import Response
 
-from ..state import DATA, reload_data
+from ..realtime_projection import read_projection_json
+from ..dashboard_projection import overview_dashboard
 
 router = APIRouter()
 
-_cache: dict[str, float | str] = {"at": 0.0, "body": ""}
+
+async def _snapshot_json(view='full') -> str:
+    body = await read_projection_json()
+    if view != 'overview':
+        return body
+    return json.dumps(overview_dashboard(json.loads(body)), ensure_ascii=False, separators=(',', ':'))
 
 
-async def _snapshot_json() -> str:
-    if time.time() - _cache["at"] > 10:
-        await reload_data()
-        _cache["body"] = json.dumps(await DATA.payload(), ensure_ascii=False, separators=(",", ":"))
-        _cache["at"] = time.time()
-    return _cache["body"]
-
-
-@router.get("/dashboard")
-async def get_dashboard(request: Request):
-    body = await _snapshot_json()
-    tag = '"' + hashlib.sha1(body.encode()).digest().hex()[:20] + '"'
-    if request.headers.get("if-none-match") == tag:
-        return Response(status_code=304, headers={"ETag": tag})
-    return JSONResponse(
-        content=json.loads(body),
-        headers={"ETag": tag, "Cache-Control": "no-cache"},
-    )
+@router.get('/dashboard')
+async def get_dashboard(request: Request, view: str = 'full'):
+    if view not in ('full', 'overview'):
+        raise HTTPException(status_code=400, detail='unsupported dashboard view')
+    body = await _snapshot_json(view)
+    tag = '"' + hashlib.sha1(body.encode()).hexdigest()[:20] + '"'
+    if request.headers.get('if-none-match') == tag:
+        return Response(status_code=304, headers={'ETag': tag})
+    return Response(content=body, media_type='application/json',
+                    headers={'ETag': tag, 'Cache-Control': 'no-cache'})
