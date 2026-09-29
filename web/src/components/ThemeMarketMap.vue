@@ -12,11 +12,14 @@
     </div>
     <div class="theme-layer-switch" role="group" :aria-label="tr('关系证据层级', 'Relationship evidence level')">
       <button type="button" :class="{active:layer==='verified'}" :aria-pressed="layer==='verified'" @click="layer='verified'">{{ tr('已核验配对', 'Verified pairs') }} <b>{{ themeMap?.totalAssets ?? model.totalAssets }}</b></button>
-      <button type="button" :class="{active:layer==='clues'}" :aria-pressed="layer==='clues'" @click="layer='clues'">{{ tr('名称线索 · 未核验', 'Name clues · unverified') }} <b>{{ nameClues.length }}</b></button>
+      <button type="button" :class="{active:layer==='clues'}" :aria-pressed="layer==='clues'" @click="layer='clues'">{{ tr('名称线索 · 未核验', 'Name clues · unverified') }} <b>{{ nameCluesLoading ? '…' : nameClues.length }}</b></button>
     </div>
 
     <div v-if="loading" class="theme-market-empty" role="status">
       {{ tr('正在加载完整的主题关系和行情…', 'Loading complete theme relationships and market data…') }}
+    </div>
+    <div v-else-if="layer==='clues' && nameCluesLoading" class="theme-market-empty" role="status">
+      {{ tr('正在读取完整的名称线索…', 'Loading the complete name clues…') }}
     </div>
     <div v-else-if="layer==='clues'" class="theme-clue-layer">
       <p class="theme-clue-note">{{ tr('这里的关联只是币名或代号命中规则，不能推断池配对、发行方授权或价格联动；不计入已核验主题统计。', 'These are name or symbol rule matches only. They do not establish a paired pool, issuer endorsement or price linkage, and are excluded from verified theme totals.') }}</p>
@@ -158,6 +161,7 @@ import { buildThemeMap, bubbleDiameter, bubbleTone, currentMetric, currentUsdVol
 const props = defineProps({
   themeMap: { type: Object, default: null },
   nameClues: { type: Array, default: () => [] },
+  nameCluesLoading: Boolean,
   stockTokens: { type: Array, default: () => [] },
   scope: { type: String, default: 'all' },
   loading: Boolean,

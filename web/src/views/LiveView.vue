@@ -14,8 +14,8 @@
       <KpiCard kpi-key="newRelations24h" :title="tr('24h 新增配对', 'New pairs (24h)')" :value="num(scopeMetrics.newPairs)" :note="scopeMetrics.newPairs == null ? tr('新池创建时间待采集','Pool creation time pending') : deltaNote('newPairs')" href="#/events" />
     </div>
 
-    <ThemeMarketMap :theme-map="themeMap" :name-clues="nameClues" :stock-tokens="store.stockTokens" :scope="scope" :loading="!fullSnapshotReady" />
-    <ImportantChanges :changes="importantChanges" :observations="feed.relationships" :unified="store.snapshot?.unified" :assets="store.assets" :scope="scope" :loading="!fullSnapshotReady" />
+    <ThemeMarketMap :theme-map="themeMap" :name-clues="nameClues" :name-clues-loading="!fullSnapshotReady" :stock-tokens="store.stockTokens" :scope="scope" :loading="!themeMapReady" />
+    <ImportantChanges :changes="importantChanges" :observations="feed.relationships" :unified="store.snapshot?.unified" :assets="store.assets" :scope="scope" :loading="!importantChangesReady" />
 
     <section class="panel x-ai">
       <div class="panel-head"><h2>{{ tr('今日异动', 'Today') }}</h2><time class="hint">{{ briefing?.at ? clockTime(briefing.at) : '—' }}</time></div>
@@ -126,15 +126,17 @@ const feed = useFeedStore();
 const { lang } = useI18n();
 const scope = computed(() => chainScope(route.query));
 const fullSnapshotReady = computed(() => !!store.snapshot?.unified && store.snapshot.unified.snapshotScope !== 'overview');
+const themeMapReady = computed(() => !!store.snapshot?.unified?.themeMap || fullSnapshotReady.value);
+const importantChangesReady = computed(() => !!store.snapshot?.unified?.importantChanges || fullSnapshotReady.value);
 const themeMap = computed(() => {
-  if (!fullSnapshotReady.value) return null;
-  const unified = store.snapshot.unified;
+  const unified = store.snapshot?.unified;
+  if (!unified) return null;
   return unified.themeMap ?? fallbackThemeMap(unified);
 });
 const nameClues = computed(() => fullSnapshotReady.value ? buildNameClues(store.snapshot.unified,scope.value) : []);
 const importantChanges = computed(() => {
-  if (!fullSnapshotReady.value) return null;
-  const unified = store.snapshot.unified;
+  const unified = store.snapshot?.unified;
+  if (!unified) return null;
   return unified.importantChanges ?? fallbackRelationEvents(feed.relationships, unified);
 });
 const scopeMetrics = computed(() => metricsForScope(store.snapshot?.unified, scope.value));

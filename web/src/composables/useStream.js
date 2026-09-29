@@ -25,6 +25,7 @@ let compatibilityRefreshAt = 0;
 let stopScopeWatch = null;
 let scopeTimer = null;
 let scopeChanged = false;
+let previousTradeScope = null;
 const emit = (name,detail) => { if(typeof window !== 'undefined' && typeof CustomEvent !== 'undefined')window.dispatchEvent(new CustomEvent(name,{detail})); };
 
 export function useStream() {
@@ -53,6 +54,7 @@ export function stopStream() {
   started = false;
   streamGeneration += 1;
   stopScopeWatch?.();stopScopeWatch=null;clearTimeout(scopeTimer);scopeChanged=false;
+  previousTradeScope = null;
   currentController?.abort();
   currentController = null;
 }
@@ -87,10 +89,13 @@ async function connectStream(generation) {
     const watchdog = setInterval(() => { if (Date.now() - received > 60000) controller.abort(); }, 10000);
     try {
       if(lastEventId == null) {
-        const snapshot=await dash.poll();
+        // The compact overview carries the same projection cursor as the
+        // market catalogue. Start replay from it while the larger list loads.
+        const snapshot=dash.snapshot ?? await dash.poll({view:'overview'}) ?? await dash.poll();
         if(stopped || generation !== streamGeneration) break;
         if(!snapshot)throw new Error('snapshot unavailable');
-        lastEventId=snapshot.realtime?.cursor != null ? String(snapshot.realtime.cursor) : null;
+        lastEventId=dash.cursor != null ? String(dash.cursor)
+          : snapshot.realtime?.cursor != null ? String(snapshot.realtime.cursor) : null;
       }
       if(stopped || generation !== streamGeneration) break;
       const headers = {};
@@ -98,11 +103,14 @@ async function connectStream(generation) {
       const query=new URLSearchParams({snapshot:'false',protocol:'1',candles:useCandleStore().subscriptionScope});
       const tradeScope=currentTradeScope();
       if(tradeScope)query.set('trades',tradeScope);
+      // The home view loads its own scoped feed. Only reload global history
+      // when leaving a detail page, whose stream intentionally excluded it.
+      if(previousTradeScope && !tradeScope)useFeedStore().load();
+      previousTradeScope=tradeScope;
       if(lastEventId!=null)query.set('after',String(lastEventId));
       const res = await fetch(API_BASE + `stream?${query}`, { headers, signal: controller.signal });
       if (!res.ok || !res.body) throw new Error('stream unavailable');
       dash.setStreamStatus({ connected: true, state: 'syncing', lastAt: Date.now() });
-      useFeedStore().load();
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = '';

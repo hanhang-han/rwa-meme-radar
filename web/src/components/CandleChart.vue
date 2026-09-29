@@ -34,6 +34,7 @@ import { tr, useI18n } from '../i18n';
 import { candleTailState, chartTimeZone, chartTime, chartDateTime, samplePoints } from '../utils/chart-time';
 import { pricePrecision } from '../utils/realtime';
 import { useCandleStore } from '../stores/candles';
+import { useDashboardStore } from '../stores/dashboard';
 import { mergeCandleRows, candlePacketMatches, candleKey, snapshotCandleRows, candleResponseMatches, candleStreamState } from '../utils/candles';
 
 const props = defineProps({
@@ -43,6 +44,7 @@ const props = defineProps({
 });
 
 const streams = useCandleStore();
+const dashboard = useDashboardStore();
 const venueOf = () => props.pool ? 'dex' : (props.asset.venue === 'binance-alpha' || String(props.asset.provider).toLowerCase().includes('alpha')) ? 'binance-alpha' : props.asset.priceScope === 'exchange' && String(props.asset.provider).toLowerCase() === 'binance' ? 'binance' : 'dex';
 const el = ref(null);
 const mode = ref('candle');
@@ -94,6 +96,7 @@ let priceLine = null;
 let candleLen = 0;
 const candleMem = new Map();
 let lastPaintKey = '';
+let lastHttpSnapshotAt = 0;
 
 function lw() {
   return window.LightweightCharts;
@@ -152,6 +155,7 @@ async function loadCandles(address, barSel, limit = 500, force = false) {
     if(epoch!==streams.resetVersion)return null;
     if (!r || !Array.isArray(r.rows)) return hit ?? null;
     if(!candleResponseMatches(r,requested))return hit?{...hit,stale:true,status:'stale',error:'market-mismatch'}:{...requested,rows:[],stale:true,status:'unavailable',error:'market-mismatch'};
+    lastHttpSnapshotAt = Date.now();
     const live=streams.matching({...requested,marketId:r.marketId||requested.marketId});
     const entry = { ...r, rows:mergeCandleRows(snapshotCandleRows(r),live?.rows??[]), cachedAt: now };
     if(live)Object.assign(entry,{source:live.source,marketId:live.marketId,pool:live.poolId??live.pool??r.pool,priceCurrency:live.priceCurrency,volumeCurrency:live.volumeCurrency,streamAt:live.at},candleStreamState(r,live));
@@ -268,6 +272,7 @@ function setMode(m) {
 function setBar(b) {
   if (bar.value === b) return;
   bar.value = b;
+  lastHttpSnapshotAt = 0;
   paint(true);
 }
 
@@ -300,7 +305,7 @@ watch(() => streams.version, () => {
 });
 // Compare each market field, not a newly allocated array on every quote.
 // Frequent asset replacements must not clear an already displayed candle.
-watch([() => props.pool, () => props.asset.token, () => props.asset.chainId, venueOf, () => props.asset.marketId], () => { candleInfo.value=null;paint(true); });
+watch([() => props.pool, () => props.asset.token, () => props.asset.chainId, venueOf, () => props.asset.marketId], () => { candleInfo.value=null;lastHttpSnapshotAt=0;paint(true); });
 
 function goLatest() {
   try { chart?.timeScale()?.scrollToRealTime?.(); } catch { /* chart not ready */ }
@@ -318,7 +323,17 @@ let clockTimer = null;
 onMounted(() => {
   window.addEventListener('resize', onResize);
   clockTimer = setInterval(() => now.value=Date.now(),1000);
-  refreshTimer = setInterval(() => { if (!document.hidden) paint(false, true); }, 31000);
+  refreshTimer = setInterval(() => {
+    if (document.hidden) return;
+    // The global projection connection alone does not prove this chart's
+    // market sends candle events. Only a recent matching candle can replace
+    // frequent HTTP checks; quiet or unsupported markets keep the fallback.
+    const candlePacket = streams.matching(selection());
+    const receivingCandles = dashboard.hasProjectionStream && candlePacket?.at
+      && Date.now() - candlePacket.at < 90000;
+    if (!receivingCandles || Date.now() - lastHttpSnapshotAt >= 300000)
+      paint(false, true);
+  }, 31000);
   window.addEventListener('manual-refresh', onManualRefresh);
   paint(true);
   // Vendor scripts load async; retry painting once LightweightCharts lands.

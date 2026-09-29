@@ -178,7 +178,9 @@ const verifiedRelations = computed(() =>
     : store.relations.filter((r) => r.level === 'A'),
 );
 const officialRelationCount = computed(() => verifiedRelations.value.filter(r => r.level === 'A').length);
-const selected = computed(() => verifiedRelations.value.find((r) => r.pool?.toLowerCase() === String(route.query.pool ?? '').toLowerCase()) ?? verifiedRelations.value[0]);
+const selected = computed(() => props.stock
+  ? verifiedRelations.value.find((r) => r.pool?.toLowerCase() === String(route.query.pool ?? '').toLowerCase()) ?? verifiedRelations.value[0]
+  : null);
 const stockAsset = computed(() => {
   const base = stockDetail.value?.asset ?? {};
   const key = assetKey(base.chainId ?? props.chain, base.token ?? props.stock);
