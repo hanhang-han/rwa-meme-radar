@@ -18,7 +18,7 @@ import httpx
 import websockets
 from web3 import Web3
 
-from ..db import ResearchStore, store
+from ..db import ResearchStore, retry_busy_write, store
 from ..pool_quotes import pool_ratio
 
 SWAP_V2 = Web3.to_hex(Web3.keccak(text="Swap(address,uint256,uint256,uint256,uint256,address)"))
@@ -178,6 +178,8 @@ class ChainPoolStream:
         self.headers = OrderedDict()
         self.live_header_lookups = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
         self.live_log_durations_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
+        self.live_trade_lock_wait_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
+        self.live_trade_begin_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
         self.decimals = {}
         self.queue = asyncio.Queue(maxsize=4096)
         self.retry_event = None
@@ -248,16 +250,18 @@ class ChainPoolStream:
         """Keep trade transactions off the shared connection's read queue."""
         if self.trade_db is not None or self.s.path == ":memory:":
             return
-        connection = await aiosqlite.connect(self.s.path, timeout=15)
+        # SQLite can otherwise hold the process-wide writer lock for 15 s
+        # while another process owns the database. Retry outside that lock.
+        connection = await aiosqlite.connect(self.s.path, timeout=.25)
         try:
-            await connection.execute("PRAGMA busy_timeout=15000")
+            await connection.execute("PRAGMA busy_timeout=250")
         except BaseException:
             await connection.close()
             raise
         self.trade_db = connection
         self.trade_store = _StreamWriteStore(self.s.path, self.s.scope,
                                              write_lock=self.s._write_lock,
-                                             busy_timeout_ms=self.s.busy_timeout_ms)
+                                             busy_timeout_ms=250)
         self.trade_store.db = connection
 
     async def _open_status_db(self):
@@ -300,13 +304,17 @@ class ChainPoolStream:
         """Commit one raw-log state change without waiting on shared reads."""
         db = self.trade_db or self.s.db
         guard = self.s._write_lock if db is not self.s.db else self.s._guard_write()
-        async with guard:
-            try:
-                await db.execute(query, params)
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
+
+        async def write():
+            async with guard:
+                try:
+                    await db.execute(query, params)
+                    await db.commit()
+                except BaseException:
+                    await db.rollback()
+                    raise
+
+        await retry_busy_write(write)
 
     async def catalogue(self):
         rows = await self.s.all("pool")
@@ -562,6 +570,8 @@ class ChainPoolStream:
         last_error = type(error).__name__ + ":" + str(error)[:180] if isinstance(error, Exception) else error
         header_hits = sum(self.live_header_lookups)
         durations = sorted(self.live_log_durations_ms)
+        trade_lock_waits = sorted(self.live_trade_lock_wait_ms)
+        trade_begins = sorted(self.live_trade_begin_ms)
         await telemetry.put("chain-stream", "pools", {
             "chainId": self.chain, "provider": "Chain RPC", "status": self.status,
             "poolCount": len(self.pools), "decodedEvents": self.processed,
@@ -577,6 +587,10 @@ class ChainPoolStream:
                                         if self.live_log_durations_ms else None),
             "liveLogProcessingP95Ms": (durations[math.ceil(.95 * len(durations)) - 1]
                                        if durations else None),
+            "liveTradeLockWaitP95Ms": (trade_lock_waits[math.ceil(.95 * len(trade_lock_waits)) - 1]
+                                       if trade_lock_waits else None),
+            "liveTradeBeginP95Ms": (trade_begins[math.ceil(.95 * len(trade_begins)) - 1]
+                                    if trade_begins else None),
             "replayPausedForLive": self.replay_under_pressure(),
             "rateLimitedAt": self.rpc_rate_limited_at, "cooldownUntil": self.rpc_cooldown_wall,
             "rpcIntervalMs": round(self.rpc_interval * 1000),
@@ -810,15 +824,15 @@ class ChainPoolStream:
 
     async def pool_asset_quote(self, pool, token, decoded, at, height, ident):
         other = pool["token1"] if token == pool["token0"] else pool["token0"]
-        base = await (self.trade_store or self.s).get("asset", token)
-        anchor = await (self.trade_store or self.s).get("asset", other) or {}
-        if not base:
-            return
         # Stable, largest verified pool selection prevents thin pools randomly
         # replacing a token's headline quote from one trade to the next.
         candidates = [p for p in self.pools.values() if token in (p["token0"], p["token1"])]
         chosen = max(candidates, key=lambda p: (p.get("liquidityUsd") or 0, p["pool"]), default=None)
         if not chosen or chosen["pool"] != pool["pool"]:
+            return
+        base = await (self.trade_store or self.s).get("asset", token)
+        anchor = await (self.trade_store or self.s).get("asset", other) or {}
+        if not base:
             return
         if at < (base.get("fieldTimes") or {}).get("price", 0):
             return
@@ -883,6 +897,9 @@ class ChainPoolStream:
             })
 
     async def commit_trade(self, market, trade):
+        return await retry_busy_write(lambda: self._commit_trade_once(market, trade))
+
+    async def _commit_trade_once(self, market, trade):
         from .market_streams import BAR_MS, trade_to_candle
         from ..realtime_schema import enqueue_events
         s = self.s
@@ -894,14 +911,22 @@ class ChainPoolStream:
         # hold the same lock without touching an unrelated shared transaction.
         write_guard = s._write_lock if db is not s.db else s._guard_write()
         received = trade.get('receivedAt') or now_ms()
+        lock_started = time.perf_counter()
         async with write_guard:
+            if _live_log_collector.get() is self:
+                self.live_trade_lock_wait_ms.append(round(
+                    (time.perf_counter() - lock_started) * 1000, 1))
             stamp = now_ms()
             market_frame = market.frame()
             body = {**market_frame, **trade, "provider": "Chain RPC", "source": "Chain RPC",
                     "receivedAt": received, "sourceEventAt": trade["t"], "persistedAt": stamp,
                     "volume": trade["quoteQuantity"] if market.quote_currency == "USD" else None}
             try:
+                begin_started = time.perf_counter()
                 await db.execute("BEGIN IMMEDIATE")
+                if _live_log_collector.get() is self:
+                    self.live_trade_begin_ms.append(round(
+                        (time.perf_counter() - begin_started) * 1000, 1))
                 insert = await db.execute("INSERT OR IGNORE INTO trades VALUES (?,?,?,?)",
                     (s.key(market.storage), trade["id"], trade["t"], json.dumps(body)))
                 if not insert.rowcount:

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -939,6 +940,39 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         await self.collector.close()
         self.assertIsNone(self.collector.trade_db)
         self.assertFalse(self.collector.initialized)
+
+    async def test_external_writer_contention_releases_local_lock_before_retry(self):
+        await self.collector._open_trade_db()
+        external = sqlite3.connect(self.store.path, timeout=.1)
+        external.execute('BEGIN IMMEDIATE')
+        task = asyncio.create_task(self.collector.commit_trade(
+            self.market, self.trade('externally-contended', 2)))
+        try:
+            # The first BEGIN waits briefly for the external process. The
+            # retry delay must release our process-wide lock so other chains
+            # can commit while this one is contended.
+            for _ in range(50):
+                if self.store._write_lock.locked():
+                    break
+                await asyncio.sleep(.005)
+            else:
+                self.fail('trade never began its first write attempt')
+            acquired = asyncio.Event()
+
+            async def take_writer_turn():
+                async with self.store._write_lock:
+                    acquired.set()
+
+            local_writer = asyncio.create_task(take_writer_turn())
+            await asyncio.wait_for(acquired.wait(), .6)
+            await local_writer
+        finally:
+            external.rollback()
+            external.close()
+        self.assertTrue(await asyncio.wait_for(task, 2))
+        self.assertFalse(await self.collector.commit_trade(
+            self.market, self.trade('externally-contended', 2)))
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
 
     async def test_failed_dedicated_trade_does_not_rollback_shared_read_transaction(self):
         await self.collector._open_trade_db()
