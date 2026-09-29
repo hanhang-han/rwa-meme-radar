@@ -203,6 +203,7 @@ let lastPriceText = '';
 let lastStockSse = null;
 let lastSse = null; // { price, at } — a poll older than this never wins
 let insightRequest = 0;
+let loadRequest = 0;
 
 const marketChoice=ref(null);
 const baseAsset=computed(()=>data.value?.asset??{});
@@ -294,10 +295,23 @@ function flashPrice() {
   setTimeout(() => (priceFlash.value = false), 1200);
 }
 let disposed = false;
+let watchedAsset = null;
+function isCurrentAsset(chainId, address) {
+  return String(props.chain) === chainId && props.address.toLowerCase() === address;
+}
+function unwatchCurrent() {
+  if (watchedAsset && detail.current?.chain === watchedAsset.chainId && detail.current?.address === watchedAsset.address) detail.unwatch();
+  watchedAsset = null;
+}
 async function load(force = false) {
+  const chainId = String(props.chain);
+  const address = props.address.toLowerCase();
+  const request = ++loadRequest;
+  detail.watch(chainId, address);
+  watchedAsset = { chainId, address };
   try {
-    const d = await detail.fetch(props.chain, props.address.toLowerCase(), { force });
-    if (disposed) return;
+    const d = await detail.fetch(chainId, address, { force });
+    if (disposed || request !== loadRequest || !isCurrentAsset(chainId, address)) return;
     if (lastStockSse && d.stock && (d.stock.quoteAt ?? 0) < lastStockSse.marketAt) {
       applyQuote(d.stock, lastStockSse);
     }
@@ -308,7 +322,6 @@ async function load(force = false) {
       d.trades = [...merged.values()].sort((a,b) => b.t-a.t).slice(0,150);
     }
     data.value = d;
-    detail.watch(props.chain, props.address.toLowerCase());
     error.value = null;
     // A full snapshot may be older than the last SSE tick: the newer value wins.
     if (d.asset && !d.stock && lastSse) applyQuote(data.value.asset, lastSse);
@@ -319,6 +332,8 @@ async function load(force = false) {
     for (const t of d.trades ?? []) knownTradeIds.add(t.id);
     loadInsight();
   } catch (e) {
+    if (disposed || request !== loadRequest || !isCurrentAsset(chainId, address)) return;
+    unwatchCurrent();
     error.value = tr('该资产尚未进入可用索引，或暂时读取失败。', 'This asset is not yet indexed or could not be loaded.');
   }
 }
@@ -402,6 +417,29 @@ let insightTimer;
 let marketClockTimer;
 let releaseActive;
 let lastDetailLoad=0;
+function switchAsset() {
+  releaseActive?.();
+  releaseActive = detail.activate(props.chain, props.address);
+  ++insightRequest;
+  data.value = null;
+  error.value = null;
+  insight.value = null;
+  insightStatus.value = 'queued';
+  marketChoice.value = null;
+  marketRowsPrimed = false;
+  knownMarketIds.clear();
+  newMarketIds.clear();
+  for (const timer of marketFlashTimers) clearTimeout(timer);
+  marketFlashTimers.clear();
+  knownTradeIds.clear();
+  newIds.clear();
+  lastStockSse = null;
+  lastSse = null;
+  lastPriceNum = null;
+  lastPriceText = '';
+  priceFlash.value = false;
+  load();
+}
 function onResourceChange(event){
   const r=event.detail??{};
   if(r.chainId&&String(r.chainId)!==props.chain||r.token&&String(r.token).toLowerCase()!==props.address.toLowerCase())return;
@@ -409,9 +447,8 @@ function onResourceChange(event){
 }
 watch(() => asset.value.price, (value,old)=>{if(value!=null&&old!=null&&value!==old)flashPrice();});
 onMounted(() => {
-  releaseActive=detail.activate(props.chain,props.address);
   window.addEventListener('resource-change',onResourceChange);
-  load();
+  switchAsset();
   pollTimer = setInterval(() => { if (!document.hidden && (!dash.hasProjectionStream || Date.now()-lastDetailLoad>60000)) {lastDetailLoad=Date.now();load(true);} }, 20000);
   insightTimer = setInterval(() => {if(!dash.hasProjectionStream&&!document.hidden)loadInsight();}, 15000);
   marketClockTimer = setInterval(() => (marketClock.value = Date.now()), 30000);
@@ -422,17 +459,22 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  ++loadRequest;
+  ++insightRequest;
   releaseActive?.();
   window.removeEventListener('resource-change',onResourceChange);
   clearInterval(pollTimer);
   clearInterval(insightTimer);
   clearInterval(marketClockTimer);
   for (const timer of marketFlashTimers) clearTimeout(timer);
-  detail.unwatch();
+  unwatchCurrent();
   window.removeEventListener('sse-price', onSsePrice);
   window.removeEventListener('sse-stock-quote', onSseStockQuote);
   window.removeEventListener('sse-trades', onSseTrades);
   window.removeEventListener('manual-refresh', onManualRefresh);
+});
+watch(() => `${props.chain}:${props.address.toLowerCase()}`, () => {
+  if (!disposed) switchAsset();
 });
 function onManualRefresh() { load(true); loadInsight(); }
 watch(() => lang.lang, () => {

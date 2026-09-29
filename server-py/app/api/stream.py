@@ -4,7 +4,7 @@ import json
 import time
 import zlib
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ..stream_hub import clients, cursor, hello, replay_batch, replay_page, _frame
@@ -52,6 +52,7 @@ async def gzip_frames(source):
 async def get_stream(last_event_id: str | None = Header(default=None, alias='Last-Event-ID'),
                      snapshot: bool = True, after: str | None = None,
                      protocol: int = 0, candles: str | None = None,
+                     trades: str | None = None,
                      accept_encoding: str | None = Header(default=None, alias='Accept-Encoding')):
     q: asyncio.Queue = asyncio.Queue(maxsize=1024)
     # Browser reconnect headers take precedence over the original URL cursor.
@@ -60,9 +61,10 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
     except (TypeError, ValueError):
         last_id = None
     candle_keys = set(candles.split(',')) if isinstance(candles, str) and candles != 'all' else None
+    trade_scope = parse_trade_scope(trades)
 
     def visible(frame):
-        return frame_visible(frame, protocol=protocol, candle_keys=candle_keys)
+        return frame_visible(frame, protocol=protocol, candle_keys=candle_keys, trade_scope=trade_scope)
 
     async def frames():
         # StreamingResponse may be abandoned before its body is iterated. Only
@@ -135,12 +137,29 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
     return StreamingResponse(body, media_type='text/event-stream', headers=headers)
 
 
-def frame_visible(frame, protocol=0, candle_keys=None):
+def parse_trade_scope(value):
+    """An omitted scope keeps the existing global trade stream."""
+    if value is None or value == 'all':
+        return None
+    chain, separator, token = value.partition(':')
+    if not separator or not chain.isdecimal() or not token or len(token) > 200:
+        raise HTTPException(status_code=422, detail='trades must be chainId:token or all')
+    return chain, token.lower()
+
+
+def frame_visible(frame, protocol=0, candle_keys=None, trade_scope=None):
     lines = frame.split(b'\n', 3)
     event_line = lines[1] if lines[0].startswith(b'id:') else lines[0]
     event = event_line.partition(b':')[2].strip().decode()
     if protocol == 1 and event in ('price', 'stock-quote'):
         return False
+    if trade_scope is not None and event in ('trade', 'trade-remove'):
+        try:
+            data_line = next(line for line in lines if line.startswith(b'data:'))
+            data = json.loads(data_line.partition(b':')[2])
+            return isinstance(data, dict) and (str(data.get('chainId')), str(data.get('token') or '').lower()) == trade_scope
+        except (ValueError, StopIteration):
+            return False  # unknown trade identity cannot be assigned to the watched asset
     if candle_keys is not None and event in ('candle', 'candle.upsert', 'candle.close', 'candle.correct'):
         if 'none' in candle_keys:
             return False

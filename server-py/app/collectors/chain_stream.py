@@ -39,6 +39,7 @@ REPLAY_RESUME_QUEUE_FRACTION = .25
 # backlog; the unfinished replay range retains its unadvanced cursor.
 REPLAY_PAUSE_QUEUE_CAP = 32
 REPLAY_RESUME_QUEUE_CAP = 8
+WATCHED_POOL_BURST = 8
 DEFAULTS = {
     "196": (["wss://ws.xlayer.tech", "wss://xlayerws.okx.com"], "https://xlayerrpc.okx.com"),
     "56": (["wss://bsc-rpc.publicnode.com"], "https://bsc-rpc.publicnode.com"),
@@ -172,6 +173,8 @@ class ChainPoolStream:
         self.last_prune = 0
         self.last_watches = 0
         self.watched_bars = {}
+        self.watched_pools = set()
+        self.watched_burst = 0
         self.ws = None
         self.pending_pools = set()
         self.scan_page_metrics = {}
@@ -237,11 +240,13 @@ class ChainPoolStream:
         from .market_streams import BAR_MS
         if now_ms() - self.last_watches < 5_000:
             return
-        self.watched_bars = {}
+        watched_bars = {}
         for watch in await self.s.all("candle-watch"):
             if watch.get("pool") and (watch.get("expiresAt") or 0) > now_ms() and watch.get("bar") in BAR_MS:
                 key = (watch["pool"].lower(), watch.get("address", "").lower())
-                self.watched_bars.setdefault(key, set()).add(watch["bar"])
+                watched_bars.setdefault(key, set()).add(watch["bar"])
+        self.watched_bars = watched_bars
+        self.watched_pools = {pool for pool, _ in watched_bars}
         self.last_watches = now_ms()
 
     def bars(self, market):
@@ -412,6 +417,17 @@ class ChainPoolStream:
                 result.add(rel["token"])
         return sorted(result)
 
+    def irrelevant_sync(self, log):
+        """A V2 Sync without a known relation cannot update user-facing data.
+
+        Keep removed logs: any removed event can signal that swaps from the
+        same block need to be retracted.
+        """
+        topics = log.get("topics") or []
+        return (not log.get("removed") and bool(topics)
+                and str(topics[0]).lower() == SYNC_V2.lower()
+                and not self.relations.get(address(log.get("address"))))
+
     async def wait_for_live(self, max_wait=.25):
         """Give a shallow live queue a bounded head start over replay.
 
@@ -483,6 +499,8 @@ class ChainPoolStream:
         if log.get("removed"):
             async with self.lock:
                 await self.retract_block(block_hash)
+            return
+        if self.irrelevant_sync(log):
             return
         revision = self.removed_revisions.get(block_hash, 0)
         existing = await self.s.fetchone("SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?", (self.chain, ident))
@@ -1258,6 +1276,8 @@ class ChainPoolStream:
                     # Overflow closes the connection; catch-up replays from
                     # the durable range cursor. No silent dropped logs.
                     self.last_received = now_ms()
+                    if self.irrelevant_sync(data):
+                        continue
                     data['_receivedAt'] = self.last_received
                     try:
                         self.queue.put_nowait(data)
@@ -1281,17 +1301,66 @@ class ChainPoolStream:
         finally:
             self.live_processing = False
 
+    def take_live_event(self):
+        """Favor viewed pools without changing each pool's arrival order.
+
+        Keep the single bounded queue: overflow/reconnect and durable replay
+        still cover every log. Rotate its deque only within this synchronous
+        step, then let Queue.get_nowait wake a waiting producer normally.
+        """
+        pending = self.queue._queue
+        if not pending:
+            raise asyncio.QueueEmpty
+        if not self.watched_pools:
+            self.watched_burst = 0
+            return self.queue.get_nowait()
+        first_hot = first_cold = first_removed = None
+        seen_pools = set()
+        for index, event in enumerate(pending):
+            pool = str(event.get("address") or "").lower() if isinstance(event, dict) else ""
+            if pool in seen_pools:
+                continue
+            seen_pools.add(pool)
+            hot = pool in self.watched_pools
+            if hot and first_hot is None:
+                first_hot = index
+            if not hot and first_cold is None:
+                first_cold = index
+            if isinstance(event, dict) and event.get("removed") and first_removed is None:
+                first_removed = (index, hot)
+        if first_removed and (not first_removed[1] or self.watched_burst < WATCHED_POOL_BURST
+                              or first_cold is None):
+            selected = first_removed[0]
+        elif self.watched_burst >= WATCHED_POOL_BURST and first_cold is not None:
+            selected = first_cold
+        else:
+            selected = first_hot if first_hot is not None else 0
+        if selected:
+            pending.rotate(-selected)
+        try:
+            event = self.queue.get_nowait()
+        finally:
+            if selected:
+                pending.rotate(selected)
+        self.record_live_event(event)
+        return event
+
+    def record_live_event(self, event):
+        pool = str(event.get("address") or "").lower() if isinstance(event, dict) else ""
+        self.watched_burst = self.watched_burst + 1 if pool in self.watched_pools else 0
+
     async def recover_live_queue(self, reader):
-        """Use an unsubscribed WSS for RPC while draining a prior full queue.
+        """Drain an old queue before opening another log subscription.
 
         After an overflow, a new log subscription would immediately fill the
-        old queue again. Catch up the durable recent cursor to a fixed head
-        before subscribing; later blocks remain for the normal replay lane.
+        old queue again. The unadvanced recent cursor covers the disconnected
+        interval; normal reconcile scans it after the new subscription starts.
         """
         if not self.recovery_needed and self.retry_event is None and self.queue.empty():
             return
         self.status = "catching-up"
         await self.status_fact(force=True)
+        await self.refresh_watches()
         drained = 0
         while self.retry_event is not None or not self.queue.empty():
             if reader.done():
@@ -1301,24 +1370,21 @@ class ChainPoolStream:
                 event = self.retry_event
                 self.retry_event = None
             else:
-                event = self.queue.get_nowait()
+                event = self.take_live_event()
             await self.process_queued(event)
             drained += 1
             if drained % 64 == 0:
+                await self.refresh_watches()
                 await self.status_fact(force=True)
             await asyncio.sleep(0)
         if not self.recovery_needed:
             return
-        # Do one bounded durable replay pass before resubscribing. Waiting for
-        # a distant fixed head can keep current trades offline for hours; the
-        # normal reconcile task resumes from the same unadvanced cursor and
-        # continues filling the explicit gap alongside the live subscription.
-        head = await self.rpc("eth_getBlockByNumber", ["latest", False])
+        # Replay can take minutes when a range spans many pool pages. The
+        # durable cursor has not advanced, so the normal reconcile task can
+        # safely scan the gap alongside newly subscribed live logs.
         if reader.done():
             await reader
             raise RuntimeError("chain-stream-recovery-connection-closed")
-        await self.rebase_recent_if_far_behind(head)
-        await self.catch_up("pools-live", max_ranges=3, initial_depth=299, head=head)
         self.recovery_needed = False
         await self.status_fact(force=True)
 
@@ -1361,7 +1427,11 @@ class ChainPoolStream:
                         replay = asyncio.create_task(self.reconcile())
                         while not reader.done():
                             try:
-                                event = await asyncio.wait_for(self.queue.get(), 1)
+                                if self.queue.empty():
+                                    event = await asyncio.wait_for(self.queue.get(), 1)
+                                    self.record_live_event(event)
+                                else:
+                                    event = self.take_live_event()
                                 await self.process_queued(event)
                             except asyncio.TimeoutError:
                                 pass

@@ -20,7 +20,7 @@
       {{ candleStatusLabel }}
       · {{ tr('最后一根开盘时间', 'Last candle opened') }}：{{ lastCandleAt ? chartDateTime(lastCandleAt / 1000) : '—' }}
       <span v-if="candleInfo.lastTradeAt"> · {{ tr('最后成交', 'Last trade') }}：{{ chartDateTime(candleInfo.lastTradeAt / 1000) }}</span>
-      <span v-if="candleInfo.nextRefreshAt"> · {{ tr('预计下次采集', 'Next collection due') }}：{{ chartDateTime(candleInfo.nextRefreshAt / 1000) }}</span>
+      <span v-if="candleInfo.nextRefreshAt > now && candleInfo.status !== 'current'"> · {{ tr('预计下次采集', 'Next collection due') }}：{{ chartDateTime(candleInfo.nextRefreshAt / 1000) }}</span>
       <span v-if="candleInfo.delayMs || candleInfo.providerDelayMs"> · {{ tr('源延迟', 'Source delay') }} {{ Math.ceil((candleInfo.delayMs || candleInfo.providerDelayMs) / 60000) }} {{ tr('分钟', 'min') }}</span>
       <span v-if="candleInfo.error === 'quota-exhausted'"> · {{ tr('OKX 当日额度已用尽', 'OKX daily budget exhausted') }}</span>
     </p>

@@ -131,15 +131,20 @@ def classify_sources(sources):
     return annotated, issues, warnings
 
 
-def chain_streams_degraded(rows):
+def chain_stream_degraded(row, now=None):
     """A connected worker is not healthy when its trade replay cannot catch up."""
-    for row in rows:
-        queued = row.get('queueDepth') or 0
-        lag_ms = row.get('sourceLagMs') or 0
-        near_tip_lag = row.get('nearTipLagBlocks') or 0
-        if queued >= 4096 or near_tip_lag >= 1000 or (lag_ms >= 300_000 and near_tip_lag >= 100):
-            return True
-    return False
+    queued = row.get('queueDepth') or 0
+    lag_ms = row.get('sourceLagMs') or 0
+    near_tip_lag = row.get('nearTipLagBlocks') or 0
+    updated = row.get('updatedAt') or 0
+    return (queued >= 4096 or near_tip_lag >= 1000
+            or (queued >= 2048 and lag_ms >= 120_000)
+            or (lag_ms >= 300_000 and near_tip_lag >= 100)
+            or (now is not None and updated > 0 and now - updated > 60_000))
+
+
+def chain_streams_degraded(rows, now=None):
+    return any(chain_stream_degraded(row, now) for row in rows)
 
 
 def okx_lane_usage(day, path=None):
@@ -213,6 +218,9 @@ async def _health_storage_snapshot(now):
               SUM(COALESCE(CAST(json_extract(body,'$.failedPools') AS INTEGER),0))
             FROM facts WHERE kind IN (?,?,?) GROUP BY kind
         ''', kinds('scan'))
+        live_stream_rows = await reader.execute_fetchall('''
+            SELECT kind,body FROM facts WHERE id='pools' AND kind IN (?,?,?)
+        ''', kinds('chain-stream'))
 
     projection = None
     if projection_rows:
@@ -240,8 +248,17 @@ async def _health_storage_snapshot(now):
             'total': total, 'partial': partial, 'unsupportedPools': unsupported,
             'failedPools': failed,
         }
+    live_streams = {}
+    for kind, body in live_stream_rows:
+        chain = kind.split(':', 1)[0]
+        try:
+            row = json.loads(body)
+            if isinstance(row, dict) and str(row.get('chainId')) == chain:
+                live_streams[chain] = {**row, 'id': f'chain-stream:{chain}'}
+        except (TypeError, ValueError):
+            continue
     return {'projection': projection, 'assets': assets[0], 'latestAssetAt': assets[1] or 0,
-            'domains': domains, 'scanQuality': scan_quality}
+            'domains': domains, 'scanQuality': scan_quality, 'liveChainStreams': live_streams}
 
 
 @app.get("/api/health/data")
@@ -334,6 +351,12 @@ async def health_data():
             result['lastErrorKind'] = kind
         return result
 
+    projected_streams = {
+        str(row.get('chainId')): row for row in unified.get('sources', [])
+        if row.get('provider') == 'Chain RPC' and str(row.get('id', '')).startswith('chain-stream:')
+    }
+    for chain, row in storage.get('liveChainStreams', {}).items():
+        projected_streams[chain] = {**projected_streams.get(chain, {}), **row}
     chain_streams = [
         {**{key: row.get(key) for key in (
             'chainId', 'status', 'updatedAt', 'sourceLagMs', 'queueDepth',
@@ -343,11 +366,12 @@ async def health_data():
             'nearTipLagBlocks', 'nearTipRebasedAt', 'historicalGapBlocks', 'nearTipCoverageFrom',
             'nearTipVerifiedAt', 'lastErrorAt')},
          'historicalScan': public_scan_diagnostic(row.get('historicalScan')),
-         'nearTipScan': public_scan_diagnostic(row.get('nearTipScan'))}
-        for row in unified.get('sources', [])
-        if row.get('provider') == 'Chain RPC' and str(row.get('id', '')).startswith('chain-stream:')
+         'nearTipScan': public_scan_diagnostic(row.get('nearTipScan')),
+         'degraded': chain_stream_degraded(row, now),
+         'sampleAgeMs': max(0, now-row['updatedAt']) if isinstance(row.get('updatedAt'), int) else None}
+        for row in projected_streams.values()
     ]
-    if chain_streams_degraded(chain_streams):
+    if chain_streams_degraded(chain_streams, now):
         issues.append('chain-stream-degraded')
     if any((task.get('result') or {}).get('unsupported', 0) for task in collector['tasks'].values()):
         warnings.append('collector-unsupported-observations')

@@ -152,11 +152,14 @@ def pool_freshness(health,cursor,meta,now):
     # New live trades can be current while the durable historical range is
     # still catching up. Do not call a quiet pool healthy without that scan,
     # or relabel old replayed trades as new merely because they just arrived.
-    live_current=(transport_ready and bool(last_trade) and 0<=now-int(last_trade)<=30000
-                  and 0<=now-int(health.get('lastReceivedAt') or 0)<=30000
-                  and 0<=now-int(health.get('lastProcessedAt') or 0)<=30000
-                  and 0<=float(health.get('sourceLagMs') or 0)<=10000
-                  and int(health.get('queueDepth') or 0)<=16)
+    # A busy chain can lag globally while the pool a viewer selected has just
+    # been durably processed. Judge that pool by its own trade/persist clocks;
+    # historical replay cannot qualify because its source time is old.
+    persisted=meta.get('lastSuccessfulAt')
+    live_current=(transport_ready and bool(last_trade) and bool(persisted)
+                  and 0<=now-int(last_trade)<=30000
+                  and 0<=now-int(persisted)<=30000
+                  and -1000<=int(persisted)-int(last_trade)<=10000)
     quiet=healthy and (not last_trade or now-int(last_trade)>60000)
     return {'stale':not (healthy or live_current),'transportStatus':health.get('status','starting'),
             'marketStatus':'quiet' if quiet else 'live' if healthy or live_current else 'recovering',

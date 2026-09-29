@@ -59,15 +59,20 @@ class MappingTests(unittest.TestCase):
         health={'status':'catching-up','updatedAt':now-500,'lastHead':1000,
                 'lastReceivedAt':now-1000,'lastProcessedAt':now-400,'sourceLagMs':1000,'queueDepth':1}
         cursor={'block':100,'blockTime':now-600000,'updatedAt':now-1000}
-        current=pool_freshness(health,cursor,{'lastSourceEventAt':now-1000},now)
+        recent={'lastSourceEventAt':now-1000,'lastSuccessfulAt':now-400}
+        current=pool_freshness(health,cursor,recent,now)
         self.assertFalse(current['stale'])
         self.assertEqual(current['marketStatus'],'live')
         self.assertEqual(current['coverageStatus'],'backfilling')
         old=pool_freshness(health,cursor,{'lastSourceEventAt':now-600000},now)
         self.assertTrue(old['stale'])
         self.assertEqual(old['marketStatus'],'recovering')
-        queued=pool_freshness({**health,'queueDepth':500},cursor,{'lastSourceEventAt':now-1000},now)
-        self.assertTrue(queued['stale'])
+        queued=pool_freshness({**health,'queueDepth':500,'sourceLagMs':120000},cursor,recent,now)
+        self.assertFalse(queued['stale'])
+        self.assertEqual(queued['marketStatus'],'live')
+        late=pool_freshness(health,cursor,{'lastSourceEventAt':now-1000,
+                                          'lastSuccessfulAt':now-15000},now)
+        self.assertTrue(late['stale'])
 
     def test_identity_currency_and_trading_gate(self):
         token={'chainId':'4663','contractAddress':TOKEN,'alphaId':'ALPHA_1088','symbol':'SAME'}

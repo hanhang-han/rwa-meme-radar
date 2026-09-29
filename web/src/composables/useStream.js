@@ -4,7 +4,9 @@
 //
 // Events are matched by chainId + token (never token alone). hello/heartbeat
 // only update connection state; quote freshness comes from market times.
-// Reconnects send Last-Event-ID so missed trade/relationship events replay.
+// Reconnects send Last-Event-ID so missed subscribed events replay. A detail
+// page scopes trade traffic to its asset; the feed snapshot restores global
+// trades when that scope changes or the page returns to the market lists.
 import { watch } from 'vue';
 import { API_BASE } from '../api/client.js';
 import { useDashboardStore } from '../stores/dashboard.js';
@@ -29,12 +31,17 @@ export function useStream() {
   return { started, lastEventId };
 }
 
+export function currentTradeScope() {
+  const current=useDetailStore().current;
+  return current ? `${current.chain}:${current.address.toLowerCase()}` : null;
+}
+
 export function startStream() {
   if (started) return;
   started = true;
   stopped = false;
   const generation = ++streamGeneration;
-  stopScopeWatch=watch(()=>useCandleStore().subscriptionScope,()=>{
+  stopScopeWatch=watch([()=>useCandleStore().subscriptionScope,currentTradeScope],()=>{
     clearTimeout(scopeTimer);
     scopeTimer=setTimeout(()=>{scopeChanged=true;currentController?.abort();},200);
   });
@@ -89,6 +96,8 @@ async function connectStream(generation) {
       const headers = {};
       if (lastEventId != null) headers['Last-Event-ID'] = String(lastEventId);
       const query=new URLSearchParams({snapshot:'false',protocol:'1',candles:useCandleStore().subscriptionScope});
+      const tradeScope=currentTradeScope();
+      if(tradeScope)query.set('trades',tradeScope);
       if(lastEventId!=null)query.set('after',String(lastEventId));
       const res = await fetch(API_BASE + `stream?${query}`, { headers, signal: controller.signal });
       if (!res.ok || !res.body) throw new Error('stream unavailable');

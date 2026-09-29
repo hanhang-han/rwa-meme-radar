@@ -56,13 +56,35 @@ with open(sys.argv[1], "a+") as lock:
              patch('app.realtime_projection.refresh_derived', derive):
             start_projection_loops()
             self.assertEqual({name: values[:2] for name, values in jobs.items()}, {
-                'realtimeProjection': (1, 0), 'realtimeDerived': (1, 2),
-                'comparisons': (30, 22), 'baskets': (60, 55),
+                'realtimeProjection': (2, 0), 'realtimeDerived': (30, 2),
+                'comparisons': (120, 22), 'baskets': (60, 55),
             })
             self.assertEqual(asyncio.run(jobs['realtimeProjection'][2]()), {'accepted': 1, 'updated': 1})
             self.assertEqual(asyncio.run(jobs['realtimeDerived'][2]()), {'accepted': 1, 'updated': 2, 'skipped': 0})
         publish.assert_awaited_once()
         derive.assert_awaited_once()
+
+    def test_long_derived_turn_leaves_a_gap_without_discarding_dirty_work(self):
+        from app.projection_worker import start_projection_loops
+        jobs = {}
+        def register(name, interval, action, delay=0):
+            jobs[name] = action
+        clock = [100.0]
+        async def slow_derive():
+            clock[0] += 40  # The 30s scheduler interval was exceeded.
+            return {'affected': 200}
+        derive = AsyncMock(side_effect=slow_derive)
+        with patch('app.collectors.scheduler.spawn_loop', side_effect=register), \
+             patch('app.realtime_projection.refresh_derived', derive), \
+             patch('app.projection_worker.time.monotonic', side_effect=lambda: clock[0]):
+            start_projection_loops()
+            run = jobs['realtimeDerived']
+            self.assertEqual(asyncio.run(run())['updated'], 200)
+            self.assertEqual(asyncio.run(run()), {'accepted': 0, 'updated': 0, 'skipped': 1})
+            derive.assert_awaited_once()
+            clock[0] += 10
+            self.assertEqual(asyncio.run(run())['updated'], 200)
+            self.assertEqual(derive.await_count, 2)
 
     def test_health_writers_keep_collector_and_projection_files_separate(self):
         from app.collectors import scheduler

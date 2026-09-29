@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Release the live-over-replay queue priority change on top of the installed collector.
+# Restore live subscriptions promptly after queue recovery; replay the gap later.
 set -Eeuo pipefail
 cd "$(dirname "$0")/.."
 SERVER="${DEPLOY_SERVER:-ubuntu@129.226.135.20}"
 SSH_KEY="${DEPLOY_SSH_KEY:-$HOME/.ssh/id_tencent}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o IdentitiesOnly=yes -i "$SSH_KEY")
-BASE_SHA=07847c8d88e613bffab6b89b3b89c2a3e9c1b9afbc8f9de2edeb671663fe2ad3
+BASE_SHA=02d8ecc77930e067d85f32462af171dabddb578e5aa8ddd82b1571ba952daae9
 NEW_SHA=$(shasum -a 256 server-py/app/collectors/chain_stream.py | cut -d' ' -f1)
 scp "${SSH_OPTS[@]}" server-py/app/collectors/chain_stream.py "$SERVER:/tmp/cliperx-chain-throughput.py"
 ssh "${SSH_OPTS[@]}" "$SERVER" bash -s -- "$BASE_SHA" "$NEW_SHA" <<'REMOTE'

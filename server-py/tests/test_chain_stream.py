@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from app.db import ResearchStore
-from app.collectors.chain_stream import ChainPoolStream, SWAP_V2, SWAP_V3, decode_swap
+from app.collectors.chain_stream import ChainPoolStream, SWAP_V2, SWAP_V3, SYNC_V2, WATCHED_POOL_BURST, decode_swap
 from app.collectors.market_streams import Market
 
 TOKEN0 = "0x" + "1" * 40
@@ -69,6 +69,72 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         return {'address': POOL, 'blockHash': '0xabc', 'blockNumber': '0xc8',
                 'transactionHash': '0xdef', 'transactionIndex': '0x0', 'logIndex': '0x1',
                 'topics': [SWAP_V2], 'data': encoded(0, 6_000_000, 2 * 10 ** 18, 0)}
+
+    async def test_irrelevant_sync_does_not_enter_live_queue_or_persistence(self):
+        swap = await self.prepare_logs()
+        sync = {**swap, 'topics': [SYNC_V2], 'data': encoded(2 * 10 ** 18, 6_000_000)}
+
+        class FakeSocket:
+            def __init__(self, events):
+                self.events = iter(events)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return json.dumps({'params': {'result': next(self.events)}})
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        await self.collector.reader(FakeSocket([sync, swap, {**sync, 'removed': True}]))
+        self.assertEqual(self.collector.queue.qsize(), 2)
+        self.assertEqual([self.collector.queue.get_nowait()['topics'][0] for _ in range(2)],
+                         [SWAP_V2, SYNC_V2])
+        self.collector.log_header = AsyncMock()
+        await self.collector.process_log(sync)
+        self.collector.log_header.assert_not_awaited()
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM chain_stream_logs'))[0], 0)
+
+    async def test_replay_skips_irrelevant_sync_and_advances_covered_range(self):
+        swap = await self.prepare_logs()
+        sync = {**swap, 'topics': [SYNC_V2], 'data': encoded(2 * 10 ** 18, 6_000_000)}
+        await self.store.put('chain-stream-cursor', 'pools', {'block': 199, 'hash': hex(199)})
+        self.collector.last_prune = self.at
+
+        async def rpc(method, params):
+            if method == 'eth_getLogs':
+                return [sync]
+            block = 200 if params[0] == 'latest' else int(params[0], 16)
+            return {'number': hex(block), 'hash': '0xabc' if block == 200 else hex(block),
+                    'timestamp': hex(self.at // 1000)}
+
+        self.collector.rpc = rpc
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            progress = await self.collector.catch_up(max_ranges=1)
+        self.assertTrue(progress['caughtUp'])
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 200)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM chain_stream_logs'))[0], 0)
+
+    async def test_relation_sync_keeps_pool_ratio_and_removed_sync_retracts_block(self):
+        swap = await self.prepare_logs()
+        sync = {**swap, 'transactionHash': '0xfee', 'logIndex': '0x2',
+                'topics': [SYNC_V2], 'data': encoded(2 * 10 ** 18, 6_000_000)}
+        self.collector.relations[POOL] = [{'id': 'relation', 'pool': POOL, 'token': TOKEN0,
+                                            'stockSide': TOKEN1}]
+        await self.collector.process_log(sync)
+        quote = await self.store.get('pool-quote', POOL)
+        self.assertAlmostEqual(quote['memePerStock'], 1 / 3)
+        self.assertEqual(quote['method'], 'v2-sync-stream')
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM chain_stream_logs'))[0], 1)
+
+        await self.collector.process_log(swap)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
+        # A removed Sync is also a block reorg signal for the prior Swap.
+        self.collector.relations.clear()
+        await self.collector.process_log({**sync, 'removed': True})
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 0)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM chain_stream_logs'))[0], 0)
 
     async def test_metadata_wait_does_not_block_removal_or_restore_orphan(self):
         log = await self.prepare_logs()
@@ -343,11 +409,13 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 1000)
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 150)
 
-    async def test_full_queue_drains_before_bounded_scan_then_resubscribes(self):
+    async def test_full_queue_drains_before_resubscription_and_later_reconciles(self):
         self.collector.queue = asyncio.Queue(maxsize=2)
         self.collector.queue.put_nowait({'id': 'oldest'})
         self.collector.queue.put_nowait({'id': 'second'})
         self.collector.recovery_needed = True
+        await self.store.put('chain-stream-cursor', 'pools', {'block': 50, 'hash': '0x50'})
+        await self.store.put('chain-stream-cursor', 'pools-live', {'block': 55, 'hash': '0x55'})
         order = []
         head = {'number': '0x64', 'hash': '0x100', 'timestamp': hex(self.at // 1000)}
 
@@ -368,11 +436,71 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.collector.status_fact = AsyncMock()
         reader = asyncio.get_running_loop().create_future()
         await self.collector.recover_live_queue(reader)
-        self.assertEqual(order, [('log', 'oldest'), ('log', 'second'),
-                                 ('head', 'eth_getBlockByNumber'),
-                                 ('scan', 'pools-live', head)])
+        self.assertEqual(order, [('log', 'oldest'), ('log', 'second')])
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 55)
         self.assertFalse(self.collector.recovery_needed)
         self.assertTrue(self.collector.queue.empty())
+        await self.collector.reconcile_step()
+        self.assertEqual(order[-2:], [('head', 'eth_getBlockByNumber'),
+                                      ('scan', 'pools-live', head)])
+
+    async def test_watched_pool_priority_preserves_each_pool_order_and_cold_progress(self):
+        cold_pool = '0x' + '4' * 40
+        await self.store.put('candle-watch', 'active', {
+            'pool': POOL, 'address': TOKEN0, 'bar': '1m', 'expiresAt': self.at + 60_000})
+        await self.store.put('candle-watch', 'expired', {
+            'pool': cold_pool, 'address': TOKEN0, 'bar': '1m', 'expiresAt': self.at - 1})
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            await self.collector.refresh_watches()
+        self.assertEqual(self.collector.watched_pools, {POOL})
+        self.collector.queue.put_nowait({'address': cold_pool, 'id': 'cold-0'})
+        for index in range(WATCHED_POOL_BURST + 1):
+            self.collector.queue.put_nowait({'address': POOL, 'id': f'hot-{index}'})
+        self.collector.queue.put_nowait({'address': cold_pool, 'id': 'cold-1'})
+        picked = [self.collector.take_live_event()['id'] for _ in range(WATCHED_POOL_BURST + 3)]
+        self.assertEqual(picked, [*(f'hot-{index}' for index in range(WATCHED_POOL_BURST)),
+                                  'cold-0', f'hot-{WATCHED_POOL_BURST}', 'cold-1'])
+        self.assertTrue(self.collector.queue.empty())
+
+    async def test_removed_log_gets_priority_only_at_its_pool_head(self):
+        cold_pool = '0x' + '4' * 40
+        self.collector.watched_pools = {POOL}
+        self.collector.queue.put_nowait({'address': POOL, 'id': 'hot'})
+        self.collector.queue.put_nowait({'address': cold_pool, 'id': 'reorg', 'removed': True})
+        self.assertEqual(self.collector.take_live_event()['id'], 'reorg')
+        self.assertEqual(self.collector.take_live_event()['id'], 'hot')
+        self.collector.queue.put_nowait({'address': POOL, 'id': 'before-removal'})
+        self.collector.queue.put_nowait({'address': POOL, 'id': 'removal', 'removed': True})
+        self.assertEqual(self.collector.take_live_event()['id'], 'before-removal')
+        self.assertEqual(self.collector.take_live_event()['id'], 'removal')
+
+    async def test_failed_prioritized_log_retries_before_later_same_pool_log(self):
+        cold_pool = '0x' + '4' * 40
+        await self.store.put('candle-watch', 'active', {
+            'pool': POOL, 'address': TOKEN0, 'bar': '1m', 'expiresAt': self.at + 60_000})
+        self.collector.queue.put_nowait({'address': cold_pool, 'id': 'cold'})
+        self.collector.queue.put_nowait({'address': POOL, 'id': 'hot-first'})
+        self.collector.queue.put_nowait({'address': POOL, 'id': 'hot-later'})
+        seen = []
+
+        async def process(event):
+            seen.append(event['id'])
+            if event['id'] == 'hot-first' and seen.count('hot-first') == 1:
+                raise TimeoutError('metadata unavailable')
+
+        self.collector.process_log = process
+        self.collector.status_fact = AsyncMock()
+        self.collector.rpc = AsyncMock(return_value={'number': '0x64'})
+        self.collector.catch_up = AsyncMock(return_value={'caughtUp': True})
+        reader = asyncio.get_running_loop().create_future()
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            with self.assertRaisesRegex(TimeoutError, 'metadata unavailable'):
+                await self.collector.recover_live_queue(reader)
+            self.assertEqual(self.collector.retry_event['id'], 'hot-first')
+            await self.collector.recover_live_queue(reader)
+        self.assertEqual(seen, ['hot-first', 'hot-first', 'hot-later', 'cold'])
+        self.assertTrue(self.collector.queue.empty())
+        self.assertIsNone(self.collector.retry_event)
 
     async def test_failed_queue_head_survives_reconnect_before_later_logs(self):
         self.collector.queue = asyncio.Queue(maxsize=2)
@@ -403,9 +531,9 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order, ['first', 'first', 'later'])
         self.assertIsNone(self.collector.retry_event)
         self.assertTrue(self.collector.queue.empty())
-        self.collector.catch_up.assert_awaited_once()
+        self.collector.catch_up.assert_not_awaited()
 
-    async def test_long_recovery_publishes_queue_progress_before_replay_finishes(self):
+    async def test_long_recovery_publishes_queue_progress_before_resubscription(self):
         self.collector.queue = asyncio.Queue(maxsize=65)
         for index in range(65):
             self.collector.queue.put_nowait({'id': index})
@@ -423,6 +551,7 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         await self.collector.recover_live_queue(reader)
         self.assertEqual(sizes, [65, 1, 0])
         self.assertFalse(self.collector.recovery_needed)
+        self.collector.catch_up.assert_not_awaited()
 
     async def test_reader_overflow_retains_old_logs_for_recovery(self):
         self.collector.queue = asyncio.Queue(maxsize=1)
