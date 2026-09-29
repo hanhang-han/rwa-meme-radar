@@ -17,6 +17,7 @@ import aiosqlite
 DB_PATH = os.environ.get("RESEARCH_DB", "data/research.sqlite")
 WAL_JOURNAL_SIZE_LIMIT_BYTES = 256 * 1024 * 1024
 QUOTE_BUSY_TIMEOUT_MS = 2000
+CHECKPOINT_BUSY_TIMEOUT_MS = 250
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(kind,id));
@@ -177,11 +178,14 @@ class ResearchStore:
         self.path = path
         self.scope = scope
         self.db: aiosqlite.Connection | None = None
+        self._checkpoint_db: aiosqlite.Connection | None = None
+        self._checkpoint_init_lock = asyncio.Lock()
         self._write_lock = write_lock if write_lock is not None else _global_write_lock
         self.busy_timeout_ms = busy_timeout_ms
 
     @asynccontextmanager
-    async def _guard_write(self):
+    async def _guard_write(self, connection=None):
+        connection = connection or self.db
         async with self._write_lock:
             try:
                 yield
@@ -192,8 +196,8 @@ class ResearchStore:
                         'sqliteErrorName': getattr(exc, 'sqlite_errorname', None)}), flush=True)
                 # Cancellation during an implicit SQLite transaction must not
                 # leave the connection holding a write lock during shutdown.
-                if self.db:
-                    await asyncio.shield(self.db.rollback())
+                if connection:
+                    await asyncio.shield(connection.rollback())
                 raise
 
     def key(self, value: str) -> str:
@@ -237,9 +241,31 @@ class ResearchStore:
         return self
 
     async def close(self) -> None:
+        if self._checkpoint_db:
+            await self._checkpoint_db.close()
+            self._checkpoint_db = None
         if self.db:
             await self.db.close()
             self.db = None
+
+    async def _checkpoint_connection(self) -> aiosqlite.Connection:
+        # A checkpoint must not queue behind unrelated reads on self.db after
+        # BEGIN IMMEDIATE has reserved SQLite's sole writer. Keep this lane
+        # private to checkpoints while retaining the process-wide writer lock.
+        if self.path == ':memory:':
+            return self.db
+        if self._checkpoint_db is None:
+            async with self._checkpoint_init_lock:
+                if self._checkpoint_db is None:
+                    connection = await aiosqlite.connect(self.path)
+                    try:
+                        await connection.execute(
+                            f'PRAGMA busy_timeout={CHECKPOINT_BUSY_TIMEOUT_MS}')
+                    except BaseException:
+                        await connection.close()
+                        raise
+                    self._checkpoint_db = connection
+        return self._checkpoint_db
 
     async def get(self, kind: str, id: str):
         row = await self.fetchone(
@@ -279,17 +305,19 @@ class ResearchStore:
         """Update a durable collector checkpoint with one short atomic write.
 
         Reading the previous failure count outside the transaction can lose a
-        concurrent success. Quote tasks use their isolated connection and a
-        short SQLite busy timeout; contention is retried outside the lock.
+        concurrent success. The private connection keeps unrelated reads off
+        this transaction's queue; contention is retried outside the lock.
         """
         ident = f'{domain}:{key}'
+        connection = await self._checkpoint_connection()
         async def write():
-            async with self._guard_write():
-                await self.db.execute('BEGIN IMMEDIATE')
-                row = await self.fetchone(
+            async with self._guard_write(connection):
+                await connection.execute('BEGIN IMMEDIATE')
+                rows = await connection.execute_fetchall(
                     'SELECT body FROM facts WHERE kind=? AND id=?',
                     (self.key('collector-job'), ident),
                 )
+                row = rows[0] if rows else None
                 previous = json.loads(row[0]) if row else {}
                 failures = 0 if success else min(10, (previous.get('failureCount') or 0) + 1)
                 value = {**previous, 'id': ident, 'domain': domain, 'key': key,
@@ -298,11 +326,11 @@ class ResearchStore:
                          'failureCount': failures, 'reason': reason,
                          'nextRetryAt': 0 if success else now + (
                              retry_ms or min(3_600_000, 60_000 * 2 ** failures))}
-                await self.db.execute(
+                await connection.execute(
                     'INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body',
                     (self.key('collector-job'), ident, json.dumps(value, ensure_ascii=False)),
                 )
-                await self.db.commit()
+                await connection.commit()
                 return value
         return await retry_busy_write(write)
 

@@ -133,13 +133,15 @@ class QuoteWriteDedupTests(unittest.IsolatedAsyncioTestCase):
             first = await live_quotes._fetch_entries(entries, 'base-stocks')
             initial_outbox = await self.outbox_count()
             initial_changes = self.store.db.total_changes
+            initial_checkpoint_changes = self.store._checkpoint_db.total_changes
             clock[0] += 300_000
             second = await live_quotes._fetch_entries(entries, 'base-stocks')
 
         self.assertEqual((first['requested'], first['accepted'], first['updated']), (6, 300, 300))
         self.assertEqual((second['requested'], second['accepted'], second['updated']), (6, 300, 0))
         self.assertEqual(await self.outbox_count(), initial_outbox)
-        self.assertEqual(self.store.db.total_changes - initial_changes, 300)
+        self.assertEqual(self.store.db.total_changes - initial_changes, 0)
+        self.assertEqual(self.store._checkpoint_db.total_changes - initial_checkpoint_changes, 300)
         self.assertEqual(broadcast.call_count, 300)
         self.assertEqual(post.await_count, 12)
         self.assertEqual((await self.store.get('collector-job', 'quote:' + tokens[0]))['lastSuccessAt'],
