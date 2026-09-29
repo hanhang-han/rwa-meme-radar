@@ -6,7 +6,7 @@
 
 脚本只打包 `server-py/app/state.py`、`server-py/app/theme_map.py` 和 V2 静态文件。远程会先校验当前 `state.py` 是否与 Git 标签 `dashboard-before-v2-20260929` 完全一致，并校验 Python 依赖文件、API 就绪状态、PM2 服务和实际生效的 Nginx 配置。如果线上代码或站点配置已有额外改动，它会停止，不覆盖未知版本。首次发布只会向 `cliperx.com` 唯一的 HTTPS server 块插入一个 V2 配置 include；发现已有 `/dashboardv2` 路由则停止，后续 V2 迭代需要单独审核更新方案。
 
-切换时只短暂停止并重启 `pyradar-projection` 与 `pyradar`，不停止 `pyradar-worker`。V2 的 Nginx include 固定在 `/opt/memedashboard/nginx/dashboardv2.conf`；若该文件已存在，首次发布会停止，绝不覆盖。脚本保存原 `state.py`、可选旧 `theme_map.py`、旧 V2 静态目录和原 Nginx 站点文件到 `.releases/dashboard-v2-before-*`，然后先测试 Nginx 配置再平滑重载。发布后核验：本机和公网 API 就绪；公网 V2 HTML 与新包哈希一致且脚本资源可读；公网完整数据含 `themeMap` 与 `importantChanges`；旧 `/dashboard/api/health/ready` 仍可访问；采集进程 PID 未变化。任一步失败会尝试自动恢复上述文件并重启 API/投影，明确报告回滚是否完整。实际完成与否必须以脚本最终输出和公网浏览器验收为准。
+切换时只短暂停止并重启 `pyradar-projection` 与 `pyradar`，不停止 `pyradar-worker`。V2 的 Nginx include 固定在 `/opt/memedashboard/nginx/dashboardv2.conf`；若该文件已存在，首次发布会停止，绝不覆盖。脚本保存原 `state.py`、可选旧 `theme_map.py`、旧 V2 静态目录和原 Nginx 站点文件到 `.releases/dashboard-v2-before-*`，然后先测试 Nginx 配置再平滑重载。发布后核验：本机和公网 API 就绪；公网 V2 HTML 与新包哈希一致且脚本资源可读；服务器本机完整数据及公网概览数据均含 `themeMap` 与 `importantChanges`；旧 `/dashboard/api/health/ready` 仍可访问；采集进程 PID 未变化。任一步失败会尝试自动恢复上述文件并重启 API/投影，明确报告回滚是否完整。实际完成与否必须以脚本最终输出和公网浏览器验收为准。
 
 如需**发布成功后手动退回旧站点**，先读取本次脚本打印的 `Rollback directory`，再在服务器上执行以下步骤。`BACKUP` 应换成本次发布对应的精确目录；不要使用数据库旧副本覆盖当前研究库。
 

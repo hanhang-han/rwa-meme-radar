@@ -313,7 +313,7 @@ PY
 )
 curl -fsS --max-time 20 "https://cliperx.com$ASSET_PATH" -o /dev/null
 curl -fsS --max-time 15 https://cliperx.com/dashboardv2/api/health/ready -o /dev/null
-curl -fsS --max-time 30 'https://cliperx.com/dashboardv2/api/dashboard?view=full' \
+curl -fsS --max-time 30 'https://cliperx.com/dashboardv2/api/dashboard?view=overview' \
   -o "$STAGING/public-dashboard.json"
 server-py/.venv/bin/python - "$STAGING/public-dashboard.json" <<'PY'
 import json, sys
