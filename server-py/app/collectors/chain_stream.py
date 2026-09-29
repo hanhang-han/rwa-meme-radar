@@ -175,11 +175,13 @@ class ChainPoolStream:
         self.pools = {}
         self.assets = {}
         self.relations = {}
+        self.market_registry = {}
         self.headers = OrderedDict()
         self.live_header_lookups = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
         self.live_log_durations_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
         self.live_trade_lock_wait_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
         self.live_trade_begin_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
+        self.live_trade_transaction_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
         self.decimals = {}
         self.queue = asyncio.Queue(maxsize=4096)
         self.retry_event = None
@@ -348,8 +350,11 @@ class ChainPoolStream:
         for pool in self.pools.values():
             for token in self.bases(pool):
                 market = self.market(pool, token)
-                if registry.get(market.storage) != market.record():
-                    await self.s.put("market-registry", market.storage, market.record())
+                record = market.record()
+                if registry.get(market.storage) != record:
+                    await self.s.put("market-registry", market.storage, record)
+                    registry[market.storage] = record
+        self.market_registry = registry
         return changed
 
     async def refresh_watches(self):
@@ -572,6 +577,7 @@ class ChainPoolStream:
         durations = sorted(self.live_log_durations_ms)
         trade_lock_waits = sorted(self.live_trade_lock_wait_ms)
         trade_begins = sorted(self.live_trade_begin_ms)
+        trade_transactions = sorted(self.live_trade_transaction_ms)
         await telemetry.put("chain-stream", "pools", {
             "chainId": self.chain, "provider": "Chain RPC", "status": self.status,
             "poolCount": len(self.pools), "decodedEvents": self.processed,
@@ -591,6 +597,9 @@ class ChainPoolStream:
                                        if trade_lock_waits else None),
             "liveTradeBeginP95Ms": (trade_begins[math.ceil(.95 * len(trade_begins)) - 1]
                                     if trade_begins else None),
+            "liveTradeTransactionP95Ms": (
+                trade_transactions[math.ceil(.95 * len(trade_transactions)) - 1]
+                if trade_transactions else None),
             "replayPausedForLive": self.replay_under_pressure(),
             "rateLimitedAt": self.rpc_rate_limited_at, "cooldownUntil": self.rpc_cooldown_wall,
             "rpcIntervalMs": round(self.rpc_interval * 1000),
@@ -932,7 +941,13 @@ class ChainPoolStream:
                 if not insert.rowcount:
                     await db.rollback()
                     return False
-                fact_rows = [self._fact_params("market-registry", market.storage, market.record())]
+                market_record = market.record()
+                # Catalogue persists known definitions before subscription.
+                # The same registry JSON need not be rewritten for each trade.
+                # Cache only after a successful atomic trade commit below.
+                registry_changed = self.market_registry.get(market.storage) != market_record
+                fact_rows = ([self._fact_params("market-registry", market.storage, market_record)]
+                             if registry_changed else [])
                 candle_rows = []
                 events = []
                 bars = self.bars(market)
@@ -1009,6 +1024,11 @@ class ChainPoolStream:
                 events.append(("trade", body))
                 await enqueue_events(db, events)
                 await db.commit()
+                if registry_changed:
+                    self.market_registry[market.storage] = market_record
+                if _live_log_collector.get() is self:
+                    self.live_trade_transaction_ms.append(round(
+                        (time.perf_counter() - begin_started) * 1000, 1))
                 return True
             except BaseException:
                 await db.rollback()

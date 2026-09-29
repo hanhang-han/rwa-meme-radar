@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -913,6 +914,19 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(row[0] == "trade" for row in frames), 2)
         self.assertEqual(sum(row[0] == "candle" for row in frames), 6)
 
+    async def test_market_registry_is_written_only_when_definition_changes(self):
+        self.assertTrue(await self.collector.commit_trade(self.market, self.trade('registry-first', 2)))
+        self.assertEqual(self.collector.market_registry[self.market.storage], self.market.record())
+        with patch.object(self.collector, '_fact_params', wraps=self.collector._fact_params) as encode:
+            self.assertTrue(await self.collector.commit_trade(
+                self.market, self.trade('registry-second', 3, 1)))
+        self.assertFalse(any(call.args[0] == 'market-registry' for call in encode.call_args_list))
+        changed = replace(self.market, base_symbol='UPDATED')
+        with patch.object(self.collector, '_fact_params', wraps=self.collector._fact_params) as encode:
+            self.assertTrue(await self.collector.commit_trade(changed, self.trade('registry-third', 4, 2)))
+        self.assertEqual(sum(call.args[0] == 'market-registry' for call in encode.call_args_list), 1)
+        self.assertEqual(await self.store.get('market-registry', changed.storage), changed.record())
+
     async def test_trade_commit_uses_dedicated_connection_while_shared_read_is_busy(self):
         with patch('app.collectors.chain_stream.store', new=AsyncMock(return_value=self.store)):
             await self.collector.init()
@@ -1139,6 +1153,7 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM candles'))[0], 0)
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0], 0)
         self.assertIsNone(await self.store.get('market-registry', self.market.storage))
+        self.assertNotIn(self.market.storage, self.collector.market_registry)
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM facts'))[0], 0)
 
         await self.store.db.execute('DROP TRIGGER fail_chain_candle')
