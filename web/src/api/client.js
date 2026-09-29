@@ -1,9 +1,9 @@
-// Base path auto-detect: cliperx serves this app under /dashboard/ (the
-// legacy nginx sub_filter trick), any other host uses the root path.
-export const API_BASE =
-  typeof location !== 'undefined' && location.pathname.includes('/dashboard/')
-    ? '/dashboard/api/'
-    : '/api/';
+// Keep the API on the same mounted dashboard path as the current app. The
+// original and v2 sites can therefore run side by side on one host.
+const mountedDashboard = typeof location === 'undefined'
+  ? null
+  : location.pathname.match(/^\/(dashboardv2|dashboard)(?:\/|$)/);
+export const API_BASE = mountedDashboard ? `/${mountedDashboard[1]}/api/` : '/api/';
 
 export async function getJSON(path, timeoutMs = 25000) {
   const controller = new AbortController();

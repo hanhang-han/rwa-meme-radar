@@ -578,6 +578,9 @@ class DashboardData:
                     "calculatedAt": packet.get("calculatedAt"),
                 }
         payload_relations = [{**r, "priceComparison": comparison_pairs.get((str(r.get("chainId")), r.get("stock"), r.get("pool")))} for r in relations]
+        from .theme_map import build_theme_map, build_important_changes
+        theme_map = build_theme_map(assets, relations, int(now), stock_tokens)
+        important_changes = build_important_changes(self.signals, relations, assets, int(now))
         return {
             "now": now,
             "unified": {
@@ -587,6 +590,8 @@ class DashboardData:
                 "stockTokens": payload_stocks,
                 "relations": payload_relations,
                 "signals": signals,
+                "themeMap": theme_map,
+                "importantChanges": important_changes,
                 "groups": self.groups(assets) if include_groups else [],
                 "quality": quality,
                 "metrics": metrics,

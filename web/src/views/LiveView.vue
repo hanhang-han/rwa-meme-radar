@@ -2,16 +2,20 @@
   <div>
     <div class="hero x-hero">
       <div class="v2-hero-copy">
-        <h2>{{ tr('美股相关 Meme，用链上配对池核验', 'Memes linked to US stocks, verified by onchain pools') }}</h2>
+        <h2>{{ tr('探索股票主题与链上资产', 'Explore stock themes and onchain assets') }}</h2>
+        <p>{{ tr('已核验配对与未核验名称线索分层展示，行情和证据均可追溯。', 'Verified pairs and unverified name clues are shown separately, with traceable market data and evidence.') }}</p>
       </div>
     </div>
 
     <div class="kpis">
-      <KpiCard kpi-key="actionableAssets" :title="tr('活跃 Meme', 'Active memes')" :value="num(scopeMetrics.active)" :note="deltaNote('active')" href="#/meme" />
+      <KpiCard kpi-key="actionableAssets" :title="tr('数据达标的活跃 Meme', 'Qualified active memes')" :value="num(scopeMetrics.active)" :note="deltaNote('active') || tr('需有新鲜报价与资产总流动性', 'Requires a fresh quote and asset-wide liquidity')" href="#/meme" />
       <KpiCard kpi-key="verifiedPools" :title="tr('股票配对池', 'Stock pairs')" :value="num(scopeMetrics.pools)" :note="deltaNote('pools')" href="#/pair" />
       <KpiCard kpi-key="pairedLiquidityUsd" :title="tr('配对池总流动性', 'Pair liquidity')" :value="usd(scopeMetrics.liquidity)" :note="deltaNote('liquidity')" />
       <KpiCard kpi-key="newRelations24h" :title="tr('24h 新增配对', 'New pairs (24h)')" :value="num(scopeMetrics.newPairs)" :note="scopeMetrics.newPairs == null ? tr('新池创建时间待采集','Pool creation time pending') : deltaNote('newPairs')" href="#/events" />
     </div>
+
+    <ThemeMarketMap :theme-map="themeMap" :name-clues="nameClues" :stock-tokens="store.stockTokens" :scope="scope" :loading="!fullSnapshotReady" />
+    <ImportantChanges :changes="importantChanges" :observations="feed.relationships" :unified="store.snapshot?.unified" :assets="store.assets" :scope="scope" :loading="!fullSnapshotReady" />
 
     <section class="panel x-ai">
       <div class="panel-head"><h2>{{ tr('今日异动', 'Today') }}</h2><time class="hint">{{ briefing?.at ? clockTime(briefing.at) : '—' }}</time></div>
@@ -100,6 +104,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import KpiCard from '../components/KpiCard.vue';
+import ThemeMarketMap from '../components/ThemeMarketMap.vue';
+import ImportantChanges from '../components/ImportantChanges.vue';
 import { useDashboardStore } from '../stores/dashboard';
 import { useFeedStore } from '../stores/feed';
 import { getBriefing } from '../api/client';
@@ -109,12 +115,25 @@ import { chainScope, inChainScope } from '../utils/chain-scope';
 import { discoveryTime, filteredTrades, metricsForScope, topStockCards, tradeDisplayAmount } from '../utils/home-model';
 import { relationMatchesAsset } from '../utils/relations';
 import { normalizeEventAddress } from '../utils/event-records';
+import { buildNameClues, fallbackRelationEvents, fallbackThemeMap } from '../utils/theme-map-model';
 
 const route = useRoute();
 const store = useDashboardStore();
 const feed = useFeedStore();
 const { lang } = useI18n();
 const scope = computed(() => chainScope(route.query));
+const fullSnapshotReady = computed(() => !!store.snapshot?.unified && store.snapshot.unified.snapshotScope !== 'overview');
+const themeMap = computed(() => {
+  if (!fullSnapshotReady.value) return null;
+  const unified = store.snapshot.unified;
+  return unified.themeMap ?? fallbackThemeMap(unified);
+});
+const nameClues = computed(() => fullSnapshotReady.value ? buildNameClues(store.snapshot.unified,scope.value) : []);
+const importantChanges = computed(() => {
+  if (!fullSnapshotReady.value) return null;
+  const unified = store.snapshot.unified;
+  return unified.importantChanges ?? fallbackRelationEvents(feed.relationships, unified);
+});
 const scopeMetrics = computed(() => metricsForScope(store.snapshot?.unified, scope.value));
 const hotStocks = computed(() => topStockCards(store.stockTokens, store.relations, store.assets, scope.value));
 const minTrade = ref(100);

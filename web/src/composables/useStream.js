@@ -1,6 +1,6 @@
-// SSE client over fetch-streaming: cliperx nginx sub_filter rewrites
-// fetch('/api/...') literals but never EventSource URLs, so the stream is
-// read manually. Polling remains the fallback whenever the stream is down.
+// SSE client over fetch-streaming. API_BASE follows the mounted dashboard
+// path, including /dashboardv2/, so the old and new sites use their own
+// reverse-proxy API routes. Polling remains the fallback on disconnect.
 //
 // Events are matched by chainId + token (never token alone). hello/heartbeat
 // only update connection state; quote freshness comes from market times.
