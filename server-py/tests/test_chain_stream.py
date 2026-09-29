@@ -155,6 +155,127 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.collector.process_log.assert_awaited_once_with({**log, '_receivedAt': self.at})
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 51)
 
+    async def test_high_live_queue_pauses_both_replay_lanes_and_preserves_gap(self):
+        await self.store.put('chain-stream-cursor', 'pools', {
+            'block': 50, 'hash': '0x32', 'coverageFrom': 40})
+        await self.store.put('chain-stream-cursor', 'pools-live', {
+            'block': 900, 'hash': '0x384', 'coverageFrom': 800})
+        self.collector.pools = {POOL: {}}
+        self.collector.latest_head = 1000
+        self.collector.queue = asyncio.Queue(maxsize=8)
+        for index in range(4):
+            self.collector.queue.put_nowait(index)
+        self.collector.rpc = AsyncMock()
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            paused = await self.collector.reconcile_step()
+            await self.collector.status_fact(force=True)
+        self.assertFalse(paused['caughtUp'])
+        self.collector.rpc.assert_not_awaited()
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 900)
+        status = await self.store.get('chain-stream', 'pools')
+        self.assertTrue(status['replayPausedForLive'])
+        self.assertEqual(status['historicalGapBlocks'], 749)
+
+        self.collector.queue.get_nowait()  # Three pending: remain paused.
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            await self.collector.reconcile_step()
+        self.collector.rpc.assert_not_awaited()
+        self.collector.queue.get_nowait()  # Drain below the resume threshold.
+        self.collector.queue.get_nowait()
+        self.collector.queue.get_nowait()
+
+        ranges = []
+        async def rpc(method, params):
+            if method == 'eth_getLogs':
+                ranges.append((int(params[0]['fromBlock'], 16), int(params[0]['toBlock'], 16)))
+                return []
+            block = 1000 if params[0] == 'latest' else int(params[0], 16)
+            return {'number': hex(block), 'hash': hex(block), 'timestamp': hex(self.at // 1000)}
+
+        self.collector.rpc = rpc
+        self.collector.retract_orphans = AsyncMock()
+        self.collector.last_prune = self.at
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            await self.collector.reconcile_step()
+            await self.collector.status_fact(force=True)
+        self.assertEqual(ranges, [(901, 1000), (51, 150)])
+        self.assertFalse((await self.store.get('chain-stream', 'pools'))['replayPausedForLive'])
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 1000)
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 150)
+
+    async def test_queue_filling_during_replay_discards_partial_range(self):
+        await self.store.put('chain-stream-cursor', 'pools', {'block': 50, 'hash': '0x32'})
+        self.collector.pools = {f'0x{i:040x}': {} for i in range(65)}
+        self.collector.queue = asyncio.Queue(maxsize=8)
+        self.collector.last_prune = self.at
+        pages = []
+
+        async def rpc(method, params):
+            if method == 'eth_getLogs':
+                pages.append(params[0]['address'])
+                for index in range(4):
+                    self.collector.queue.put_nowait(index)
+                return []
+            block = 51 if params[0] == 'latest' else int(params[0], 16)
+            return {'number': hex(block), 'hash': hex(block), 'timestamp': hex(self.at // 1000)}
+
+        self.collector.rpc = rpc
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            result = await self.collector.catch_up()
+        self.assertFalse(result['caughtUp'])
+        self.assertEqual(len(pages), 1)
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
+        self.assertEqual((await self.store.get('chain-stream-scan', 'pools'))['pausedForLiveAt'], self.at)
+
+    async def test_partial_replay_resumes_without_duplicate_trade_or_candle(self):
+        first = await self.prepare_logs()
+        second = {**first, 'transactionHash': '0xdef2', 'logIndex': '0x2'}
+        await self.store.put('chain-stream-cursor', 'pools', {
+            'block': 199, 'hash': hex(199), 'coverageFrom': 190})
+        self.collector.queue = asyncio.Queue(maxsize=8)
+        self.collector.last_prune = self.at
+
+        async def rpc(method, params):
+            if method == 'eth_getLogs':
+                return [first, second]
+            block = 200 if params[0] == 'latest' else int(params[0], 16)
+            block_hash = '0xabc' if block == 200 else hex(block)
+            return {'number': hex(block), 'hash': block_hash,
+                    'timestamp': hex(self.at // 1000)}
+
+        self.collector.rpc = rpc
+        original = self.collector.process_log
+        calls = 0
+
+        async def fill_after_first(log):
+            nonlocal calls
+            await original(log)
+            calls += 1
+            if calls == 1:
+                for index in range(4):
+                    self.collector.queue.put_nowait(index)
+
+        self.collector.process_log = fill_after_first
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            paused = await self.collector.catch_up()
+        self.assertFalse(paused['caughtUp'])
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 199)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
+        while not self.collector.queue.empty():
+            self.collector.queue.get_nowait()
+
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            finished = await self.collector.catch_up()
+        self.assertTrue(finished['caughtUp'])
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 200)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 2)
+        market = self.collector.market(self.collector.pools[POOL], TOKEN0)
+        candle = await self.store.get('market-candle', market.storage + ':1m')
+        self.assertEqual(candle['row']['v'], 4)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0],
+                         2 * (len(self.collector.bars(market)) + 1))
+
     async def test_permanently_nonempty_live_queue_allows_bounded_recent_replay(self):
         await self.store.put('chain-stream-cursor', 'pools', {'block': 50, 'hash': '0x32'})
         self.collector.pools = {POOL: {}}
@@ -356,25 +477,20 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(meta['lastSourceEventAt'], self.at)
 
     async def test_failed_chain_candle_rolls_back_trade_and_all_events(self):
-        original = self.collector._write_candle
-        writes = 0
-
-        async def fail_second_bar(*args):
-            nonlocal writes
-            writes += 1
-            if writes == 2:
-                raise RuntimeError('failed-candle')
-            await original(*args)
-
-        self.collector._write_candle = fail_second_bar
-        with self.assertRaisesRegex(RuntimeError, 'failed-candle'):
+        # Fail after the first bar in the candle batch has been written.
+        await self.store.db.execute("""CREATE TRIGGER fail_chain_candle BEFORE INSERT ON candles
+            WHEN NEW.bar='1m' BEGIN SELECT RAISE(ABORT, 'failed-candle'); END""")
+        await self.store.db.commit()
+        with self.assertRaisesRegex(Exception, 'failed-candle'):
             await self.collector.commit_trade(self.market, self.trade('rollback', 2))
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 0)
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM candles'))[0], 0)
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0], 0)
         self.assertIsNone(await self.store.get('market-registry', self.market.storage))
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM facts'))[0], 0)
 
-        self.collector._write_candle = original
+        await self.store.db.execute('DROP TRIGGER fail_chain_candle')
+        await self.store.db.commit()
         self.assertTrue(await self.collector.commit_trade(self.market, self.trade('rollback', 2)))
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0],
                          len(self.collector.bars(self.market)) + 1)
@@ -397,6 +513,48 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         await self.collector.commit_trade(self.market, self.trade("old", 1, 0))
         current = await self.store.get("market-candle", self.market.storage + ":1m")
         self.assertEqual(current["row"]["t"], self.at + 120_000)
+
+    async def test_rebuilt_historical_and_current_candles_ignore_duplicate_replay(self):
+        def priced(ident, size, offset, price):
+            return {**self.trade(ident, size, offset),
+                    'price': price, 'quoteQuantity': price * size}
+
+        for trade in (priced('late', 2, 120_040, 5),
+                      priced('early', 1, 120_010, 2),
+                      priced('history', 3, 0, 3)):
+            self.assertTrue(await self.collector.commit_trade(self.market, trade))
+
+        # Missing accumulators force an ordered rebuild from persisted trades.
+        for bar, opened in (('1m', self.at + 120_000),
+                            ('1H', self.at - self.at % 3_600_000)):
+            await self.store.db.execute('DELETE FROM facts WHERE kind=? AND id=?',
+                (self.store.key('pool-candle-acc'),
+                 f'{self.market.storage}:{bar}:{opened}'))
+        await self.store.db.commit()
+        middle = priced('middle', 4, 120_020, 4)
+        self.assertTrue(await self.collector.commit_trade(self.market, middle))
+
+        rows = await self.store.fetchall(
+            'SELECT bar,openTime,open,high,low,close,volume,volumeUsd FROM candles WHERE asset=? ORDER BY bar,openTime',
+            (self.store.key(self.market.storage),))
+        candles = {(bar, opened): (o, h, l, c, v, vu)
+                   for bar, opened, o, h, l, c, v, vu in rows}
+        self.assertEqual(candles[('1m', self.at)], (3, 3, 3, 3, 3, 9))
+        self.assertEqual(candles[('1m', self.at + 120_000)], (2, 5, 2, 5, 7, 28))
+        self.assertEqual(candles[('1H', self.at - self.at % 3_600_000)],
+                         (3, 5, 2, 5, 10, 37))
+        current = await self.store.get('market-candle', self.market.storage + ':1m')
+        self.assertEqual((current['row']['t'], current['row']['o'], current['row']['v']),
+                         (self.at + 120_000, 2, 7))
+
+        events_before = (await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0]
+        self.assertFalse(await self.collector.commit_trade(self.market, middle))
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 4)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0],
+                         events_before)
+        self.assertEqual(await self.store.fetchall(
+            'SELECT bar,openTime,open,high,low,close,volume,volumeUsd FROM candles WHERE asset=? ORDER BY bar,openTime',
+            (self.store.key(self.market.storage),)), rows)
 
     async def test_failed_range_does_not_advance_checkpoint(self):
         self.collector.pools = {f"0x{i:040x}": {} for i in range(65)}
@@ -560,6 +718,60 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ranges, [(101, 200), (201, 300), (301, 400)])
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 400)
+
+    async def test_distant_recent_lane_restarts_at_tip_and_preserves_historical_gap(self):
+        await self.store.put('chain-stream-cursor', 'pools', {
+            'block': 50, 'hash': '0x32', 'coverageFrom': 40})
+        await self.store.put('chain-stream-cursor', 'pools-live', {
+            'block': 100, 'hash': '0x64', 'coverageFrom': 70})
+        self.collector.pools = {POOL: {}}
+        self.collector.last_prune = self.at
+        ranges = []
+
+        async def rpc(method, params):
+            if method == 'eth_getLogs':
+                ranges.append((int(params[0]['fromBlock'], 16), int(params[0]['toBlock'], 16)))
+                return []
+            block = 10_000 if params[0] == 'latest' else int(params[0], 16)
+            return {'number': hex(block), 'hash': hex(block), 'timestamp': hex(self.at // 1000)}
+
+        self.collector.rpc = rpc
+        self.collector.retract_orphans = AsyncMock()
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            await self.collector.reconcile_step()
+            await self.collector.status_fact(force=True)
+        recent = await self.store.get('chain-stream-cursor', 'pools-live')
+        historical = await self.store.get('chain-stream-cursor', 'pools')
+        status = await self.store.get('chain-stream', 'pools')
+        self.assertEqual(ranges, [(9701, 9800), (9801, 9900), (9901, 10_000), (51, 150)])
+        self.assertEqual((recent['block'], recent['coverageFrom']), (10_000, 9701))
+        self.assertEqual(recent['rebasedFromBlock'], 100)
+        self.assertEqual(historical['block'], 150)
+        self.assertEqual(status['nearTipLagBlocks'], 0)
+        self.assertEqual(status['historicalGapBlocks'], 9550)
+        self.assertEqual(status['nearTipRebasedFromBlock'], 100)
+
+    async def test_recent_rebase_failure_does_not_certify_skipped_blocks(self):
+        await self.store.put('chain-stream-cursor', 'pools', {'block': 50, 'hash': '0x32'})
+        await self.store.put('chain-stream-cursor', 'pools-live', {
+            'block': 100, 'hash': '0x64', 'coverageFrom': 70})
+        self.collector.pools = {POOL: {}}
+
+        async def rpc(method, params):
+            if method == 'eth_getLogs':
+                raise RuntimeError('recent-provider-unavailable')
+            block = 10_000 if params[0] == 'latest' else int(params[0], 16)
+            return {'number': hex(block), 'hash': hex(block), 'timestamp': hex(self.at // 1000)}
+
+        self.collector.rpc = rpc
+        with self.assertRaisesRegex(RuntimeError, 'recent-provider-unavailable'):
+            await self.collector.reconcile_step()
+        recent = await self.store.get('chain-stream-cursor', 'pools-live')
+        historical = await self.store.get('chain-stream-cursor', 'pools')
+        self.assertEqual((recent['block'], recent['coverageFrom']), (9700, 9701))
+        self.assertEqual(historical['block'], 50)
+        self.assertEqual((await self.store.get('chain-stream-scan', 'pools-live'))['lastError'],
+                         'RuntimeError:recent-provider-unavailable')
 
     async def test_quiet_elapsed_candle_closes_without_invented_trades(self):
         with patch('app.collectors.chain_stream.now_ms',return_value=self.at+1000):

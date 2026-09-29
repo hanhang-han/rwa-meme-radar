@@ -60,6 +60,7 @@ def evidence_digest(r: dict) -> bytes:
 
 _w3: Web3 | None = None
 _cache: tuple[float, list] | None = None
+_read_lock = asyncio.Lock()
 
 
 def w3() -> Web3:
@@ -79,19 +80,24 @@ async def onchain_pairs() -> list:
     if _cache and time.time() - _cache[0] < 60:
         return _cache[1]
 
-    def read():
-        c = w3().eth.contract(address=Web3.to_checksum_address(contract), abi=ABI)
-        return [
-            {
-                "meme": p[0].lower(), "stock": p[1].lower(), "ticker": p[2],
-                "evidence": Web3.to_hex(p[3]), "registeredAt": p[4],
-            }
-            for p in c.functions.all().call()
-        ]
+    async with _read_lock:
+        # All callers of a cold cache share the first RPC result.
+        if _cache and time.time() - _cache[0] < 60:
+            return _cache[1]
 
-    rows = await asyncio.wait_for(asyncio.to_thread(read), 30)
-    _cache = (time.time(), rows)
-    return rows
+        def read():
+            c = w3().eth.contract(address=Web3.to_checksum_address(contract), abi=ABI)
+            return [
+                {
+                    "meme": p[0].lower(), "stock": p[1].lower(), "ticker": p[2],
+                    "evidence": Web3.to_hex(p[3]), "registeredAt": p[4],
+                }
+                for p in c.functions.all().call()
+            ]
+
+        rows = await asyncio.wait_for(asyncio.to_thread(read), 30)
+        _cache = (time.time(), rows)
+        return rows
 
 
 async def registry_info(relations: list) -> dict:

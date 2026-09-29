@@ -12,12 +12,12 @@
       </template>
       <template v-else>—</template>
     </td>
-    <td data-field="price" :class="{ 'kpi-flash':flashKeys.has('price') }"><LiveNumber :value="a.price" :currency="a.priceCurrency ?? ''" format="price" /></td>
-    <td :class="Number(a.change24h) > 0 ? 'up' : Number(a.change24h) < 0 ? 'down' : ''"><LiveNumber :value="a.change24h" format="percent" /></td>
-    <td data-field="volume24h" :class="{ 'kpi-flash':flashKeys.has('volume24h') }"><LiveNumber :value="a.volume24h" :currency="a.volumeCurrency ?? a.priceCurrency ?? ''" /></td>
-    <td data-field="totalLiquidityUsd" :class="{ 'kpi-flash':flashKeys.has('totalLiquidityUsd') }"><LiveNumber :value="a.totalLiquidityUsd" /></td>
-    <td>{{ ratio == null ? '—' : `${Math.round(ratio)}x` }}</td>
-    <td><LiveNumber :value="a.holders" format="number" /></td>
+    <td data-field="price" :class="{ 'kpi-flash':flashKeys.has('price') }"><LiveNumber :value="a.price" :currency="a.priceCurrency ?? ''" format="price" /><small class="meme-field-meta" :class="{ 'is-historical':fieldState('price')==='historical' }" :title="fieldTitle('price')">{{ fieldSummary('price') }}</small></td>
+    <td :class="Number(a.change24h) > 0 ? 'up' : Number(a.change24h) < 0 ? 'down' : ''"><LiveNumber :value="a.change24h" format="percent" /><small class="meme-field-meta" :class="{ 'is-historical':fieldState('change24h')==='historical' }" :title="fieldTitle('change24h')">{{ fieldSummary('change24h') }}</small></td>
+    <td data-field="volume24h" :class="{ 'kpi-flash':flashKeys.has('volume24h') }"><LiveNumber :value="a.volume24h" :currency="a.volumeCurrency ?? a.priceCurrency ?? ''" /><small class="meme-field-meta" :class="{ 'is-historical':fieldState('volume24h')==='historical' }" :title="fieldTitle('volume24h')">{{ fieldSummary('volume24h') }}</small></td>
+    <td data-field="totalLiquidityUsd" :class="{ 'kpi-flash':flashKeys.has('totalLiquidityUsd') }"><LiveNumber :value="a.totalLiquidityUsd" /><small class="meme-field-meta" :class="{ 'is-historical':fieldState('totalLiquidityUsd')==='historical' }" :title="fieldTitle('totalLiquidityUsd')">{{ fieldSummary('totalLiquidityUsd') }}</small></td>
+    <td>{{ ratio == null ? '—' : `${Math.round(ratio)}x` }}<small v-if="ratio == null" class="meme-field-meta" :title="tr('需要相同美元口径且处于有效时段的资产 24h 成交额与总流动性', 'Requires comparable, fresh USD asset-wide volume and total liquidity')">{{ tr('证据不足', 'Insufficient evidence') }}</small></td>
+    <td><LiveNumber :value="a.holders" format="number" /><small class="meme-field-meta" :title="fieldTitle('holders')">{{ fieldSummary('holders') }}</small></td>
     <td><RiskBadge :asset="a" /></td>
     <td class="meme-updated" :title="date(observedAt)">{{ age(observedAt) }}</td>
   </tr>
@@ -45,9 +45,45 @@ const relOf=computed(()=>props.relations.filter(r=>relationMatchesAsset(r,props.
 const ratio=computed(()=>volumeLiquidityRatio(props.a));
 const observedAt=computed(()=>props.a.fieldTimes?.price ?? props.a.quoteAt ?? props.a.updatedAt);
 const isStale=computed(()=>!observedAt.value || Date.now()-Number(observedAt.value)>900000);
+function fieldAt(field) {
+  if (field === 'totalLiquidityUsd') return props.a.totalLiquidityAt ?? props.a.fieldTimes?.totalLiquidityUsd;
+  if (field === 'price') return props.a.fieldTimes?.price ?? props.a.quoteAt;
+  return props.a.fieldTimes?.[field] ?? null;
+}
+function fieldSource(field) {
+  return props.a.fieldSources?.[field] ?? (field === 'price' ? props.a.provider : null) ?? null;
+}
+function fieldState(field) {
+  const value=props.a[field];
+  if (value==null || !Number.isFinite(Number(value))) return 'missing';
+  const at=Number(fieldAt(field));
+  const now=Date.now();
+  if (!Number.isFinite(at) || at<=0 || at>now+1000) return 'unknown';
+  if (field === 'totalLiquidityUsd' && props.a.totalLiquidityStatus === 'stale') return 'historical';
+  if (field === 'totalLiquidityUsd' && props.a.totalLiquidityStatus !== 'current') return 'unverified';
+  const window=field === 'totalLiquidityUsd' ? 1800000 : 900000;
+  return now-at>window ? 'historical' : 'current';
+}
+function fieldSummary(field) {
+  const state=fieldState(field);
+  if (state==='missing') return tr('待采集', 'Not collected');
+  const source=fieldSource(field) ?? tr('来源待核实', 'Source unverified');
+  const status=state==='historical' ? `${tr('历史值', 'Historical')} · ${age(fieldAt(field))}`
+    : state==='unverified' ? tr('证据待核实', 'Evidence unverified')
+    : state==='unknown' ? tr('时间待核实', 'Time unverified') : age(fieldAt(field));
+  return `${source} · ${status}`;
+}
+function fieldTitle(field) {
+  return `${fieldSource(field) ?? tr('来源待核实', 'Source unverified')} · ${date(fieldAt(field))}`;
+}
 const copied=ref(false);
 let copyTimer;
 async function copyAddress() { try { await navigator.clipboard.writeText(props.a.token); copied.value=true; clearTimeout(copyTimer); copyTimer=setTimeout(()=>copied.value=false,1500); } catch {} }
 const flashKeys=reactive(new Set());
 watchEffect(()=>{ for(const field of ['price','volume24h','totalLiquidityUsd']) { const key=`${props.a.chainId}:${props.a.token}:${field}`; const value=props.a[field]; if(props.store.diffCells(key,String(value??''))&&value!=null){flashKeys.add(field);setTimeout(()=>flashKeys.delete(field),1300);} } });
 </script>
+
+<style scoped>
+.meme-field-meta { display:block; margin-top:3px; color:var(--muted); font-size:10px; font-weight:400; white-space:nowrap; }
+.meme-field-meta.is-historical { color:var(--accent); }
+</style>

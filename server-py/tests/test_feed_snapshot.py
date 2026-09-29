@@ -1,11 +1,27 @@
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.api.misc import get_feed
+from app.realtime_projection import _feed_snapshot
 
 
 class FeedSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_feed_keeps_thirty_recent_signals_for_each_chain(self):
+        signals = [{'id': f'{chain}-{n}', 'chainId': chain, 't': 1000 - n}
+                   for n in range(40) for chain in ('196', '56', '4663')]
+        snapshot = _feed_snapshot(SimpleNamespace(assets=[], relations=[], signals=signals))
+        self.assertEqual(len(snapshot['signals']), 90)
+        read = AsyncMock(return_value=json.dumps(snapshot))
+        scoped = SimpleNamespace(recent_trades=AsyncMock(return_value=[]))
+        with patch('app.api.misc.read_projection_json', read), \
+             patch('app.api.misc.store', AsyncMock(return_value=scoped)), \
+             patch('app.api.misc.market_trades', AsyncMock(return_value=[])):
+            result = await get_feed('56')
+        self.assertEqual([row['id'] for row in result['relationships']],
+                         [f'56-{n}' for n in range(30)])
+
     async def test_shared_assets_preserve_chain_filter_and_market_units(self):
         assets = [
             {'chainId': '196', 'token': 'same', 'symbol': 'MEME', 'kind': 'candidate', 'tradeAt': 100},
@@ -30,13 +46,13 @@ class FeedSnapshotTests(unittest.IsolatedAsyncioTestCase):
                      'venue': 'binance-alpha', 'priceCurrency': 'USDT', 'price': 1.23,
                      'marketId': 'ALPHA_1USDT'}]
 
-        reload = AsyncMock()
-        with patch('app.api.misc.state.reload_if_stale', reload), \
-             patch('app.api.misc.state.DATA', data), \
+        snapshot = _feed_snapshot(data)
+        read = AsyncMock(return_value=json.dumps(snapshot))
+        with patch('app.api.misc.read_projection_json', read), \
              patch('app.api.misc.store', AsyncMock(side_effect=lambda chain: scopes[chain])), \
              patch('app.api.misc.market_trades', AsyncMock(side_effect=market_tape)):
             result = await get_feed()
-        reload.assert_awaited_once()
+        read.assert_awaited_once_with('feed')
         scopes['196'].recent_trades.assert_awaited_once_with('same', 12)
         scopes['56'].recent_trades.assert_not_awaited()
         scopes['4663'].recent_trades.assert_awaited_once_with('other', 12)
@@ -57,8 +73,7 @@ class FeedSnapshotTests(unittest.IsolatedAsyncioTestCase):
         scopes = {chain: SimpleNamespace(scope=chain, recent_trades=AsyncMock(
             side_effect=lambda token, limit: [{'id': token + '-' + str(n), 't': int(token) * 100 + n} for n in range(limit)]))
             for chain in ('196', '56', '4663')}
-        with patch('app.api.misc.state.reload_if_stale', AsyncMock()), \
-             patch('app.api.misc.state.DATA', data), \
+        with patch('app.api.misc.read_projection_json', AsyncMock(return_value=json.dumps(_feed_snapshot(data)))), \
              patch('app.api.misc.store', AsyncMock(side_effect=lambda chain: scopes[chain])), \
              patch('app.api.misc.market_trades', AsyncMock(return_value=[])):
             result = await get_feed()

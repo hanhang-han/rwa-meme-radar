@@ -1,7 +1,7 @@
-import { okxState, extraOkx, refreshOkx } from './okx';
+import { okxState, extraOkx, refreshOkx, restoreOkxCatalogue } from './okx';
 import { robinhoodState } from './robinhood';
 import { binanceState } from './bstocks';
-import { inNetwork, networks, persistStockCatalogue, catalogueSchedule, catalogueCheckpoint, xLayerState, xLayerDetail, networkEvents, groupCandidates } from './xlayer';
+import { inNetwork, networks, xLayerState, xLayerDetail, networkEvents, groupCandidates } from './xlayer';
 import { unifiedFromXLayer } from './unified-state';
 import { dataQuality } from './data-quality';
 import { stockIdentity } from './stock-identity';
@@ -13,25 +13,27 @@ const current=(time:number|null|undefined,now=Date.now(),window=900000)=>!!time&
 const empty=()=>({status:'starting',updatedAt:null,tokens:[],error:null});
 function source(chain:string){return chain==='196'?okxState:extraOkx[chain]??(extraOkx[chain]=empty());}
 let cycle=0;
+const catalogueRetry=new Map<string,{failures:number;nextRetryAt:number}>();
 export async function collectDashboard(){
   startCollection();
   try {
     // Rotate first service for fairness; one shared budget bounds all chains.
     const chains=['196','56','4663'];const offset=cycle++%3;
+    for(const chain of chains)restoreOkxCatalogue(chain);
     const failures:string[]=[];
     for(const chain of [...chains.slice(offset),...chains.slice(0,offset)]){
-      const catalogueDue=!source(chain).updatedAt||Date.now()-source(chain).updatedAt!>6*3600000;
+      const catalogueDue=source(chain).status==='partial'||!!source(chain).error||!source(chain).updatedAt||Date.now()-source(chain).updatedAt!>6*3600000;
       // Node owns catalogue adaptation only. Python owns discovery, quotes,
       // trades and relationship maintenance for every chain.
-      const job=inNetwork(chain,source(chain),catalogueSchedule);
-      if(catalogueDue&&Date.now()>=(job.nextRetryAt??0)){
+      const job=catalogueRetry.get(chain);
+      if(catalogueDue&&Date.now()>=(job?.nextRetryAt??0)){
         await withRequestLane('discovery',1800,()=>withRequestAllowance(24,async()=>refreshOkx(chain)));
         const accepted=source(chain).status==='ready'&&source(chain).tokens.length>0;
         const error=accepted?null:source(chain).error??'No catalogue rows accepted';
-        inNetwork(chain,source(chain),()=>catalogueCheckpoint(accepted,error));
+        if(accepted)catalogueRetry.delete(chain);
+        else{const count=Math.min(10,(job?.failures??0)+1);catalogueRetry.set(chain,{failures:count,nextRetryAt:Date.now()+Math.min(3600000,60000*2**count)});}
         if(error)failures.push(`${chain}: ${error}`);
       }
-      await inNetwork(chain,source(chain),async()=>persistStockCatalogue());
     }
     endCollection(failures.length?failures.join('; ').slice(0,400):null);
   }catch(error){endCollection(String(error));}
@@ -48,6 +50,7 @@ export function sumKnown(rows:any[],field:string){const values=rows.map(r=>r[fie
 // pool structures (pair detail) but leave the meme/relationship rankings.
 const BASE_QUOTE_SYMBOLS = new Set(["WBNB","BTCB","WBTC","WETH","USDT","USDC","USD1","xBTC","xUSD"]);
 export function dashboardState(){
+  for(const chain of Object.keys(networks))restoreOkxCatalogue(chain);
   const snapshots=Object.keys(networks).map(chain=>({chain,data:inNetwork(chain,source(chain),xLayerState)}));
   const base=unifiedFromXLayer(snapshots.find(s=>s.chain==='196')!.data,okxState,robinhoodState,binanceState);
   const attach=(row:any,chain:string)=>({...row,chainId:chain,chainName:networks[chain].name,provider:'OKX',sourceId:`okx:${chain}`,assetId:identity(chain,row.token),fieldTimes:row.fieldTimes??{}});
@@ -58,8 +61,8 @@ export function dashboardState(){
     .filter(r=>{const sym=String((r as any).symbol??symbolByToken.get(identity(r.chainId,r.token))??"" ).toUpperCase();return !BASE_QUOTE_SYMBOLS.has(sym);});
   const signals=snapshots.flatMap(s=>s.data.signals.map(r=>attach(r,s.chain))).sort((a,b)=>b.t-a.t);
   const quotes=new Map(snapshots.flatMap(s=>s.data.assets.filter(a=>a.kind==='stock').map(a=>[identity(s.chain,a.token),a] as const)));
-  const catalogues=base.stockTokens.map((r:any)=>({...r,updatedAt:r.quoteAt??(r.provider==='OKX'?okxState.updatedAt:r.provider==='Robinhood'?robinhoodState.updatedAt:binanceState.updatedAt),volumeScope:r.volumeScope??'dex',priceScope:r.provider==='Robinhood'?'issuer-derived':r.provider==='Binance'?'exchange':'dex'}));
-  for(const chain of ['56','4663'])for(const t of source(chain).tokens)catalogues.push({...t,provider:'OKX',chainId:chain,chainName:networks[chain].name,updatedAt:source(chain).updatedAt,volumeScope:'dex',priceScope:'dex'} as any);
+  const catalogues=base.stockTokens.map((r:any)=>({...r,updatedAt:r.provider==='OKX'?r.quoteAt??null:r.quoteAt??(r.provider==='Robinhood'?robinhoodState.updatedAt:binanceState.updatedAt),volumeScope:r.volumeScope??'dex',priceScope:r.provider==='Robinhood'?'issuer-derived':r.provider==='Binance'?'exchange':'dex'}));
+  for(const chain of ['56','4663'])for(const t of source(chain).tokens)catalogues.push({...t,provider:'OKX',chainId:chain,chainName:networks[chain].name,updatedAt:t.quoteAt??null,volumeScope:'dex',priceScope:'dex'} as any);
   const grouped=new Map<string,any[]>();
   for(const t of catalogues){
     t.referenceAt=t.updatedAt;
@@ -67,7 +70,7 @@ export function dashboardState(){
     const quote=quotes.get(identity(t.chainId,t.tokenContractAddress));
     if(t.provider==='OKX'&&quote){
       for(const field of ['price','volume24h','marketCap','change24h'] as const)if((quote.fieldTimes?.[field]??0)>(t.updatedAt??0)){t[field]=quote[field] as any;t.fieldTimes[field]=quote.fieldTimes![field];}
-      t.updatedAt=Math.max(t.updatedAt??0,quote.fieldTimes?.price??0);
+      if((quote.fieldTimes?.price??0)>(t.updatedAt??0))t.updatedAt=quote.fieldTimes!.price;
     }
     const id=t.tokenContractAddress?identity(t.chainId,t.tokenContractAddress):`exchange:Binance:${t.instrumentId}`;grouped.set(id,[...(grouped.get(id)??[]),t]);}
   const stockTokens=[...grouped].map(([assetId,observations])=>{
@@ -75,9 +78,10 @@ export function dashboardState(){
     const row=ordered[0];
     // Only merge an independently sourced reference for this exact deployment.
     // A Robinhood derived token quote is never compared to its own input price.
-    const reference=ordered.find(o=>o.stockPrice!=null&&current(o.referenceAt??o.updatedAt));
-    const enriched=enrichStock({...row,stockIdentity:stockIdentity({...row,assetId}),stockPrice:reference?.stockPrice??row.stockPrice,referenceProvider:reference?.provider,referenceAt:reference?.referenceAt??reference?.updatedAt,
-      assetId,observations:observations.map(o=>({provider:o.provider,price:o.price,stockPrice:o.stockPrice,volume24h:o.volume24h,volumeScope:o.volumeScope,updatedAt:o.updatedAt})),providers:[...new Set(observations.map(o=>o.provider))],premium:marketPremium(row.price,reference?.stockPrice??null,row.tokenToAssetRatio??null,row.updatedAt,reference?.referenceAt??reference?.updatedAt??null,row.priceScope==='dex')});
+    const referenceTime=(o:any)=>o.referenceAt??(o.provider==='OKX'?null:o.updatedAt);
+    const reference=ordered.find(o=>o.stockPrice!=null&&current(referenceTime(o)));
+    const enriched=enrichStock({...row,stockIdentity:stockIdentity({...row,assetId}),stockPrice:reference?.stockPrice??row.stockPrice,referenceProvider:reference?.provider,referenceAt:reference?referenceTime(reference):row.referenceAt,
+      assetId,observations:observations.map(o=>({provider:o.provider,price:o.price,stockPrice:o.stockPrice,volume24h:o.volume24h,volumeScope:o.volumeScope,updatedAt:o.updatedAt})),providers:[...new Set(observations.map(o=>o.provider))],premium:marketPremium(row.price,reference?.stockPrice??null,row.tokenToAssetRatio??null,row.updatedAt,reference?referenceTime(reference):null,row.priceScope==='dex')});
     // Legacy consumers use the same short freshness window. USD DEX quotes
     // cannot be compared with HKD or USDT without an observed conversion.
     const comparable=enriched.priceScope==='dex'&&enriched.referenceCurrency==='USD'&&enriched.referenceProvider==='EODHD'&&enriched.multiplierValid!==false;

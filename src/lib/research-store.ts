@@ -35,7 +35,13 @@ export function mergeAssetRecords(previous:any,incoming:any){
 // Persistent facts and evidence are independent of API pagination and caches.
 export class ResearchStore {
   private db: DatabaseSync;
-  constructor(file = 'data/research.sqlite', private scope = '196') {
+  constructor(file = 'data/research.sqlite', private scope = '196', options: {readOnly?:boolean} = {}) {
+    if(options.readOnly){
+      // Catalogue and dashboard readers must not request a schema/write lock
+      // from the Python-owned hot database.
+      this.db=new DatabaseSync(file,{readOnly:true});
+      return;
+    }
     if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;

@@ -19,6 +19,9 @@ def due(job, now, interval=0):
 
 async def checkpoint(s, domain, key, *, success, reason=None, now=None, retry_ms=None):
     now = now or now_ms()
+    if hasattr(s, 'checkpoint_job'):
+        return await s.checkpoint_job(domain, key, success=success, reason=reason,
+                                      now=now, retry_ms=retry_ms)
     ident = f'{domain}:{key}'
     previous = await s.get('collector-job', ident) or {}
     failures = 0 if success else min(10, (previous.get('failureCount') or 0) + 1)

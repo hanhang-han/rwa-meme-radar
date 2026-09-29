@@ -8,9 +8,9 @@
     </div>
 
     <div class="kpis">
-      <KpiCard kpi-key="actionableAssets" :title="tr('数据达标的活跃 Meme', 'Qualified active memes')" :value="num(scopeMetrics.active)" :note="deltaNote('active') || tr('需有新鲜报价与资产总流动性', 'Requires a fresh quote and asset-wide liquidity')" href="#/meme" />
-      <KpiCard kpi-key="verifiedPools" :title="tr('股票配对池', 'Stock pairs')" :value="num(scopeMetrics.pools)" :note="deltaNote('pools')" href="#/pair" />
-      <KpiCard kpi-key="pairedLiquidityUsd" :title="tr('配对池总流动性', 'Pair liquidity')" :value="usd(scopeMetrics.liquidity)" :note="deltaNote('liquidity')" href="#/pair" />
+      <KpiCard kpi-key="actionableAssets" :title="tr('数据达标的活跃 Meme', 'Qualified active memes')" :value="num(scopeMetrics.active)" :note="activeNote" href="#/meme" />
+      <KpiCard kpi-key="verifiedPools" :title="tr('股票配对池', 'Stock pairs')" :value="num(scopeMetrics.pools)" :note="deltaNote('pools') || tr('当前合格池，按链和池地址去重', 'Current qualifying pools, deduplicated by chain and pool')" href="#/pair" />
+      <KpiCard kpi-key="pairedLiquidityUsd" :title="tr('配对池总流动性', 'Pair liquidity')" :value="usd(scopeMetrics.liquidity)" :note="deltaNote('liquidity') || tr('仅配对池，不等于 Meme 总流动性', 'Pair pools only, not total meme liquidity')" href="#/pair" />
       <KpiCard kpi-key="newRelations24h" :title="tr('24h 新增配对', 'New pairs (24h)')" :value="num(scopeMetrics.newPairs)" :note="scopeMetrics.newPairs == null ? tr('新池创建时间待采集','Pool creation time pending') : deltaNote('newPairs')" href="#/events" />
     </div>
 
@@ -38,7 +38,8 @@
         <RouterLink v-for="card in hotStocks" :key="card.ticker" class="home-stock-card" :to="{path:'/stock',query:{chain:scope,q:card.ticker}}">
           <strong>{{ card.ticker }} <small>{{ stockName(card.stock) }}</small></strong>
           <span><b>{{ price(card.stock?.price,card.stock?.priceCurrency) }}</b><b :class="Number(card.stock?.change24h)>0?'up':Number(card.stock?.change24h)<0?'down':''">{{ pct(card.stock?.change24h) }}</b></span>
-          <small>{{ num(card.memes.size) }} Meme · {{ usd(card.volume) }} · {{ chainName(card.stock) }} {{ card.stock?.provider ?? '' }}</small>
+          <small>{{ num(card.memes.size) }} Meme · {{ tr('关联 Meme 成交', 'Related meme volume') }} {{ usd(card.volume) }} · {{ chainName(card.stock) }} {{ card.stock?.fieldSources?.price ?? card.stock?.provider ?? tr('来源待核验', 'Source unverified') }}</small>
+          <QuoteStatus :row="card.stock" />
         </RouterLink>
       </div>
       <div v-else class="x-empty">{{ tr('当前范围暂无关联股票。', 'No related stocks in this scope.') }}</div>
@@ -60,14 +61,15 @@
             <RouterLink :to="{path:'/detail/' + t.chainId + '/' + t.token,query:{chain:scope}}">{{ t.symbol || short(t.token) }}<small>{{ scope === 'all' ? chainName(t) + ' · ' : '' }}{{ tradeSource(t) }}</small></RouterLink>
             <span :class="t.type === 'buy' ? 'up' : 'down'">{{ t.type === 'buy' ? tr('买入', 'Buy') : tr('卖出', 'Sell') }}</span>
             <strong>{{ money(tradeDisplayAmount(t)?.value,tradeDisplayAmount(t)?.currency) }}</strong>
-            <small>{{ t.wallet ? short(t.wallet) : '—' }}</small>
+            <small :title="tradeWalletTitle(t)">{{ tradeWalletLabel(t) }}</small>
             <a v-if="t.hash" :href="explorer(t.hash,'tx',String(t.chainId))" target="_blank" rel="noopener" :aria-label="tr('查看交易', 'View transaction')">↗</a>
           </div>
           <div v-if="!displayedTrades.length" class="x-empty">{{ tr('当前条件下暂无成交。', 'No trades match these filters.') }}</div>
         </div>
       </section>
       <section class="panel">
-        <div class="panel-head"><h2>{{ tr('新发现', 'New') }}</h2><RouterLink to="/events">{{ tr('全部', 'All') }} →</RouterLink></div>
+        <div class="panel-head"><h2>{{ tr('关系收录记录', 'Relationship discoveries') }}</h2><RouterLink to="/events">{{ tr('全部', 'All') }} →</RouterLink></div>
+        <p class="hint">{{ tr('按本站首次收录时间展示；旧记录仍可查看，不代表池刚创建。', 'Ordered by first indexing; older records remain visible and do not imply a newly created pool.') }}</p>
         <div v-if="discoveries.length">
           <RouterLink v-for="row in discoveries" :key="row.id" class="home-new-row" :to="{path:'/detail/' + row.chainId + '/' + row.token,query:{chain:scope}}">
             <strong>{{ row.name }}</strong><small>{{ row.label }} · {{ chainName(row) }}</small><time :title="date(row.at)">{{ row.timeKind === 'created' ? tr('创建于','Created') : tr('收录于','Indexed') }} {{ age(row.at) }}</time>
@@ -81,7 +83,7 @@
       <div v-if="related.length" class="home-rank-list">
         <RouterLink v-for="(asset,index) in related" :key="asset.chainId + ':' + asset.token" class="home-rank-row" :to="{path:'/detail/' + asset.chainId + '/' + asset.token,query:{chain:scope}}">
           <b>{{ index + 1 }}</b><strong>{{ asset.name || asset.symbol || short(asset.token) }} <small v-if="scope === 'all'">{{ chainName(asset) }}</small></strong>
-          <span>{{ relatedTickers(asset) }}</span><span v-if="asset.riskFlags?.length" class="risk-mark">!</span><b>{{ money(asset.volume24h,asset.volumeCurrency ?? asset.priceCurrency) }}</b>
+          <span>{{ relatedTickers(asset) }}</span><span v-if="asset.riskFlags?.length" class="risk-mark">!</span><b :title="assetVolumeTitle(asset)">{{ money(asset.volume24h,asset.volumeCurrency ?? asset.priceCurrency) }}<small v-if="asset.volume24h != null && assetVolumeState(asset) !== 'current'"> · {{ assetVolumeState(asset) === 'historical' ? tr('历史值', 'Historical') : tr('时间待核实', 'Time unverified') }}</small></b>
         </RouterLink>
       </div>
       <div v-else class="x-empty">{{ tr('当前暂无合格关联资产。', 'No qualifying related memes.') }}</div>
@@ -92,8 +94,8 @@
       <RouterLink v-for="d in distribution" :key="d.chainId" class="v2-distribution" :to="{ path: '/meme', query: { chain: d.chainId } }">
         <strong>{{ d.name }}</strong>
         <span>{{ num(d.assets) }} {{ tr('个 Meme', 'memes') }}</span>
-        <span>{{ tr('24h 成交', '24h volume') }} {{ usd(d.volume?.value) }}</span>
-        <span>{{ tr('池流动性', 'Pool liquidity') }} {{ usd(d.liquidity?.value) }}</span>
+        <span>{{ tr('24h 成交', '24h volume') }} {{ usd(d.volume?.value) }}<small> · {{ tr('有新鲜值', 'Fresh values') }} {{ num(d.volume?.known) }}/{{ num(d.volume?.total) }}</small></span>
+        <span>{{ tr('池流动性', 'Pool liquidity') }} {{ usd(d.liquidity?.value) }}<small> · {{ tr('有值池', 'Known pools') }} {{ num(d.liquidity?.known) }}/{{ num(d.liquidity?.total) }}</small></span>
       </RouterLink>
     </section>
 
@@ -104,6 +106,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import KpiCard from '../components/KpiCard.vue';
+import QuoteStatus from '../components/QuoteStatus.vue';
 import ThemeMarketMap from '../components/ThemeMarketMap.vue';
 import ImportantChanges from '../components/ImportantChanges.vue';
 import { useDashboardStore } from '../stores/dashboard';
@@ -135,6 +138,9 @@ const importantChanges = computed(() => {
   return unified.importantChanges ?? fallbackRelationEvents(feed.relationships, unified);
 });
 const scopeMetrics = computed(() => metricsForScope(store.snapshot?.unified, scope.value));
+const activeNote = computed(() => scopeMetrics.value.active === 0
+  ? tr('0 表示暂无同时满足新鲜价格与总流动性门槛的币，不代表没有成交', 'Zero means no token meets both fresh-price and total-liquidity rules; trades may still exist')
+  : deltaNote('active') || tr('需有新鲜报价与资产总流动性', 'Requires a fresh quote and asset-wide liquidity'));
 const hotStocks = computed(() => topStockCards(store.stockTokens, store.relations, store.assets, scope.value));
 const minTrade = ref(100);
 const direction = ref('all');
@@ -143,7 +149,7 @@ const feedScroll = ref(null);
 const distribution = computed(() => store.snapshot?.unified?.distribution ?? []);
 const eligibleRelations = computed(() => store.relations.filter(r => r.level === 'A'));
 const related = computed(() => store.assets.filter(a => a.kind === 'candidate' && inChainScope(a,scope.value) && eligibleRelations.value.some(r => relationMatchesAsset(r,a)))
-  .sort((a,b) => Number(b.volume24h ?? -1) - Number(a.volume24h ?? -1)).slice(0,10));
+  .sort((a,b) => Number(assetVolumeState(b)==='current')-Number(assetVolumeState(a)==='current') || Number(b.volume24h ?? -1) - Number(a.volume24h ?? -1)).slice(0,10));
 const discoveries = computed(() => (feed.relationships ?? []).filter(r => inChainScope(r,scope.value)).map(r => {
   const relation = r.relation ?? r;
   const ticker = relation.ticker ?? r.ticker;
@@ -154,7 +160,7 @@ const discoveries = computed(() => (feed.relationships ?? []).filter(r => inChai
   return { id:r.id ?? relation.id, chainId, token, name:r.symbol || relation.tokenSymbol || short(token),
     label:(relation.level === 'A' ? tr('池配对', 'Paired') : relation.level === 'B' ? tr('名称相关', 'Name match') : tr('关系待核验', 'Relation unverified')) + ' · ' + ticker,
     at:time.at, timeKind:time.kind };
-}).filter(Boolean).slice(0,8));
+}).filter(Boolean).sort((a,b)=>Number(b.at??0)-Number(a.at??0)).slice(0,8));
 
 const briefing = ref(null);
 const briefingLoading = ref(true);
@@ -192,6 +198,27 @@ function tradeSource(trade) {
   if (venue === 'binance') return 'Binance';
   if (venue === 'dex') return tr('链上', 'Onchain');
   return String(trade.provider ?? trade.source ?? trade.venue ?? tr('来源待核验', 'Source unverified'));
+}
+function tradeWalletLabel(trade) {
+  if (trade.wallet) return short(trade.wallet);
+  return ['binance', 'binance-alpha'].includes(String(trade.venue ?? '').toLowerCase())
+    ? tr('无链上钱包', 'No on-chain wallet') : tr('钱包未提供', 'Wallet unavailable');
+}
+function tradeWalletTitle(trade) {
+  if (trade.wallet) return String(trade.wallet);
+  return ['binance', 'binance-alpha'].includes(String(trade.venue ?? '').toLowerCase())
+    ? tr('交易所成交不提供链上交易钱包', 'Exchange trades do not provide an on-chain trade wallet')
+    : tr('此来源未提供交易钱包', 'This source did not provide a trade wallet');
+}
+function assetVolumeState(asset) {
+  if (asset.volume24h == null) return 'missing';
+  const at = Number(asset.fieldTimes?.volume24h ?? asset.volumeAt);
+  if (!Number.isFinite(at) || at <= 0 || at > Date.now()+1000) return 'unknown';
+  return Date.now() - at <= 900000 ? 'current' : 'historical';
+}
+function assetVolumeTitle(asset) {
+  const at = asset.fieldTimes?.volume24h ?? asset.volumeAt;
+  return `${asset.fieldSources?.volume24h ?? asset.provider ?? tr('来源待核验', 'Source unverified')} · ${date(at)}`;
 }
 function deltaNote(key) {
   const d = scopeMetrics.value.deltas?.[key];

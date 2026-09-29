@@ -17,7 +17,9 @@ const saneUsd=(v:number|null)=>v==null?null:Number.isFinite(v)&&v>=0&&v<SANE_USD
 type HolderObservation = {provider:'Blockscout';updatedAt:number;holders:number|null;transfers:number|null};
 type Resolution = {id:string;symbol:string;code:string;exchange:string;name:string;currency:string|null;status:'exact-primary'|'exact';updatedAt:number};
 type StockQuote = {identityVerified:boolean;realtime:false;delayMs:number;marketSession:'unknown'|'closed';sessionEvidence:string;provider:'EODHD';id:string;symbol:string;exchange:string;name:string;currency:string|null;price:number;volume:number|null;change24h:number|null;marketAt:number;observedAt:number};
-type ProviderState = {status:Status;updatedAt:number|null;error:string|null;items:number};
+type LiquidityCoverage = {known:number;fresh:number;latestAt:number|null;asOf:number;maxAgeMs:number;status:'current'|'partial'|'stale'|'unavailable'};
+type ProviderState = {status:Status;updatedAt:number|null;error:string|null;items:number;
+  lastAttemptAt?:number|null;lastCompletedAt?:number|null;reason?:string|null;liquidityCoverage?:LiquidityCoverage};
 type EnrichmentState = {
   version:1; assets:Record<string,Record<string,MarketObservation>>; pools:Record<string,Record<string,PoolObservation>>;
   holders:Record<string,HolderObservation>; resolutions:Record<string,Resolution>; stocks:Record<string,StockQuote>;
@@ -53,9 +55,21 @@ const limit=(name:string,fallback:number)=>{const n=Number(process.env[name]);re
 // GeckoTerminal's public ceiling is 30 requests/minute. Keep one shared,
 // deliberately smaller budget for token, pool and holder lookups alike.
 export const GECKO_REQUESTS_PER_MINUTE=12;
+const GECKO_PUBLIC_REQUESTS_PER_MINUTE=6;
+const GECKO_PUBLIC_SPACING_MS=4_000;
 const GECKO_BATCH_SIZE=30;
+// Thirty tokens per chain per round need about 17 rounds to revisit the full
+// catalogue. A five-minute pause made every token aggregate expire before its
+// next turn (the KPI requires observations younger than 30 minutes). Six
+// token/pool requests per roughly minute-long round stay below the shared
+// twelve-request-per-minute guard, even before the upstream 429 backoff.
+export const COINGECKO_REFRESH_INTERVAL_MS=60_000;
+const GECKO_LIQUIDITY_MAX_AGE_MS=30*60_000;
+const GECKO_ROUND_STALL_MS=10*60_000;
+const GECKO_ROUND_TIMEOUT_MS=8*60_000;
 let geckoCallTimes:number[]=[];
 let geckoBlockedUntil=0;
+let geckoLastCallAt=0;
 
 class GeckoDeferred extends Error {
   constructor(message:string,readonly upstream:boolean){super(message);}
@@ -69,13 +83,22 @@ export function retryAfterMs(value:string|null,now=Date.now()){
   return Number.isFinite(at)?Math.min(86_400_000,Math.max(0,at-now)):null;
 }
 
-async function geckoJson(url:string,headers:Record<string,string>={}){
+async function geckoJson(url:string,headers:Record<string,string>={},roundSignal?:AbortSignal){
+  const isPublic=!headers['x-cg-pro-api-key'];
+  if(isPublic&&process.env.NODE_ENV!=='test'){
+    const wait=Math.max(0,GECKO_PUBLIC_SPACING_MS-(Date.now()-geckoLastCallAt));
+    if(wait)await delay(wait);
+  }
   const now=Date.now();
   if(now<geckoBlockedUntil)throw new GeckoDeferred('CoinGecko HTTP 429 backoff',true);
   geckoCallTimes=geckoCallTimes.filter(at=>at<=now&&now-at<60_000);
-  if(geckoCallTimes.length>=GECKO_REQUESTS_PER_MINUTE)throw new GeckoDeferred('CoinGecko local request budget',false);
+  if(geckoCallTimes.length>=(isPublic?GECKO_PUBLIC_REQUESTS_PER_MINUTE:GECKO_REQUESTS_PER_MINUTE))
+    throw new GeckoDeferred('CoinGecko local request budget',false);
   geckoCallTimes.push(now);
-  const response=await fetch(url,{headers:{accept:'application/json','user-agent':'CliperxRadar/1.0',...headers},signal:AbortSignal.timeout(20_000)});
+  geckoLastCallAt=now;
+  const requestSignal=AbortSignal.timeout(20_000);
+  const response=await fetch(url,{headers:{accept:'application/json','user-agent':'CliperxRadar/1.0',...headers},
+    signal:roundSignal?AbortSignal.any([requestSignal,roundSignal]):requestSignal});
   if(response.status===429){
     geckoBlockedUntil=Math.max(geckoBlockedUntil,Date.now()+Math.max(60_000,retryAfterMs(response.headers.get('retry-after'))??0));
     throw new GeckoDeferred('CoinGecko HTTP 429 backoff',true);
@@ -97,6 +120,29 @@ function restore(){
   }
 }
 function save(){if(process.env.NODE_ENV!=='test')writeSnapshot(snapshotFile,enrichmentState);}
+function coinGeckoLiquidityCoverage(now=Date.now()):LiquidityCoverage{
+  let known=0,fresh=0,latestAt:number|null=null;
+  for(const records of Object.values(enrichmentState.assets)){
+    const row=records.CoinGecko,at=row?.fieldTimes?.liquidity;
+    if(row?.fieldScopes?.liquidity!=='token-aggregate'||saneUsd(row.liquidity)==null||typeof at!=='number'||!Number.isFinite(at)||at<=0)continue;
+    known++;
+    latestAt=Math.max(latestAt??0,at);
+    if(0<=now-at&&now-at<=GECKO_LIQUIDITY_MAX_AGE_MS)fresh++;
+  }
+  return {known,fresh,latestAt,asOf:now,maxAgeMs:GECKO_LIQUIDITY_MAX_AGE_MS,
+    status:!known?'unavailable':!fresh?'stale':fresh===known?'current':'partial'};
+}
+function reconcileCoinGeckoHealth(now=Date.now()){
+  const provider=enrichmentState.providers.CoinGecko;
+  provider.liquidityCoverage=coinGeckoLiquidityCoverage(now);
+  const unfinished=provider.lastAttemptAt&&(!provider.lastCompletedAt||provider.lastAttemptAt>provider.lastCompletedAt);
+  if(unfinished&&now-(provider.lastAttemptAt??0)>GECKO_ROUND_STALL_MS){
+    provider.status='stale';provider.reason='collector-round-stalled';
+  }else if(provider.updatedAt&&now-provider.updatedAt>GECKO_LIQUIDITY_MAX_AGE_MS
+           &&(provider.status==='partial'||provider.status==='ready'||provider.status==='stale')){
+    provider.status='stale';provider.reason='last-success-expired';
+  }else if(provider.status==='partial'||provider.status==='ready')provider.reason=null;
+}
 // Bounded growth: observations are per (asset|pool|holder, provider); drop the
 // oldest-updated keys once a table passes the cap.
 function prune(){
@@ -217,7 +263,7 @@ async function refreshDex(assets:any[],relations:any[]){
   provider.items=items;if(successes){provider.status='partial';provider.updatedAt=Date.now();provider.error=lastError||null;}else{provider.status=provider.updatedAt?'stale':'error';provider.error=lastError||'No response';}
 }
 
-async function refreshCoinGecko(assets:any[],relations:any[]){
+async function refreshCoinGecko(assets:any[],relations:any[],roundSignal:AbortSignal){
   const provider=enrichmentState.providers.CoinGecko;let successes=0,items=0,lastError='',deferred:GeckoDeferred|null=null;
   const apiKey=process.env.COINGECKO_API_KEY,base=apiKey?'https://pro-api.coingecko.com/api/v3/onchain':'https://api.geckoterminal.com/api/v2';
   const headers:Record<string,string>=apiKey?{'x-cg-pro-api-key':apiKey}:{};
@@ -233,18 +279,19 @@ async function refreshCoinGecko(assets:any[],relations:any[]){
     if(poolRows.length)requests.push({url:`${base}/networks/${network}/pools/multi/${poolRows.map(r=>r.pool).join(',')}`,kind:'pools',work:poolRows});
     for(const {url,kind,work} of requests){
       const workKind=kind==='tokens'?'asset':'pool';
-      try{const body=await geckoJson(url,headers),at=Date.now(),result=kind==='tokens'?normalizeCoinGeckoTokens(chain,body,at):{assets:{},pools:normalizeCoinGeckoPools(chain,body,at)};
+      try{const body=await geckoJson(url,headers,roundSignal),at=Date.now(),result=kind==='tokens'?normalizeCoinGeckoTokens(chain,body,at):{assets:{},pools:normalizeCoinGeckoPools(chain,body,at)};
         sourceResult('CoinGecko',result.assets,result.pools,at);const accepted=Object.keys(result.assets).length+Object.keys(result.pools).length;items+=accepted;successes+=Number(accepted>0);
         for(const row of work){
           const id=key(chain,kind==='tokens'?row.token:row.pool);
-          // Token metadata or thin-pool liquidity can exist without a usable
-          // token price. Record that as an unavailable quote, then recheck at
-          // the low-frequency negative cadence instead of reporting success.
-          const present=kind==='tokens'?result.assets[id]?.price!=null:!!result.pools[id];
-          attempt(`CoinGecko:${workKind}:${id}`,present,present?null:kind==='tokens'?'no-verified-market-price':'unsupported-or-empty',at,!present);
+          // A token-wide liquidity observation deserves a normal refresh turn
+          // even when this source has no price for the same contract.
+          const present=kind==='tokens'?
+            result.assets[id]?.price!=null||result.assets[id]?.liquidity!=null:!!result.pools[id];
+          attempt(`CoinGecko:${workKind}:${id}`,present,present?null:kind==='tokens'?'no-verified-market-or-liquidity':'unsupported-or-empty',at,!present);
         }}
       catch(error){
         lastError=String(error);
+        if(roundSignal.aborted){deferred=new GeckoDeferred('CoinGecko collection round timed out',false);break chainRounds;}
         // A provider-wide 429 or our local ceiling is not evidence that any
         // selected token is unsupported. Leave its queue position intact.
         if(error instanceof GeckoDeferred){deferred=error;break chainRounds;}
@@ -264,8 +311,8 @@ async function refreshCoinGecko(assets:any[],relations:any[]){
     (enrichmentState.attempts[`holders:${key(a.chainId,a.token)}`]?.lastAttemptAt??a.fieldTimes?.holders??0)-(enrichmentState.attempts[`holders:${key(b.chainId,b.token)}`]?.lastAttemptAt??b.fieldTimes?.holders??0)).slice(0,holderLimit);
   if(!deferred)for(const asset of holderWork){
     const chain=String(asset.chainId),network=geckoNetworks[chain],id=`holders:${key(chain,asset.token)}`;
-    try{const body=await geckoJson(`${base}/networks/${network}/tokens/${asset.token}/info`,headers),at=Date.now(),value=normalizeCoinGeckoInfo(body,at);attempt(id,!!value,value?null:'holders-unsupported',at,!value);if(value){putAsset(chain,asset.token,value);items++;successes++;}}
-    catch(error){lastError=String(error);if(error instanceof GeckoDeferred){deferred=error;break;}attempt(id,false,lastError);}
+    try{const body=await geckoJson(`${base}/networks/${network}/tokens/${asset.token}/info`,headers,roundSignal),at=Date.now(),value=normalizeCoinGeckoInfo(body,at);attempt(id,!!value,value?null:'holders-unsupported',at,!value);if(value){putAsset(chain,asset.token,value);items++;successes++;}}
+    catch(error){lastError=String(error);if(roundSignal.aborted){deferred=new GeckoDeferred('CoinGecko collection round timed out',false);break;}if(error instanceof GeckoDeferred){deferred=error;break;}attempt(id,false,lastError);}
     await delay(apiKey?250:2200);
   }
   provider.items=items;
@@ -407,17 +454,20 @@ export function enrichStock<T extends Record<string,any>>(row:T):T{
   return result;
 }
 
-export function enrichmentSources(){restore();return Object.entries(enrichmentState.providers).map(([provider,state])=>({error:state.error,id:`${provider.toLowerCase()}:enrichment`,provider,chainId:provider==='Blockscout'?'4663':provider==='EODHD'?'exchange':'multi',chainName:provider==='Blockscout'?'Robinhood Chain':provider==='EODHD'?'Global equities':'Three networks',status:state.status,updatedAt:state.updatedAt}));}
-export function enrichmentCapabilities(){restore();return Object.entries(enrichmentState.providers).map(([provider,state])=>({provider,chainName:provider==='Blockscout'?'Robinhood Chain':provider==='EODHD'?'Global equities':'Three networks',catalogue:'not-applicable',market:state.status,trades:provider==='CoinGecko'||provider==='DexScreener'?state.status:'not-applicable',relations:'not-applicable',updatedAt:state.updatedAt,error:state.error}));}
+export function enrichmentSources(){restore();reconcileCoinGeckoHealth();return Object.entries(enrichmentState.providers).map(([provider,state])=>({error:state.error,reason:state.reason??null,lastAttemptAt:state.lastAttemptAt??null,lastCompletedAt:state.lastCompletedAt??null,liquidityCoverage:state.liquidityCoverage??null,id:`${provider.toLowerCase()}:enrichment`,provider,chainId:provider==='Blockscout'?'4663':provider==='EODHD'?'exchange':'multi',chainName:provider==='Blockscout'?'Robinhood Chain':provider==='EODHD'?'Global equities':'Three networks',status:state.status,updatedAt:state.updatedAt}));}
+export function enrichmentCapabilities(){restore();reconcileCoinGeckoHealth();return Object.entries(enrichmentState.providers).map(([provider,state])=>({provider,chainName:provider==='Blockscout'?'Robinhood Chain':provider==='EODHD'?'Global equities':'Three networks',catalogue:'not-applicable',market:state.status,trades:provider==='CoinGecko'||provider==='DexScreener'?state.status:'not-applicable',relations:'not-applicable',updatedAt:state.updatedAt,error:state.error,reason:state.reason??null,liquidityCoverage:state.liquidityCoverage??null}));}
 
 export async function refreshMarketEnrichment(feed:{assets:any[];relations:any[];stockTokens:any[]}){
   restore();if(marketRunning)return;marketRunning=true;
-  try{await Promise.allSettled([refreshDex(feed.assets,feed.relations),refreshBlockscout(feed.assets),refreshEodhd(feed.stockTokens)]);prune();save();}
+  try{await Promise.allSettled([refreshDex(feed.assets,feed.relations),refreshBlockscout(feed.assets),refreshEodhd(feed.stockTokens)]);reconcileCoinGeckoHealth();prune();save();}
   finally{marketRunning=false;}
 }
 
 export async function refreshCoinGeckoEnrichment(feed:{assets:any[];relations:any[]}){
   restore();if(geckoRunning)return;geckoRunning=true;
-  try{await refreshCoinGecko(feed.assets,feed.relations);prune();save();}
-  finally{geckoRunning=false;}
+  const provider=enrichmentState.providers.CoinGecko;
+  provider.lastAttemptAt=Date.now();provider.reason=null;
+  try{await refreshCoinGecko(feed.assets,feed.relations,AbortSignal.timeout(GECKO_ROUND_TIMEOUT_MS));}
+  catch(error){provider.status='error';provider.error=String(error);throw error;}
+  finally{provider.lastCompletedAt=Date.now();reconcileCoinGeckoHealth();prune();save();geckoRunning=false;}
 }

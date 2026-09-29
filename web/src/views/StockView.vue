@@ -22,9 +22,9 @@
       <details v-for="card in cards" :key="card.ticker" class="x-stock v3-theme-card" :open="detailMode || autoOpen(card.ticker)">
         <summary class="stock-summary-row" :aria-label="detailMode ? undefined : tr('查看股票详情', 'View stock detail') + ' ' + card.ticker" @click="onStockSummary($event, card)">
           <strong>{{ companyTitle(card.ticker, card.list[0]) }}</strong>
-          <span><small class="stock-mobile-label">{{ tr('价格','Price') }}</small><LiveNumber :value="officialStock(card)?.price" :currency="officialStock(card)?.priceCurrency ?? ''" format="price" /><small v-if="officialStock(card)?.price != null" class="stock-quote-source">{{ chainName(officialStock(card)) }} · {{ officialStock(card)?.provider ?? tr('来源待核验','Source unverified') }}</small></span>
-          <span :class="Number(officialStock(card)?.change24h)>0?'up':Number(officialStock(card)?.change24h)<0?'down':''"><small class="stock-mobile-label">24h</small><LiveNumber :value="officialStock(card)?.change24h" format="percent" /></span>
-          <span><small class="stock-mobile-label">Meme</small>{{ card.themeRows.length }} Meme</span><span><small class="stock-mobile-label">{{ tr('Meme 24h 成交','Meme volume') }}</small>{{ usd(cardMemeVolume(card)) }}</span><span><small class="stock-mobile-label">{{ tr('配对池流动性','Pair liquidity') }}</small>{{ usd(cardPoolLiquidity(card)) }}</span>
+          <span><small class="stock-mobile-label">{{ tr('价格','Price') }}</small><LiveNumber :value="officialStock(card)?.price" :currency="officialStock(card)?.priceCurrency ?? ''" format="price" /><small v-if="officialStock(card)" class="stock-quote-source">{{ chainName(officialStock(card)) }} · {{ officialStock(card)?.fieldSources?.price ?? officialStock(card)?.provider ?? tr('来源待核验','Source unverified') }}</small><QuoteStatus v-if="officialStock(card)" :row="officialStock(card)" /></span>
+          <span :class="Number(officialStock(card)?.change24h)>0?'up':Number(officialStock(card)?.change24h)<0?'down':''"><small class="stock-mobile-label">24h</small><LiveNumber :value="officialStock(card)?.change24h" format="percent" /><small v-if="officialStock(card)" class="stock-quote-source" :title="date(stockFieldAt(officialStock(card), 'change24h'))">{{ stockFieldLabel(officialStock(card), 'change24h') }}</small></span>
+          <span><small class="stock-mobile-label">Meme</small>{{ card.themeRows.length }} Meme</span><span><small class="stock-mobile-label">{{ tr('Meme 24h 成交','Meme volume') }}</small>{{ usd(cardMemeVolume(card)) }}<small class="stock-quote-source">{{ cardMemeVolume(card) == null ? tr('数据不全或过期', 'Incomplete or stale') : tr('全部资产新鲜美元口径', 'All assets fresh in USD') }}</small></span><span><small class="stock-mobile-label">{{ tr('配对池流动性','Pair liquidity') }}</small>{{ usd(cardPoolLiquidity(card)) }}<small class="stock-quote-source">{{ cardPoolLiquidity(card) == null ? tr('池估值不全或过期', 'Pool values incomplete or stale') : tr('当前池估值合计', 'Current pool estimates') }}</small></span>
         </summary>
 
         <section class="v3-theme-body">
@@ -66,15 +66,15 @@
                     <strong><LiveNumber :value="row.relation.liquidityUsd" /></strong>
                     <span class="v3-state" :class="`is-${row.liquidityState}`">{{ poolStateLabel(row) }}</span>
                     <div class="v3-pool-bar"><i :style="{ width: poolBarWidth(card.poolBarMax, row) + '%' }"></i></div>
-                    <small>{{ age(row.relation.liquidityAt) }}<template v-if="row.poolCount > 1"> · {{ row.poolCount }} {{ tr('个池，当前显示代表池', 'pools; representative shown') }}</template></small>
+                    <small :title="date(row.relation.liquidityAt)">{{ row.relation.liquiditySource ?? row.relation.provider ?? tr('来源待核实','Source pending') }} · {{ age(row.relation.liquidityAt) }}<template v-if="row.poolCount > 1"> · {{ row.poolCount }} {{ tr('个池，当前显示代表池', 'pools; representative shown') }}</template></small>
                   </td>
                   <td>
                     <strong><LiveNumber :value="row.asset?.volume24h" :currency="row.asset?.volumeCurrency ?? row.asset?.priceCurrency" /></strong>
-                    <small>{{ row.asset?.provider ?? row.asset?.source ?? tr('来源待核实', 'Source pending') }} · {{ age(fieldObservedAt(row.asset, 'volume24h')) }}</small>
+                    <small :title="date(assetFieldAt(row.asset, 'volume24h'))">{{ assetFieldLabel(row.asset, 'volume24h') }}</small>
                   </td>
                   <td>
                     <strong :class="Number(row.asset?.change24h) > 0 ? 'up' : Number(row.asset?.change24h) < 0 ? 'down' : ''"><LiveNumber :value="row.asset?.change24h" format="percent" /></strong>
-                    <small>{{ age(fieldObservedAt(row.asset, 'change24h')) }}</small>
+                    <small :title="date(assetFieldAt(row.asset, 'change24h'))">{{ assetFieldLabel(row.asset, 'change24h') }}</small>
                   </td>
                   <td><ComparisonMetric :value="relativeMetric(row.relation)" unit="pp" /></td>
                   <td><RouterLink class="v3-action" :to="pairLink(row.relation)">{{ tr('价格与配对分析', 'Price and pair analysis') }} →</RouterLink></td>
@@ -97,7 +97,7 @@
                     <td data-field="price"><LiveNumber :value="s.price" :currency="s.priceCurrency" format="price" /><QuoteStatus :row="s" /></td>
                     <td data-field="stockPrice"><LiveNumber :value="s.stockPrice" :currency="s.referenceCurrency" format="price" /><QuoteStatus :row="s" reference /></td>
                     <td data-field="premium"><ComparisonMetric :value="comparisons.latest.get(`${s.chainId}:${s.tokenContractAddress?.toLowerCase()}`)?.premium ?? s.premium" /></td>
-                    <td data-field="volume24h"><LiveNumber :value="s.volume24h" :currency="s.volumeCurrency ?? s.priceCurrency" /></td>
+                    <td data-field="volume24h"><LiveNumber :value="s.volume24h" :currency="s.volumeCurrency ?? s.priceCurrency" /><small :title="date(stockFieldAt(s, 'volume24h'))">{{ stockFieldLabel(s, 'volume24h') }}</small></td>
                     <td><RouterLink :to="pairLinkFor(s)">{{ tr('交易池分析', 'Pool analysis') }} →</RouterLink></td>
                   </tr>
                 </tbody>
@@ -113,7 +113,7 @@
       <span>{{ safePage + 1 }} / {{ pages }} · {{ allRows.length }} {{ tr('个股票主题', 'stock themes') }}</span>
       <button :disabled="(safePage + 1) >= pages" @click="setPage(safePage + 1)">{{ tr('下一页', 'Next') }}</button>
     </div>
-    <section v-if="!detailMode" class="panel stock-themes-index"><h2>{{ tr('主题指数','Theme indexes') }}</h2><div class="v2-baskets"><details v-for="sector in sectors" :key="sector.chainId+':'+sector.sector+':'+sector.basketVersion" class="x-basket"><summary class="stock-basket-summary"><strong>{{ themeLabel(sector.sector, lang.lang) }} <small>{{ sector.scopeLabel || chainName(sector) }}</small><small v-if="sector.dataStatus !== 'current'" class="basket-reason">{{ tr(sector.reason || '指数暂停，等待有效行情', 'Paused: qualifying assets or current quotes are insufficient') }}</small></strong><span :class="{ 'is-stale':sector.dataStatus !== 'current' }">{{ sector.dataStatus === 'current' && sector.value != null ? num(sector.value) : '—' }}</span><small>{{ tr('有效行情','Current quotes') }} {{ num(sector.quoteCoverage?.fresh) }} / {{ num(sector.quoteCoverage?.total) }}<br>{{ tr('最后有效','Last valid') }} {{ date(sector.dataStatus === 'current' ? sector.at : sector.lastAt) }}</small></summary><div class="stock-basket-meta">{{ tr('基期','Base') }} {{ date(sector.baseAt) }} · {{ num(sector.members) }} {{ tr('个成分','constituents') }} · {{ tr('篮子版本','Basket version') }} {{ sector.basketVersion ?? '—' }} · {{ tr('方法版本','Method version') }} {{ sector.methodVersion ?? '—' }}</div><p v-for="part in sector.components??[]" :key="part.token"><RouterLink :to="'/detail/'+sector.chainId+'/'+part.token">{{ part.symbol }}</RouterLink> {{ part.weight!=null?pct(part.weight*100):'' }}</p></details></div><p v-if="!sectors.length" class="x-empty">{{ tr('暂无可发布主题指数；成分证据或有效行情不足时不会显示指数值。','No publishable theme indexes; values remain unavailable without qualifying constituents and current quotes.') }}</p></section>
+    <section v-if="!detailMode" class="panel stock-themes-index"><h2>{{ tr('主题指数','Theme indexes') }}</h2><p v-if="sectors.length" class="hint">{{ tr('当前可发布', 'Currently publishable') }} {{ num(currentSectorCount) }}/{{ num(sectors.length) }}。{{ tr('暂停的指数仍保留成分与上次有效时间，不将历史值当作实时指数。', 'Paused indexes retain constituents and the last valid time; historical values are not shown as live indexes.') }}</p><div class="v2-baskets"><details v-for="sector in sectors" :key="sector.chainId+':'+sector.sector+':'+sector.basketVersion" class="x-basket"><summary class="stock-basket-summary"><strong>{{ themeLabel(sector.sector, lang.lang) }} <small>{{ sector.scopeLabel || chainName(sector) }}</small><small v-if="sector.dataStatus !== 'current'" class="basket-reason">{{ tr(sector.reason || '指数暂停，等待有效行情', 'Paused: qualifying assets or current quotes are insufficient') }}</small></strong><span :class="{ 'is-stale':sector.dataStatus !== 'current' }">{{ sector.dataStatus === 'current' && sector.value != null ? num(sector.value) : '—' }}</span><small>{{ tr('有效行情','Current quotes') }} {{ num(sector.quoteCoverage?.fresh) }} / {{ num(sector.quoteCoverage?.total) }}<br>{{ tr('最后有效','Last valid') }} {{ date(sector.dataStatus === 'current' ? sector.at : sector.lastAt) }}</small></summary><div class="stock-basket-meta">{{ tr('基期','Base') }} {{ date(sector.baseAt) }} · {{ num(sector.members) }} {{ tr('个成分','constituents') }} · {{ tr('篮子版本','Basket version') }} {{ sector.basketVersion ?? '—' }} · {{ tr('方法版本','Method version') }} {{ sector.methodVersion ?? '—' }}</div><p v-for="part in sector.components??[]" :key="part.token"><RouterLink :to="'/detail/'+sector.chainId+'/'+part.token">{{ part.symbol }}</RouterLink> {{ part.weight!=null?pct(part.weight*100):'' }}</p></details></div><p v-if="!sectors.length" class="x-empty">{{ tr('暂无可发布主题指数；成分证据或有效行情不足时不会显示指数值。','No publishable theme indexes; values remain unavailable without qualifying constituents and current quotes.') }}</p></section>
   </div>
 </template>
 
@@ -129,7 +129,7 @@ import { tr, useI18n } from '../i18n';
 import { age, chainName, date, num, pairLink, pct, short, usd } from '../utils/format';
 import { chainScope, inChainScope } from '../utils/chain-scope';
 import { assetKey } from '../utils/realtime';
-import { buildThemeAssetMap, buildThemeRows, countThemeRows, fieldObservedAt, sortThemeRows } from '../utils/theme-presentation';
+import { buildThemeAssetMap, buildThemeRows, countThemeRows, observationState, sortThemeRows } from '../utils/theme-presentation';
 import { preferredOfficialStock } from '../utils/product-labels';
 import { themeLabel } from '../utils/theme-labels';
 
@@ -140,6 +140,7 @@ const { lang } = useI18n();
 const detailMode = computed(() => route.name === 'stockDetail');
 const scope = computed(() => chainScope(route.query));
 const sectors = computed(() => (store.snapshot?.unified?.sectors ?? []).filter(row => inChainScope(row,scope.value)));
+const currentSectorCount = computed(() => sectors.value.filter(row => row.dataStatus === 'current' && row.value != null).length);
 const comparisons = useComparisonStore();
 function relativeMetric(relation) {
   const packet = comparisons.latest.get(`${relation.chainId}:${relation.stock?.toLowerCase()}`);
@@ -191,8 +192,38 @@ const cards = computed(() => allRows.value.slice(safePage.value * PAGE, safePage
 }));
 
 function officialStock(card) { return preferredOfficialStock(card.list); }
-function cardMemeVolume(card) { const assets=[...new Map(card.themeRows.map(row => [row.key,row.asset])).values()]; if(!assets.length || assets.some(asset => asset?.volume24h == null || asset?.volumeCurrency !== 'USD'))return null; return assets.reduce((sum,asset)=>sum+Number(asset.volume24h),0); }
-function cardPoolLiquidity(card) { const pools = new Map(); for(const row of card.themeRows) for(const pool of row.pools ?? []) if(pool.pool) pools.set(String(pool.chainId)+':'+String(pool.pool).toLowerCase(),pool.liquidityUsd); if(!pools.size || [...pools.values()].some(value => value == null)) return null; return [...pools.values()].reduce((sum,value)=>sum+Number(value),0); }
+function assetFieldAt(asset, field) { return asset?.fieldTimes?.[field] ?? null; }
+function stockFieldAt(stock, field) { return stock?.fieldTimes?.[field] ?? (field === 'price' ? stock?.quoteAt ?? stock?.updatedAt : null) ?? null; }
+function currentObservation(value, at) {
+  const time=Number(at), now=Date.now();
+  return Number.isFinite(Number(value)) && value!=null && Number.isFinite(time) && time>0 && time<=now+1000
+    && observationState(value,time,now)==='fresh';
+}
+function observationLabel(value, at, window = 900000) {
+  if (value!=null && (!Number.isFinite(Number(at)) || Number(at)<=0 || Number(at)>Date.now()+1000)) return tr('时间待核实', 'Time unverified');
+  const state=observationState(value, at, Date.now(), window);
+  return state==='missing' ? tr('待采集', 'Not collected') : !at ? tr('时间待核实', 'Time unverified')
+    : state==='historical' ? `${tr('历史值', 'Historical')} · ${age(at)}` : age(at);
+}
+function assetFieldLabel(asset, field) {
+  const source=asset?.fieldSources?.[field] ?? tr('来源待核实', 'Source unverified');
+  return `${source} · ${observationLabel(asset?.[field], assetFieldAt(asset, field))}`;
+}
+function stockFieldLabel(stock, field) {
+  const source=stock?.fieldSources?.[field] ?? stock?.provider ?? tr('来源待核实', 'Source unverified');
+  return `${source} · ${observationLabel(stock?.[field], stockFieldAt(stock, field))}`;
+}
+function cardMemeVolume(card) {
+  const assets=[...new Map(card.themeRows.map(row => [row.key,row.asset])).values()];
+  if(!assets.length || assets.some(asset => asset?.volumeCurrency !== 'USD' || !currentObservation(asset?.volume24h,assetFieldAt(asset,'volume24h'))))return null;
+  return assets.reduce((sum,asset)=>sum+Number(asset.volume24h),0);
+}
+function cardPoolLiquidity(card) {
+  const pools=new Map();
+  for(const row of card.themeRows)for(const pool of row.pools ?? [])if(pool.pool)pools.set(String(pool.chainId)+':'+String(pool.pool).toLowerCase(),pool);
+  if(!pools.size || [...pools.values()].some(pool => !currentObservation(pool.liquidityUsd,pool.liquidityAt)))return null;
+  return [...pools.values()].reduce((sum,pool)=>sum+Number(pool.liquidityUsd),0);
+}
 
 function freshPoolCount(card) {
   return card.themeRows.filter((row) => row.liquidityState === 'fresh').length;

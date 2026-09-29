@@ -1,5 +1,6 @@
 """RWA Meme Radar query API. Collectors run in app.worker."""
 import asyncio
+import json
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -161,12 +162,107 @@ def okx_lane_usage(day, path=None):
         return []
 
 
+_HEALTH_CHAINS = ('196', '56', '4663')
+
+
+async def _health_storage_snapshot(now):
+    """Read only the named list projections and small operational aggregates.
+
+    A single SQLite read snapshot keeps market and feed on the same revision.
+    Never decode the full projection or run its on-demand builder here.
+    """
+    import aiosqlite
+    import zlib
+    from .db import store
+    from .realtime_projection import _decode_snapshot
+
+    scoped = await store('196')
+    kinds = lambda name: tuple(f'{chain}:{name}' for chain in _HEALTH_CHAINS)
+    async with aiosqlite.connect(scoped.path, timeout=15) as reader:
+        await reader.execute('PRAGMA query_only=ON')
+        await reader.execute('BEGIN')
+        projection_rows = await reader.execute_fetchall('''
+            SELECT market.body, feed.body
+            FROM dashboard_projection AS full
+            JOIN dashboard_projection AS market ON market.name='market'
+              AND (market.revision,market.cursor,market.input_cursor,market.built_at)
+                = (full.revision,full.cursor,full.input_cursor,full.built_at)
+            JOIN dashboard_projection AS feed ON feed.name='feed'
+              AND (feed.revision,feed.cursor,feed.input_cursor,feed.built_at)
+                = (full.revision,full.cursor,full.input_cursor,full.built_at)
+            WHERE full.name='full'
+        ''')
+        assets = (await reader.execute_fetchall('''
+            SELECT COUNT(*), MAX(COALESCE(CAST(json_extract(body,'$.updatedAt') AS INTEGER),0))
+            FROM facts WHERE kind IN (?,?,?)
+        ''', kinds('asset')))[0]
+        jobs = await reader.execute_fetchall('''
+            SELECT kind,
+              COALESCE(NULLIF(CAST(json_extract(body,'$.domain') AS TEXT),''),'unknown') AS domain,
+              COUNT(*),
+              SUM(CASE WHEN COALESCE(json_extract(body,'$.failureCount'),0) != 0 THEN 1 ELSE 0 END),
+              SUM(CASE WHEN COALESCE(json_extract(body,'$.nextRetryAt'),0) > ? THEN 1 ELSE 0 END),
+              MAX(COALESCE(json_extract(body,'$.lastSuccessAt'),0)),
+              MAX(COALESCE(json_extract(body,'$.lastAttemptAt'),0))
+            FROM facts WHERE kind IN (?,?,?) GROUP BY kind,domain
+        ''', (now, *kinds('collector-job')))
+        scans = await reader.execute_fetchall('''
+            SELECT kind,COUNT(*),
+              SUM(CASE WHEN json_extract(body,'$.status')='partial' THEN 1 ELSE 0 END),
+              SUM(COALESCE(CAST(json_extract(body,'$.unsupportedPools') AS INTEGER),0)),
+              SUM(COALESCE(CAST(json_extract(body,'$.failedPools') AS INTEGER),0))
+            FROM facts WHERE kind IN (?,?,?) GROUP BY kind
+        ''', kinds('scan'))
+
+    projection = None
+    if projection_rows:
+        try:
+            market, feed = (json.loads(_decode_snapshot(body)) for body in projection_rows[0])
+            unified = market['unified']
+            fields = (unified['assets'], unified['stockTokens'], unified['relations'],
+                      unified['sources'], feed['signals'])
+            if all(isinstance(rows, list) and all(isinstance(row, dict) for row in rows)
+                   for rows in fields):
+                projection = (market, feed)
+        except (KeyError, TypeError, ValueError, UnicodeError, OSError, zlib.error):
+            pass
+
+    domains = {chain: {} for chain in _HEALTH_CHAINS}
+    for kind, domain, total, failed, waiting, success_at, attempt_at in jobs:
+        domains[kind.split(':', 1)[0]][domain] = {
+            'total': total, 'failed': failed, 'waitingRetry': waiting,
+            'lastSuccessAt': success_at, 'lastAttemptAt': attempt_at,
+        }
+    scan_quality = {chain: {'total': 0, 'partial': 0, 'unsupportedPools': 0, 'failedPools': 0}
+                    for chain in _HEALTH_CHAINS}
+    for kind, total, partial, unsupported, failed in scans:
+        scan_quality[kind.split(':', 1)[0]] = {
+            'total': total, 'partial': partial, 'unsupportedPools': unsupported,
+            'failedPools': failed,
+        }
+    return {'projection': projection, 'assets': assets[0], 'latestAssetAt': assets[1] or 0,
+            'domains': domains, 'scanQuality': scan_quality}
+
+
 @app.get("/api/health/data")
 async def health_data():
     from . import state
-    await state.reload_if_stale()
     now = int(time.time() * 1000)
-    latest_asset = max((a.get("updatedAt") or 0 for a in state.DATA.assets), default=0)
+    storage_error = False
+    try:
+        storage = await _health_storage_snapshot(now)
+    except Exception:
+        storage_error = True
+        storage = {'projection': None, 'assets': 0, 'latestAssetAt': 0,
+                   'domains': {chain: {} for chain in _HEALTH_CHAINS},
+                   'scanQuality': {chain: {'total': 0, 'partial': 0,
+                                          'unsupportedPools': 0, 'failedPools': 0}
+                                   for chain in _HEALTH_CHAINS}}
+    snapshot = storage['projection']
+    unified = snapshot[0]['unified'] if snapshot else {}
+    candidates = unified.get('assets', [])
+    stocks = unified.get('stockTokens', [])
+    latest_asset = storage['latestAssetAt']
     collector = process_health("data/worker-health.json", now)
     projection = process_health("data/projection-health.json", now)
     # Keep the existing worker.tasks contract for dashboards and release checks,
@@ -177,13 +273,8 @@ async def health_data():
     worker = {**collector, "tasks": tasks, "ok": worker_ok,
               "ageMs": max(ages) if len(ages) == 2 else None}
     import shutil
-    from .db import store
     disk = shutil.disk_usage('data')
     coverage = {}
-    enriched = {(str(a.get('chainId')), str(a.get('token') or '').lower()): state.enrich_asset(a)
-                for a in state.DATA.assets}
-    candidates = state.DATA.visible_assets(enriched=enriched, now=now)
-    stocks = state.DATA.stock_views(enriched=enriched)
     for name,rows,threshold in [('candidates',candidates,1800000),('stocks',stocks,3600000)]:
         known = [r for r in rows if r.get('price') is not None]
         times = [float((r.get('fieldTimes') or {}).get('price') or r.get('quoteAt') or 0) for r in known]
@@ -198,30 +289,16 @@ async def health_data():
                                'quotableWithinTarget': coverage[name]['withinTarget']})
     discovery = {}
     unsupported_pools = 0
-    for chain in ('196','56','4663'):
-        s = await store(chain)
-        checks = await s.all('collector-job')
-        domains={}
-        for job in checks:
-            domain=str(job.get('domain') or 'unknown')
-            group=domains.setdefault(domain,{'total':0,'failed':0,'waitingRetry':0,'lastSuccessAt':0,'lastAttemptAt':0})
-            group['total']+=1
-            group['failed']+=int(bool(job.get('failureCount')))
-            group['waitingRetry']+=int((job.get('nextRetryAt') or 0)>now)
-            group['lastSuccessAt']=max(group['lastSuccessAt'],job.get('lastSuccessAt') or 0)
-            group['lastAttemptAt']=max(group['lastAttemptAt'],job.get('lastAttemptAt') or 0)
-        scans = await s.all('scan')
-        scan_quality = {
-            'total': len(scans),
-            'partial': sum(row.get('status') == 'partial' for row in scans),
-            'unsupportedPools': sum(int(row.get('unsupportedPools') or 0) for row in scans),
-            'failedPools': sum(int(row.get('failedPools') or 0) for row in scans),
-        }
+    signals = snapshot[1]['signals'] if snapshot else []
+    for chain in _HEALTH_CHAINS:
+        scan_quality = storage['scanQuality'][chain]
         unsupported_pools += scan_quality['unsupportedPools']
-        discovery[chain]={'latestEventAt':max((r.get('t') or 0 for r in state.DATA.signals if str(r.get('chainId'))==chain),default=0) or None,
-                          'domains':domains, 'scanQuality':scan_quality}
+        discovery[chain]={'latestEventAt':max((r.get('t') or 0 for r in signals if str(r.get('chainId'))==chain),default=0) or None,
+                          'domains':storage['domains'][chain], 'scanQuality':scan_quality}
     issues=[]
-    if not state.DATA.assets:issues.append('assets-unavailable')
+    if not storage['assets']:issues.append('assets-unavailable')
+    if not snapshot:issues.append('projection-snapshot-unavailable')
+    if storage_error:issues.append('health-storage-unavailable')
     if not collector['ok']:issues.append('worker-unavailable')
     if not projection['ok']:issues.append('projection-unavailable')
     if disk.free/disk.total<.2:issues.append('disk-low')
@@ -232,7 +309,7 @@ async def health_data():
     failed_tasks=[name for name,task in worker.get('tasks',{}).items() if task.get('status') in ('error','partial','quota-blocked')]
     if any(name in collector['tasks'] for name in failed_tasks):issues.append('collector-degraded')
     if any(name in projection['tasks'] for name in failed_tasks):issues.append('projection-degraded')
-    raw_sources = state._source_statuses(stocks,candidates)
+    raw_sources = state._source_statuses(stocks,candidates) if snapshot else []
     for source in raw_sources:
         if source.get('id') == 'okx:dex' and source.get('budget'):
             source['budget'] = {**source['budget'], 'lanes': okx_lane_usage(source['budget'].get('day'))}
@@ -260,13 +337,14 @@ async def health_data():
     chain_streams = [
         {**{key: row.get(key) for key in (
             'chainId', 'status', 'updatedAt', 'sourceLagMs', 'queueDepth',
+            'replayPausedForLive', 'rateLimitedAt', 'cooldownUntil', 'rpcIntervalMs',
             'decodedEvents', 'reconnects', 'lastEventAt', 'lastReceivedAt',
             'lastHead', 'lastProcessedBlock', 'lastNearTipBlock',
-            'nearTipLagBlocks', 'historicalGapBlocks', 'nearTipCoverageFrom',
+            'nearTipLagBlocks', 'nearTipRebasedAt', 'historicalGapBlocks', 'nearTipCoverageFrom',
             'nearTipVerifiedAt', 'lastErrorAt')},
          'historicalScan': public_scan_diagnostic(row.get('historicalScan')),
          'nearTipScan': public_scan_diagnostic(row.get('nearTipScan'))}
-        for row in getattr(state.DATA, 'stream_states', [])
+        for row in unified.get('sources', [])
         if row.get('provider') == 'Chain RPC' and str(row.get('id', '')).startswith('chain-stream:')
     ]
     if chain_streams_degraded(chain_streams):
@@ -303,8 +381,8 @@ async def health_data():
         "failedTasks":failed_tasks,"disk":{"freeBytes":disk.free,"freePercent":round(disk.free/disk.total*100,2)},
         "diskSamples":disk_samples,"references":reference_coverage,
         "capabilities":{"stockReferences":reference_capability},"sources":sources,
-        "assets": len(state.DATA.assets),
-        "relations": len(state.DATA.relations),
+        "assets": storage['assets'],
+        "relations": len(unified.get('relations', [])),
         "latestAssetAt": latest_asset or None,
         "latestAssetAgeMs": now - latest_asset if latest_asset else None,
         "worker": worker,

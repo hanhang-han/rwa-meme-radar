@@ -13,6 +13,21 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
+def health_storage(*, assets=1, latest=0, candidates=(), stocks=(), relations=(),
+                   signals=(), streams=(), scan_quality=None):
+    chains = ('196', '56', '4663')
+    return {
+        'projection': ({'unified': {'assets': list(candidates), 'stockTokens': list(stocks),
+                                    'relations': list(relations), 'sources': list(streams)}},
+                       {'signals': list(signals)}),
+        'assets': assets, 'latestAssetAt': latest,
+        'domains': {chain: {} for chain in chains},
+        'scanQuality': {chain: (scan_quality if chain == '196' and scan_quality else
+                               {'total': 0, 'partial': 0, 'unsupportedPools': 0, 'failedPools': 0})
+                        for chain in chains},
+    }
+
+
 class ProjectionProcessTests(unittest.TestCase):
     def test_projection_owner_excludes_an_accidental_second_process(self):
         from app.projection_worker import projection_owner
@@ -155,30 +170,28 @@ class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_health_aggregates_old_task_contract_but_marks_missing_projection_degraded(self):
         from app.main import health_data
         now = int(time.time()*1000)
-        data = SimpleNamespace(assets=[{'updatedAt': now}], relations=[], signals=[],
-                               visible_assets=lambda **_: [], stock_views=lambda **_: [])
-        database = SimpleNamespace(all=AsyncMock(return_value=[]))
+        snapshot = health_storage(latest=now)
         collector = {'pid': os.getpid(), 'updatedAt': now, 'ageMs': 0, 'ok': True,
                      'tasks': {'liveQuotes': {'status': 'waiting'}}}
         projection = {'pid': os.getpid(), 'updatedAt': now, 'ageMs': 0, 'ok': True,
                       'tasks': {'realtimeProjection': {'status': 'waiting'}}}
-        with patch('app.state.reload_if_stale', AsyncMock()), patch('app.state.DATA', data), \
-             patch('app.state._source_statuses', return_value=[]), patch('app.db.store', AsyncMock(return_value=database)), \
+        with patch('app.main._health_storage_snapshot', AsyncMock(return_value=snapshot)), \
+             patch('app.state._source_statuses', return_value=[]), \
              patch('shutil.disk_usage', return_value=SimpleNamespace(total=100, free=90)):
             with patch('app.main.process_health', side_effect=[collector, projection]):
                 healthy = await health_data()
             self.assertTrue(healthy['worker']['ok'])
             self.assertTrue(healthy['projection']['ok'])
             self.assertEqual(set(healthy['worker']['tasks']), {'liveQuotes', 'realtimeProjection'})
-            data.stream_states = [{'provider': 'Chain RPC', 'id': 'chain-stream:4663',
-                                   'chainId': '4663', 'status': 'catching-up',
-                                   'queueDepth': 12, 'sourceLagMs': 20_000,
-                                   'nearTipLagBlocks': 67_000}]
+            snapshot['projection'][0]['unified']['sources'] = [
+                {'provider': 'Chain RPC', 'id': 'chain-stream:4663',
+                 'chainId': '4663', 'status': 'catching-up',
+                 'queueDepth': 12, 'sourceLagMs': 20_000, 'nearTipLagBlocks': 67_000}]
             with patch('app.main.process_health', side_effect=[collector, projection]):
                 backlogged = await health_data()
             self.assertEqual(backlogged['status'], 'degraded')
             self.assertIn('chain-stream-degraded', backlogged['issues'])
-            data.stream_states = []
+            snapshot['projection'][0]['unified']['sources'] = []
             missing = {'ageMs': None, 'ok': False, 'tasks': {}}
             with patch('app.main.process_health', side_effect=[collector, missing]):
                 degraded = await health_data()
@@ -192,13 +205,10 @@ class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
         now=int(time.time()*1000)
         stock={'price':12,'stockPrice':100,'referenceScope':'issuer-reference',
                'fieldTimes':{'price':now},'quoteAt':now}
-        data=SimpleNamespace(assets=[{'updatedAt':now}],relations=[],signals=[],
-                             visible_assets=lambda **_:[],stock_views=lambda **_:[stock])
-        database=SimpleNamespace(all=AsyncMock(return_value=[]))
+        snapshot = health_storage(latest=now, stocks=[stock])
         running={'pid':os.getpid(),'updatedAt':now,'ageMs':0,'ok':True,'tasks':{'maintenance':{'status':'waiting'}}}
-        with patch('app.state.reload_if_stale',AsyncMock()),patch('app.state.DATA',data), \
+        with patch('app.main._health_storage_snapshot',AsyncMock(return_value=snapshot)), \
              patch('app.state._source_statuses',return_value=[{'id':'eodhd:exchange','provider':'EODHD','kind':'stock-references','status':'entitlement-required'}]), \
-             patch('app.db.store',AsyncMock(return_value=database)), \
              patch('shutil.disk_usage',return_value=SimpleNamespace(total=100,free=50)), \
              patch('app.main.disk_history',return_value=[]), \
              patch('app.main.process_health',side_effect=[running,running]):
@@ -220,15 +230,12 @@ class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
         stock_priced = {'price':2,'fieldTimes':{'price':now},'quoteAt':now}
         stock_unavailable = {'price':None,'quoteStatus':'no-verified-market',
                              'quoteReason':'source-returned-no-price'}
-        data = SimpleNamespace(assets=[{'updatedAt':now}],relations=[],signals=[],
-                               visible_assets=lambda **_:[priced,unavailable],
-                               stock_views=lambda **_:[stock_priced,stock_unavailable])
-        database = SimpleNamespace(all=AsyncMock(return_value=[]))
+        snapshot = health_storage(latest=now, candidates=[priced,unavailable],
+                                  stocks=[stock_priced,stock_unavailable])
         running = {'pid':os.getpid(),'updatedAt':now,'ageMs':0,'ok':True,
                    'tasks':{'maintenance':{'status':'waiting'}}}
-        with patch('app.state.reload_if_stale',AsyncMock()),patch('app.state.DATA',data), \
+        with patch('app.main._health_storage_snapshot',AsyncMock(return_value=snapshot)), \
              patch('app.state._source_statuses',return_value=[]), \
-             patch('app.db.store',AsyncMock(return_value=database)), \
              patch('shutil.disk_usage',return_value=SimpleNamespace(total=100,free=50)), \
              patch('app.main.disk_history',return_value=[]), \
              patch('app.main.process_health',side_effect=[running,running]):
@@ -248,16 +255,12 @@ class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_known_unsupported_pools_are_visible_without_collector_failure(self):
         from app.main import health_data
         now=int(time.time()*1000)
-        data=SimpleNamespace(assets=[{'updatedAt':now}],relations=[],signals=[],
-                             visible_assets=lambda **_:[],stock_views=lambda **_:[])
-        async def rows(kind):
-            return [{'status':'partial','unsupportedPools':3,'failedPools':0}] if kind=='scan' else []
-        database=SimpleNamespace(all=AsyncMock(side_effect=rows))
+        snapshot = health_storage(latest=now, scan_quality={
+            'total': 1, 'partial': 1, 'unsupportedPools': 3, 'failedPools': 0})
         running={'pid':os.getpid(),'updatedAt':now,'ageMs':0,'ok':True,
                  'tasks':{'discovery':{'status':'waiting'}}}
-        with patch('app.state.reload_if_stale',AsyncMock()),patch('app.state.DATA',data), \
+        with patch('app.main._health_storage_snapshot',AsyncMock(return_value=snapshot)), \
              patch('app.state._source_statuses',return_value=[]), \
-             patch('app.db.store',AsyncMock(return_value=database)), \
              patch('shutil.disk_usage',return_value=SimpleNamespace(total=100,free=50)), \
              patch('app.main.disk_history',return_value=[]), \
              patch('app.main.process_health',side_effect=[running,running]):
@@ -266,3 +269,131 @@ class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health['status'],'limited')
         self.assertIn('discovery-unsupported-pools',health['warnings'])
         self.assertEqual(health['discovery']['196']['scanQuality']['unsupportedPools'],3)
+
+
+class HealthProjectionReadTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from app.db import ResearchStore
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = await ResearchStore(self.temp.name + '/research.sqlite', '196').connect()
+        self.now = int(time.time() * 1000)
+        self.market = {'unified': {
+            'assets': [{'chainId': '196', 'price': 1, 'fieldTimes': {'price': self.now}}],
+            'stockTokens': [{'chainId': '56', 'price': 2, 'stockPrice': 100,
+                             'referenceScope': 'equity-exchange', 'fieldTimes': {'price': self.now}}],
+            'relations': [{'id': 'pool-1'}],
+            'sources': [{'provider': 'Chain RPC', 'id': 'chain-stream:196', 'chainId': '196',
+                         'queueDepth': 1, 'nearTipLagBlocks': 2}],
+        }}
+        self.feed = {'signals': [{'chainId': '196', 't': self.now - 5000}]}
+        await self.publish()
+        await self.store.db.executemany('INSERT INTO facts(kind,id,body) VALUES (?,?,?)', [
+            ('196:asset', 'candidate', json.dumps({'kind': 'candidate', 'updatedAt': self.now - 200})),
+            ('56:asset', 'stock', json.dumps({'kind': 'stock', 'updatedAt': self.now - 100})),
+            ('4663:asset', 'base', json.dumps({'kind': 'base', 'updatedAt': self.now - 300})),
+            ('196:collector-job', 'quote:a', json.dumps({'domain': 'quote', 'failureCount': 2,
+                'nextRetryAt': self.now + 1000, 'lastSuccessAt': 40, 'lastAttemptAt': 80})),
+            ('196:collector-job', 'quote:b', json.dumps({'domain': 'quote', 'failureCount': 0,
+                'nextRetryAt': 0, 'lastSuccessAt': 90, 'lastAttemptAt': 100})),
+            ('56:collector-job', 'scan:a', json.dumps({'domain': 'scan', 'failureCount': 1,
+                'nextRetryAt': self.now - 1000, 'lastSuccessAt': 60, 'lastAttemptAt': 110})),
+            ('196:scan', 'one', json.dumps({'status': 'partial', 'unsupportedPools': 3, 'failedPools': 1})),
+            ('196:scan', 'two', json.dumps({'status': 'complete', 'unsupportedPools': 1, 'failedPools': 0})),
+        ])
+        await self.store.db.commit()
+
+    async def asyncTearDown(self):
+        await self.store.close()
+        self.temp.cleanup()
+
+    async def publish(self):
+        from app.realtime_projection import _dump, _encode_snapshot
+        rows = [('full', 1, 3, 4, '{invalid-full-body', self.now),
+                ('market', 1, 3, 4, _encode_snapshot(_dump(self.market)), self.now),
+                ('feed', 1, 3, 4, _encode_snapshot(_dump(self.feed)), self.now)]
+        await self.store.db.executemany('INSERT INTO dashboard_projection VALUES (?,?,?,?,?,?)', rows)
+        await self.store.db.commit()
+
+    async def test_matching_named_views_and_scoped_aggregates_preserve_health_contract(self):
+        from app.main import _health_storage_snapshot, health_data
+        running = {'ageMs': 0, 'ok': True, 'tasks': {'maintenance': {'status': 'waiting'}}}
+        with patch('app.db.store', AsyncMock(return_value=self.store)), \
+             patch('app.state.reload_if_stale', side_effect=AssertionError('full reload forbidden')):
+            snapshot = await _health_storage_snapshot(self.now)
+            self.assertEqual(snapshot['assets'], 3)
+            self.assertEqual(snapshot['latestAssetAt'], self.now - 100)
+            self.assertEqual(snapshot['domains']['196']['quote'], {
+                'total': 2, 'failed': 1, 'waitingRetry': 1,
+                'lastSuccessAt': 90, 'lastAttemptAt': 100})
+            self.assertEqual(snapshot['domains']['56']['scan']['failed'], 1)
+            self.assertEqual(snapshot['scanQuality']['196'], {
+                'total': 2, 'partial': 1, 'unsupportedPools': 4, 'failedPools': 1})
+            with patch('app.state._source_statuses', return_value=[]), \
+                 patch('app.main.process_health', side_effect=[running, running]), \
+                 patch('app.main.disk_history', return_value=[]), \
+                 patch('shutil.disk_usage', return_value=SimpleNamespace(total=100, free=90)):
+                health = await health_data()
+        self.assertEqual(health['status'], 'limited')
+        self.assertEqual((health['assets'], health['relations'], health['latestAssetAt']),
+                         (3, 1, self.now - 100))
+        self.assertEqual(health['coverage']['candidates']['withinTarget'], 1)
+        self.assertEqual(health['coverage']['stocks']['withinTarget'], 1)
+        self.assertEqual(health['discovery']['196']['latestEventAt'], self.now - 5000)
+        self.assertEqual(health['discovery']['196']['scanQuality']['unsupportedPools'], 4)
+        self.assertEqual(health['chainStreams'][0]['nearTipLagBlocks'], 2)
+        self.assertIn('discovery-unsupported-pools', health['warnings'])
+
+    async def test_missing_or_mismatched_views_degrade_without_building_full_projection(self):
+        from app.main import _health_storage_snapshot, health_data
+        running = {'ageMs': 0, 'ok': True, 'tasks': {'maintenance': {'status': 'waiting'}}}
+        await self.store.db.execute("UPDATE dashboard_projection SET revision=2 WHERE name='feed'")
+        await self.store.db.commit()
+        with patch('app.db.store', AsyncMock(return_value=self.store)), \
+             patch('app.state.reload_if_stale', side_effect=AssertionError('full reload forbidden')), \
+             patch('app.realtime_projection.projection_tick', side_effect=AssertionError('build forbidden')), \
+             patch('app.state._source_statuses', side_effect=AssertionError('unavailable projection')), \
+             patch('app.main.process_health', side_effect=[running, running]), \
+             patch('app.main.disk_history', return_value=[]), \
+             patch('shutil.disk_usage', return_value=SimpleNamespace(total=100, free=90)):
+            snapshot = await _health_storage_snapshot(self.now)
+            health = await health_data()
+        self.assertIsNone(snapshot['projection'])
+        self.assertEqual(snapshot['assets'], 3)
+        self.assertFalse(health['ok'])
+        self.assertIn('projection-snapshot-unavailable', health['issues'])
+        self.assertNotIn('assets-unavailable', health['issues'])
+        self.assertEqual(health['assets'], 3)
+        self.assertEqual(health['sources'], [])
+
+    async def test_invalid_named_view_degrades_instead_of_throwing(self):
+        from app.main import _health_storage_snapshot
+        await self.store.db.execute("UPDATE dashboard_projection SET body=? WHERE name='market'",
+                                    (b'CRP1\x00broken',))
+        await self.store.db.commit()
+        with patch('app.db.store', AsyncMock(return_value=self.store)):
+            snapshot = await _health_storage_snapshot(self.now)
+        self.assertIsNone(snapshot['projection'])
+        self.assertEqual(snapshot['assets'], 3)
+
+    async def test_missing_named_view_keeps_raw_counts_and_degrades(self):
+        from app.main import _health_storage_snapshot
+        await self.store.db.execute("DELETE FROM dashboard_projection WHERE name='feed'")
+        await self.store.db.commit()
+        with patch('app.db.store', AsyncMock(return_value=self.store)):
+            snapshot = await _health_storage_snapshot(self.now)
+        self.assertIsNone(snapshot['projection'])
+        self.assertEqual(snapshot['assets'], 3)
+        self.assertEqual(snapshot['domains']['196']['quote']['total'], 2)
+
+    async def test_storage_failure_returns_degraded_health(self):
+        from app.main import health_data
+        running = {'ageMs': 0, 'ok': True, 'tasks': {}}
+        with patch('app.main._health_storage_snapshot', AsyncMock(side_effect=RuntimeError('storage busy'))), \
+             patch('app.state.reload_if_stale', side_effect=AssertionError('full reload forbidden')), \
+             patch('app.main.process_health', side_effect=[running, running]), \
+             patch('app.main.disk_history', return_value=[]), \
+             patch('shutil.disk_usage', return_value=SimpleNamespace(total=100, free=90)):
+            health = await health_data()
+        self.assertEqual(health['status'], 'degraded')
+        self.assertIn('health-storage-unavailable', health['issues'])
+        self.assertIn('projection-snapshot-unavailable', health['issues'])

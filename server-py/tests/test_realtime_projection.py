@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from app import db as storage
 from app import realtime_projection as projection
+from app.dashboard_projection import market_dashboard, overview_dashboard
 from app.db import ResearchStore
 from app.realtime_schema import enqueue_event
 
@@ -278,6 +279,43 @@ class ProjectionTests(unittest.IsolatedAsyncioTestCase):
         updated = await projection.read_projection()
         self.assertEqual(updated['unified']['assets'][0]['price'], 2)
         self.assertGreater(updated['realtime']['cursor'], json.loads(original)['realtime']['cursor'])
+
+    async def test_named_views_share_full_revision_and_roll_forward_safely(self):
+        await self.put_asset()
+        await self.tick()
+        rows = await self.s.fetchall('''SELECT name,revision,cursor,input_cursor,built_at,body
+            FROM dashboard_projection''')
+        self.assertEqual({row['name'] for row in rows}, {'full', 'overview', 'market', 'feed'})
+        metadata = {tuple(row[key] for key in ('revision', 'cursor', 'input_cursor', 'built_at'))
+                    for row in rows}
+        self.assertEqual(len(metadata), 1)
+        full = json.loads(await projection.read_projection_json('full'))
+        self.assertEqual(json.loads(await projection.read_projection_json('overview')),
+                         overview_dashboard(full))
+        self.assertEqual(json.loads(await projection.read_projection_json('market')),
+                         market_dashboard(full))
+        feed = json.loads(await projection.read_projection_json('feed'))
+        self.assertEqual(feed['realtime'], full['realtime'])
+        self.assertEqual(feed['assets'], [])
+
+        # An old worker can leave named rows absent or at an older revision.
+        await self.s.db.execute("DELETE FROM dashboard_projection WHERE name='overview'")
+        await self.s.db.execute("UPDATE dashboard_projection SET revision=0 WHERE name='market'")
+        await self.s.db.commit()
+        self.assertEqual(json.loads(await projection.read_projection_json('overview')),
+                         overview_dashboard(full))
+        self.assertEqual(json.loads(await projection.read_projection_json('market')),
+                         market_dashboard(full))
+
+        # Feed cannot be recovered from the dashboard's globally truncated
+        # signals, so a missing row must be rebuilt from the fact snapshot.
+        await self.s.db.execute("DELETE FROM dashboard_projection WHERE name='feed'")
+        await self.s.db.commit()
+        rebuilt = json.loads(await projection.read_projection_json('feed'))
+        self.assertEqual(rebuilt['realtime'], (await projection.read_projection())['realtime'])
+        refreshed = await self.s.fetchall('SELECT name,revision,cursor,input_cursor,built_at FROM dashboard_projection')
+        self.assertEqual(len({tuple(row[key] for key in ('revision','cursor','input_cursor','built_at'))
+                              for row in refreshed}), 1)
 
     async def test_same_price_volume_null_deletion_and_metadata_are_published(self):
         await self.put_asset()

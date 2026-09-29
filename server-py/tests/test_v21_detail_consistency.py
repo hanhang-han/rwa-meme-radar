@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.api import token as token_api
+from app import state
 
 
 class DetailConsistencyTests(unittest.IsolatedAsyncioTestCase):
@@ -25,14 +26,17 @@ class DetailConsistencyTests(unittest.IsolatedAsyncioTestCase):
             events=AsyncMock(return_value=[]), all=AsyncMock(return_value=[]),
             activity=AsyncMock(return_value={}), trade_buckets=AsyncMock(return_value=[]),
         )
-        with patch.object(token_api, 'reload_if_stale', AsyncMock()), \
+        with patch.object(state, 'reload_if_stale', AsyncMock()) as reload, \
              patch.object(token_api, 'store', AsyncMock(return_value=scoped)), \
              patch('app.demand_leases.publish_lease'), \
-             patch.object(token_api, 'DATA', SimpleNamespace(relations=[relation], stock_views=lambda: [])), \
+             patch.object(token_api, 'candidate_relations', AsyncMock(return_value=[relation])), \
+             patch.object(token_api, 'token_pools', AsyncMock(return_value=[])), \
+             patch.object(token_api, 'stock_view', AsyncMock(return_value=None)), \
              patch.object(token_api, '_asset_view', return_value={'token': meme, 'chainId': '196',
                                                                   'symbol': 'MEME', 'kind': 'candidate'}), \
              patch.object(token_api, 'attach_market_detail', AsyncMock(side_effect=lambda body, _: body)):
             result = await token_api.get_token('196', meme)
+            reload.assert_not_awaited()
         self.assertIsNone(result['relations'][0]['level'])
         self.assertIsNone(result['asset']['pairLiquidityUsd'])
         self.assertIsNone(result['asset']['relationLevel'])

@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -14,11 +15,9 @@ class FeedScopeTests(unittest.IsolatedAsyncioTestCase):
         async def scoped_market(scope, limit=100):
             return [{'chainId': scope.scope, 'id': 'trade:1', 't': 1000}]
 
-        with patch.object(misc.state, 'reload_if_stale', AsyncMock()), \
-             patch.object(misc.state.DATA, 'assets', []), \
-             patch.object(misc.state.DATA, 'relations', []), \
-             patch.object(misc.state.DATA, 'signals', [
-                 {'chainId': '196', 'id': 'x'}, {'chainId': '56', 'id': 'y'}]), \
+        snapshot = {'assets': [], 'signals': [
+            {'chainId': '196', 'id': 'x'}, {'chainId': '56', 'id': 'y'}]}
+        with patch.object(misc, 'read_projection_json', AsyncMock(return_value=json.dumps(snapshot))), \
              patch.object(misc, 'store', AsyncMock(side_effect=scoped_store)) as stores, \
              patch.object(misc, 'market_trades', AsyncMock(side_effect=scoped_market)):
             result = await misc.get_feed('196')

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   enrichAsset, enrichRelation, enrichStock, enrichmentState, GECKO_REQUESTS_PER_MINUTE, normalizeBlockscout,
   normalizeCoinGeckoInfo, normalizeCoinGeckoPools, normalizeCoinGeckoTokens, normalizeDexScreener,
-  normalizeEodQuotes, normalizeEodSearch, refreshCoinGeckoEnrichment, retryAfterMs,
+  normalizeEodQuotes, normalizeEodSearch, refreshCoinGeckoEnrichment, retryAfterMs, enrichmentSources,
 } from '../src/lib/market-enrichment';
 
 const token='0x'+'a'.repeat(40),pool='0x'+'b'.repeat(40),stock='0x'+'c'.repeat(40),at=2_000_000;
@@ -158,7 +158,8 @@ test('public GeckoTerminal round keeps token and pool calls ahead of holder info
   delete process.env.COINGECKO_API_KEY;
   const calls:string[]=[];
   const chains=['196','56','4663'];
-  const assets=chains.map(chain=>({chainId:chain,token}));
+  const unsupported='0x'+'d'.repeat(40);
+  const assets=[...chains.map(chain=>({chainId:chain,token})),{chainId:'196',token:unsupported}];
   const relations=chains.map(chain=>({chainId:chain,pool,status:'verified'}));
   globalThis.fetch=(async(input:any)=>{
     const url=String(input);calls.push(url);
@@ -171,11 +172,74 @@ test('public GeckoTerminal round keeps token and pool calls ahead of holder info
     assert.equal(calls.filter(url=>url.includes('/pools/multi/')).length,3);
     assert.equal(calls.filter(url=>url.includes('/info')).length,0);
     assert.equal(enrichmentState.providers.CoinGecko.status,'partial');
-    assert.equal(enrichmentState.attempts[`CoinGecko:asset:196:${token}`]?.reason,'no-verified-market-price');
-    assert.ok((enrichmentState.attempts[`CoinGecko:asset:196:${token}`]?.nextRetryAt??0)-Date.now()>23*60*60_000);
+    assert.equal(enrichmentState.attempts[`CoinGecko:asset:196:${token}`]?.reason,null,
+      'liquidity without a price still needs its normal refresh turn');
+    assert.ok((enrichmentState.attempts[`CoinGecko:asset:196:${token}`]?.nextRetryAt??0)-Date.now()<=300_000);
+    assert.equal(enrichmentState.attempts[`CoinGecko:asset:196:${unsupported}`]?.reason,'no-verified-market-or-liquidity');
+    assert.ok((enrichmentState.attempts[`CoinGecko:asset:196:${unsupported}`]?.nextRetryAt??0)-Date.now()>23*60*60_000);
   }finally{
     globalThis.fetch=previousFetch;
     if(previousKey===undefined)delete process.env.COINGECKO_API_KEY;else process.env.COINGECKO_API_KEY=previousKey;
+  }
+});
+
+test('CoinGecko rotates a full token batch on the next minute without repeating recently sampled assets',async()=>{
+  const oldNow=Date.now,oldFetch=globalThis.fetch,oldKey=process.env.COINGECKO_API_KEY,oldInfo=process.env.COINGECKO_INFO_ROUND_LIMIT;
+  let now=2_100_000_000_000;
+  const addr=(n:number)=>'0x'+n.toString(16).padStart(40,'0');
+  const assets=['196','56','4663'].flatMap((chain,index)=>Array.from({length:31},(_,n)=>({chainId:chain,token:addr(30000+index*100+n)})));
+  const called:string[]=[];
+  Date.now=()=>now;
+  process.env.COINGECKO_API_KEY='test-not-a-real-key';process.env.COINGECKO_INFO_ROUND_LIMIT='1';
+  globalThis.fetch=(async(input:any)=>{
+    const url=String(input);called.push(url);
+    const addresses=url.split('/tokens/multi/')[1]?.split('?')[0]?.split(',')??[];
+    return new Response(JSON.stringify({data:addresses.map(address=>({attributes:{address,price_usd:'1',total_reserve_in_usd:'1001'}}))}),
+      {headers:{'content-type':'application/json'}});
+  }) as any;
+  try{
+    await refreshCoinGeckoEnrichment({assets,relations:[]});
+    const first=called.filter(url=>url.includes('/tokens/multi/'));
+    assert.equal(first.length,3);
+    assert.ok(first.every(url=>url.split('/tokens/multi/')[1]?.split('?')[0]?.split(',').length===30));
+    now+=60_000;
+    await refreshCoinGeckoEnrichment({assets,relations:[]});
+    const second=called.filter(url=>url.includes('/tokens/multi/')).slice(3);
+    assert.equal(second.length,3);
+    assert.ok(second.every(url=>url.split('/tokens/multi/')[1]?.split('?')[0]?.split(',').length===1));
+    assert.equal(new Set(called.filter(url=>url.includes('/tokens/multi/')).flatMap(url=>url.split('/tokens/multi/')[1]?.split('?')[0]?.split(',')??[])).size,93);
+    assert.ok(called.length<=2*GECKO_REQUESTS_PER_MINUTE);
+    assert.equal(enrichmentState.assets[`4663:${addr(30230)}`]?.CoinGecko?.fieldTimes?.liquidity,now);
+  }finally{
+    Date.now=oldNow;globalThis.fetch=oldFetch;
+    if(oldKey===undefined)delete process.env.COINGECKO_API_KEY;else process.env.COINGECKO_API_KEY=oldKey;
+    if(oldInfo===undefined)delete process.env.COINGECKO_INFO_ROUND_LIMIT;else process.env.COINGECKO_INFO_ROUND_LIMIT=oldInfo;
+  }
+});
+
+test('CoinGecko source reports expired liquidity and a stalled round instead of old partial health',()=>{
+  const oldNow=Date.now,oldAssets=enrichmentState.assets,oldProvider={...enrichmentState.providers.CoinGecko};
+  const now=2_200_000_000_000,old=now-3_600_000,id=`56:${'0x'+'f'.repeat(40)}`;
+  Date.now=()=>now;
+  enrichmentState.assets={[id]:{CoinGecko:normalizeCoinGeckoTokens('56',
+    {data:[{attributes:{address:id.split(':')[1],total_reserve_in_usd:'1001'}}]},old).assets[id]}};
+  Object.assign(enrichmentState.providers.CoinGecko,{status:'partial',updatedAt:old,error:null,
+    lastAttemptAt:old,lastCompletedAt:old});
+  try{
+    const expired=enrichmentSources().find(row=>row.provider==='CoinGecko')!;
+    assert.equal(expired.status,'stale');
+    assert.equal(expired.reason,'last-success-expired');
+    assert.deepEqual(expired.liquidityCoverage?.status,'stale');
+    assert.equal(expired.liquidityCoverage?.known,1);
+    assert.equal(expired.liquidityCoverage?.fresh,0);
+    Object.assign(enrichmentState.providers.CoinGecko,{status:'partial',updatedAt:now-60_000,
+      lastAttemptAt:now-11*60_000,lastCompletedAt:now-12*60_000});
+    const stalled=enrichmentSources().find(row=>row.provider==='CoinGecko')!;
+    assert.equal(stalled.status,'stale');
+    assert.equal(stalled.reason,'collector-round-stalled');
+  }finally{
+    Date.now=oldNow;enrichmentState.assets=oldAssets;
+    Object.assign(enrichmentState.providers.CoinGecko,oldProvider);
   }
 });
 

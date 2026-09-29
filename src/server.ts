@@ -23,7 +23,7 @@ import { assessRelation, relationTypes } from "./lib/relations";
 import { refreshXLayer, refreshLiveQuotes, refreshSideQuotes, refreshAssetOnDemand, refreshWatched, xLayerState, xLayerDetail } from "./lib/xlayer";
 import { unifiedFromXLayer } from "./lib/unified-state";
 import { refreshRobinhood, robinhoodState, robinhoodToken } from "./lib/robinhood";
-import { refreshCoinGeckoEnrichment, refreshMarketEnrichment } from "./lib/market-enrichment";
+import { COINGECKO_REFRESH_INTERVAL_MS, refreshCoinGeckoEnrichment, refreshMarketEnrichment } from "./lib/market-enrichment";
 import { aiEnabled, aiNarrate } from "./lib/ai";
 import { registryInfo } from "./lib/registry";
 import { candleSeries, CANDLE_BARS } from "./lib/candles";
@@ -89,15 +89,16 @@ const radarArchive = new Map<string, NewToken>();
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function loop(name: string, intervalMs: number, fn: () => Promise<void>) {
+async function loop(name: string, intervalMs: number, fn: () => Promise<void>, fixedCadence=false) {
   for (;;) {
+    const startedAt=Date.now();
     try {
       await fn();
       state.health[name] = Date.now();
     } catch (e) {
       console.error(`[${name}]`, e instanceof Error ? e.message : e);
     }
-    await sleep(intervalMs);
+    await sleep(fixedCadence?Math.max(0,intervalMs-(Date.now()-startedAt)):intervalMs);
   }
 }
 
@@ -479,9 +480,10 @@ seedBstocks();
 void loop("dashboard", 300_000, collectDashboard);
 void loop("marketEnrichment", 300_000, async () => refreshMarketEnrichment(dashboardState()));
 // Rotate token-wide liquidity and official pool valuations independently of
-// slower supplemental providers. The conservative five-minute pause avoids
-// sustained public-API 429s and does not use OKX or EODHD call budgets.
-void loop("coinGeckoEnrichment", 300_000, async () => refreshCoinGeckoEnrichment(dashboardState()));
+// slower supplemental providers. The shared CoinGecko limiter and upstream
+// Retry-After remain authoritative; a minute-scale round can revisit the
+// full catalogue before its 30-minute liquidity freshness window expires.
+void loop("coinGeckoEnrichment", COINGECKO_REFRESH_INTERVAL_MS, async () => refreshCoinGeckoEnrichment(dashboardState()), true);
 // The issuer price endpoint caches for 15s. Catalogue/multiplier refreshes
 // remain independently bounded to five minutes inside this collector.
 void loop("robinhood", 15_000, refreshRobinhood);

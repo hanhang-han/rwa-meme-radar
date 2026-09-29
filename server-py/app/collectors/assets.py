@@ -34,13 +34,13 @@ def _num(value):
         return None
 
 
-async def save_asset(s, row: dict) -> dict | None:
-    """Merge an OKX quote row into the stored asset (field-level last write)."""
+async def save_asset(s, row: dict, *, return_changed: bool = False):
+    """Merge an OKX quote row, optionally reporting a durable data change."""
     token = (row.get("tokenContractAddress") or "").lower()
     if not token.startswith("0x") or len(token) != 42:
-        return None
+        return (None, False) if return_changed else None
     if str(row.get("chainIndex") or "") != str(s.scope):
-        return None
+        return (None, False) if return_changed else None
     received = now_ms()
     market_at = _num(row.get("time"))
     if market_at is not None and (market_at <= 0 or market_at > received + 60_000):
@@ -90,7 +90,8 @@ async def save_asset(s, row: dict) -> dict | None:
     price = timed_fields.get("price", (None, observed))[0]
     cap = timed_fields.get("marketCap", (old.get("marketCap"), observed))[0]
     sample = (price, cap, observed) if price is not None else None
-    return await s.merge_asset_observation(token, base_patch, timed_fields, sample)
+    return await s.merge_asset_observation(token, base_patch, timed_fields, sample,
+                                           return_changed=return_changed)
 
 
 def price_changed(old: dict | None, new: dict | None) -> bool:

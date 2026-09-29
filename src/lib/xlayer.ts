@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { existsSync } from 'node:fs';
 import { okxGet, okxPost, withRequestAllowance } from './okx-client';
 import { numeric, okxState, type RwaToken } from './okx';
 import { broadcastStream } from './stream';
@@ -25,10 +26,16 @@ const fresh = (at?: number | null, age = 900000) => !!at && Date.now() - at < ag
 const quoteSymbols = new Set(['USDT','USDC','USDG','DAI','WOKB','OKB','WETH','ETH','WBTC','BTC','XBTC']);
 const stores = new Map<string,ResearchStore>();
 function db() { const chain=chainId(); if(!stores.has(chain))stores.set(chain,new ResearchStore(process.env.RESEARCH_DB || 'data/research.sqlite',chain));return stores.get(chain)!; }
+function withReadDb<T>(action:(store:ResearchStore)=>T):T{
+  const chain=chainId(),file=process.env.RESEARCH_DB||'data/research.sqlite';
+  if(!existsSync(file))return action(db());
+  const store=new ResearchStore(file,chain,{readOnly:true});
+  try{return action(store);}finally{store.close();}
+}
 
 export interface XAsset {
   fieldTimes?:Record<string,number>; logoUrl?:string; volume5m?:number|null; volume1h?:number|null;
-  token: string; chain: string; symbol: string; name: string; firstSeen: number; updatedAt: number;
+  token: string; chain: string; symbol: string; name: string; firstSeen: number|null; updatedAt: number|null;
   source: string; price: number | null; marketCap: number | null; volume24h: number | null;
   buys24h: number | null; sells24h: number | null; countsAt?: number;
   txs24h: number | null; holders: number | null; liquidity: number | null; change24h: number | null;
@@ -127,7 +134,7 @@ function saveAsset(row:any) {
   const key=addr(row.tokenContractAddress); if (!key) return null;
   const asset=normalizeXAsset(row,db().get<XAsset>('asset',key)); if (!asset) return null;
   db().put('asset',key,asset);
-  if (asset.price != null && Object.hasOwn(row,'price')) db().sample(key,asset.price,asset.marketCap,asset.fieldTimes?.price??asset.updatedAt);
+  if (asset.price != null && Object.hasOwn(row,'price')) db().sample(key,asset.price,asset.marketCap,asset.fieldTimes?.price??asset.updatedAt??Date.now());
   return asset;
 }
 async function metadata(address:string, force=false) {
@@ -368,7 +375,6 @@ export async function refreshXLayer() {
   try {
     if(BigInt(await xRpc('eth_chainId',[])).toString()!==chainId()) throw new Error('RPC chain identity mismatch');
     const block=await xRpc('eth_blockNumber',[]);
-    persistStockCatalogue();
     // Recheck old pool endpoints even if they leave OKX's top five listing.
     const relations=db().all<XRelation>('relation').sort((a,b)=>a.checkedAt-b.checkedAt).filter(r=>!fresh(r.checkedAt,600000)).slice(0,16);
     for(const r of relations) {
@@ -437,28 +443,14 @@ export async function refreshXLayer() {
   }
 }
 
-// During the Node -> Python transition Node remains the catalogue adapter for
-// OKX RWA rows, while Python is the sole X Layer quote/relation collector.
-// Keeping this narrow operation separate prevents the five-minute Node round
-// from re-running Python-owned scans and trades.
-export function catalogueSchedule(){return db().get<any>('collector-job','catalogue:all')??{};}
-export function catalogueCheckpoint(success:boolean,reason:string|null=null){
-  const old=catalogueSchedule(),now=Date.now();const failures=success?0:Math.min(10,(old.failureCount??0)+1);
-  db().put('collector-job','catalogue:all',{id:'catalogue:all',domain:'catalogue',key:'all',lastAttemptAt:now,
-    lastSuccessAt:success?now:old.lastSuccessAt??null,failureCount:failures,reason,
-    nextRetryAt:success?0:now+Math.min(3600000,60000*2**failures)});
-}
-
-export function persistStockCatalogue() {
-  for (const stock of catalog().tokens) {
-    db().put('stock', stock.tokenContractAddress.toLowerCase(), stock);
-    const previous=db().get<XAsset>('asset',stock.tokenContractAddress.toLowerCase());
-    if (!previous) {
-      saveAsset({ ...stock, time: catalog().updatedAt, volume: stock.volume24h });
-    } else if(previous.kind!=='stock') {
-      db().put('asset',stock.tokenContractAddress.toLowerCase(),{token:previous.token,kind:'stock'});
-    }
-  }
+function catalogueAsset(stock:RwaToken,previous?:XAsset|null){
+  const observedAt=stock.quoteAt&&Number.isFinite(stock.quoteAt)&&stock.quoteAt<=Date.now()?stock.quoteAt:null;
+  const row=observedAt?{...stock,time:observedAt,volume:stock.volume24h}:{
+    chainIndex:stock.chainIndex,tokenContractAddress:stock.tokenContractAddress,
+    tokenSymbol:stock.tokenSymbol,tokenName:stock.tokenName,logoUrl:stock.logoUrl};
+  const asset=normalizeXAsset(row,null,observedAt??Date.now());
+  return asset?{...asset,kind:'stock' as const,firstSeen:previous?.firstSeen??observedAt??null,
+    updatedAt:previous?.updatedAt??observedAt??null}:null;
 }
 
 export function groupCandidates(assets:XAsset[],relations:XRelation[]) {
@@ -472,51 +464,55 @@ export function groupCandidates(assets:XAsset[],relations:XRelation[]) {
   return [...groups.values()].map(list=>{list.sort((a,b)=>score(b)-score(a));return {symbol:list[0].symbol,count:list.length,members:list};})
     .sort((a,b)=>score(b.members[0])-score(a.members[0]));
 }
-function sectorViews(_assets:XAsset[],_relations:XRelation[]) {
+function sectorViews(_assets:XAsset[],_relations:XRelation[],store:ResearchStore) {
   // The worker owns basket membership, baseline and samples. GET requests
   // must never establish or reset an index merely because someone visits.
-  const views=new Map(db().all<any>('basket-view').map(v=>[v.sector,v]));
+  const views=new Map(store.all<any>('basket-view').map(v=>[v.sector,v]));
   return Object.keys(sectors).map(sector=>views.get(sector)??{
     sector,chainId:chainId(),value:null,members:0,components:[],history:[],
     status:'pending',reason:'等待行业篮子定时计算',
   });
 }
 export function xLayerState() {
-  const assets=db().all<XAsset>('asset').map(a=>quoteSymbols.has(a.symbol.toUpperCase())?{...a,kind:'quote' as const}:a);
+  return withReadDb(store=>{
+  const assets=store.all<XAsset>('asset').map(a=>quoteSymbols.has(a.symbol.toUpperCase())?{...a,kind:'quote' as const}:a);
   const candidateIds=new Set(assets.filter(a=>a.kind==='candidate').map(a=>a.token));
-  const relations=db().all<XRelation>('relation').filter(r=>candidateIds.has(r.token)), scans=db().all<Scan>('scan');
+  const relations=store.all<XRelation>('relation').filter(r=>candidateIds.has(r.token)), scans=store.all<Scan>('scan');
   const verified=relations.filter(r=>r.status==='verified'&&fresh(r.checkedAt,3600000));
   const valued=verified.filter(r=>r.liquidityUsd!=null&&fresh(r.liquidityAt??r.checkedAt,3600000));
-  const old=db().get<any>('source','pipeline');
+  const old=store.get<any>('source','pipeline');
   return { ...runState(),updatedAt:runState().updatedAt??old?.updatedAt??null,
     coverage:{catalog:catalog().tokens.length,scanned:scans.filter(s=>catalog().tokens.some(t=>t.tokenContractAddress.toLowerCase()===s.token)).length,
-      errors:scans.filter(s=>s.status!=='ready').length,pools:db().all('pool').length,
+      errors:scans.filter(s=>s.status!=='ready').length,pools:store.all('pool').length,
       scope:'OKX 每资产流动性前 5 池；链上核验 token0/token1 与 asset()/underlying()；不覆盖无独立池地址的池接口'},
-    assets,relations,pools:db().all('pool'),signals:db().events(undefined,100).filter(event=>candidateIds.has(event.asset)),groups:groupCandidates(assets,relations),sectors:sectorViews(assets,relations),
+    assets,relations,pools:store.all('pool'),signals:store.events(undefined,100).filter(event=>candidateIds.has(event.asset)),groups:groupCandidates(assets,relations),sectors:sectorViews(assets,relations,store),
     metrics:{verifiedPools:verified.length,verifiedAssets:new Set(verified.map(r=>r.token)).size,
       actionableAssets:new Set(verified.filter(r=>(r.liquidityUsd??0)>=1000&&fresh(r.liquidityAt??r.checkedAt,3600000)).map(r=>r.token)).size,
       pairedLiquidityUsd:valued.length?valued.reduce((n,r)=>n+r.liquidityUsd!,0):null,
       liquidityCoverage:{valued:valued.length,total:verified.length},
       heat:{value:null,reason:'股票实际锁定量及同比持有人输入未齐备；交易活跃度单列'},
       stockFlow:{value:null,reason:'待归集配对池 LP 加入/退出事件；流动性余额不作为净流量'}} };
+  });
 }
 export function xLayerDetail(address:string) {
   const token=addr(address); if(!token) return null;
-  let asset=db().get<XAsset>('asset',token);
-  const stock=catalog().tokens.find(s=>s.tokenContractAddress.toLowerCase()===token)??db().get<RwaToken>('stock',token);
-  if(!asset&&stock) asset=normalizeXAsset({...stock,volume:stock.volume24h})!;
+  return withReadDb(store=>{
+  let asset=store.get<XAsset>('asset',token);
+  const stock=catalog().tokens.find(s=>s.tokenContractAddress.toLowerCase()===token)??store.get<RwaToken>('stock',token);
+  if(!asset&&stock) asset=catalogueAsset(stock);
   if(!asset) return null;
-  const relations=db().all<XRelation>('relation').filter(r=>r.token===token||r.stock===token);
-  const recent=db().recentTrades(token);
-  return {asset,stock,relations,trades:recent,activity:db().activity(token,Date.now()-86400000),samples:db().samples(token),
-    events:db().events(token),pools:db().all<any>('pool').filter(p=>p.token0===token||p.token1===token),scan:db().get<Scan>('scan',token),
-    stocks:relations.map(r=>({relation:r,stock:catalog().tokens.find(s=>s.tokenContractAddress.toLowerCase()===r.stock),profile:db().get<XAsset>('asset',r.stock)?.profile})),
+  const relations=store.all<XRelation>('relation').filter(r=>r.token===token||r.stock===token);
+  const recent=store.recentTrades(token);
+  return {asset,stock,relations,trades:recent,activity:store.activity(token,Date.now()-86400000),samples:store.samples(token),
+    events:store.events(token),pools:store.all<any>('pool').filter(p=>p.token0===token||p.token1===token),scan:store.get<Scan>('scan',token),
+    stocks:relations.map(r=>({relation:r,stock:catalog().tokens.find(s=>s.tokenContractAddress.toLowerCase()===r.stock),profile:store.get<XAsset>('asset',r.stock)?.profile})),
     analysis:{method:'规则解读 · 链上证据与 OKX 行情',
       conclusion:relations.some(r=>r.status==='verified')?'已核验股票配对；请结合证据时效和资金规模判断。':asset.match?`名称命中 ${asset.match.ticker}，尚无已核验资金关系。`:'当前覆盖范围尚未核验股票配对关系。',
       correlation:{value:null,reason:'尚未验证独立股票现货行情与独立 Meme 价格，避免配对计价造成机械相关'},
       capture:{value:null,reason:'当前仅前 5 池，缺少同口径股票侧流动性分母'},
       safety:'OKX 风险标签为辅助信息；配对核验不代表安全认证。'},
   };
+  });
 }
 
-export function networkEvents(before?:{t:number;id:string},limit=50){return db().eventsPage(before,limit);}
+export function networkEvents(before?:{t:number;id:string},limit=50){return withReadDb(store=>store.eventsPage(before,limit));}

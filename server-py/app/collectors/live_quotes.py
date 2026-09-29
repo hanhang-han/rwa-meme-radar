@@ -84,7 +84,7 @@ async def _fetch_entries(entries, lane, priority='background'):
                 usable = float(row.get('price')) > 0 and float(row.get('price')) < float('inf')
             except (TypeError, ValueError):
                 usable = False
-            updated = await save_asset(stores[c], row)
+            updated, changed = await save_asset(stores[c], row, return_changed=True)
             if not updated or not usable:
                 continue
             if baseline_age is not None and not fresh_price(updated, now_ms(), baseline_age):
@@ -95,6 +95,8 @@ async def _fetch_entries(entries, lane, priority='background'):
             answered.add((c, t))
             await checkpoint(stores[c], 'quote', t, success=True)
             totals['accepted'] += 1
+            if not changed:
+                continue
             totals['updated'] += 1
             source = (updated.get('fieldObservations') or {}).get('price') or {}
             broadcast('price', {

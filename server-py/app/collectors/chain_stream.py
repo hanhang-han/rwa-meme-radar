@@ -22,6 +22,18 @@ SWAP_V2 = Web3.to_hex(Web3.keccak(text="Swap(address,uint256,uint256,uint256,uin
 SWAP_V3 = Web3.to_hex(Web3.keccak(text="Swap(address,address,int256,int256,uint160,uint128,int24)"))
 SYNC_V2 = Web3.to_hex(Web3.keccak(text="Sync(uint112,uint112)"))
 TOPICS = [SWAP_V2, SWAP_V3, SYNC_V2]
+FACT_UPSERT = "INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body"
+CANDLE_UPSERT = """INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(asset,bar,openTime) DO UPDATE SET open=excluded.open,high=excluded.high,
+    low=excluded.low,close=excluded.close,volume=excluded.volume,volumeUsd=excluded.volumeUsd,
+    confirmed=excluded.confirmed"""
+# The recent lane must be able to reach the tip before another long outage
+# makes its backlog grow again. Older blocks remain assigned to the durable
+# historical lane when we start a new, explicitly bounded recent interval.
+RECENT_REBASE_LAG_BLOCKS = 1800
+RECENT_REBASE_DEPTH_BLOCKS = 300
+REPLAY_PAUSE_QUEUE_FRACTION = .5
+REPLAY_RESUME_QUEUE_FRACTION = .25
 DEFAULTS = {
     "196": (["wss://ws.xlayer.tech", "wss://xlayerws.okx.com"], "https://xlayerrpc.okx.com"),
     "56": (["wss://bsc-rpc.publicnode.com"], "https://bsc-rpc.publicnode.com"),
@@ -142,6 +154,7 @@ class ChainPoolStream:
         self.last_received = 0
         self.last_source_event = 0
         self.live_processing = False
+        self.replay_paused = False
         self.removed_revisions = OrderedDict()
         self.processed = 0
         self.unsupported = 0
@@ -343,6 +356,7 @@ class ChainPoolStream:
             "lastSourceEventAt": self.last_source_event or None,
             "sourceLagMs": max(0, now_ms() - self.last_source_event) if self.last_source_event else None,
             "queueDepth": self.queue.qsize(), "liveProcessing": self.live_processing,
+            "replayPausedForLive": self.replay_under_pressure(),
             "rateLimitedAt": self.rpc_rate_limited_at, "cooldownUntil": self.rpc_cooldown_wall,
             "rpcIntervalMs": round(self.rpc_interval * 1000),
             "lastHead": self.latest_head, "lastProcessedBlock": historical_block,
@@ -352,6 +366,8 @@ class ChainPoolStream:
             "lastNearTipBlock": near_tip_block,
             "nearTipCoverageFrom": near_tip_from,
             "nearTipVerifiedAt": near_tip.get("updatedAt"),
+            "nearTipRebasedAt": near_tip.get("rebasedAt"),
+            "nearTipRebasedFromBlock": near_tip.get("rebasedFromBlock"),
             "nearTipLagBlocks": (max(0, self.latest_head - near_tip_block)
                                  if isinstance(near_tip_block, int) else None),
             # Only the interval before the recent lane's observed start is
@@ -392,13 +408,11 @@ class ChainPoolStream:
         return sorted(result)
 
     async def wait_for_live(self, max_wait=.25):
-        """Give live events priority without letting a busy feed stop replay.
+        """Give a shallow live queue a bounded head start over replay.
 
-        A queue that never becomes empty used to prevent every getLogs page
-        (including the near-tip recovery lane) from ever running. Each page
-        now grants the live consumer a bounded head start; the replay still
-        yields on every wait and RPC. An incomplete range never advances its
-        cursor, so forced progress cannot certify a partial interval.
+        A permanently nonempty but shallow queue should not stop history from
+        progressing. A high queue is handled by replay_under_pressure, which
+        pauses the range without advancing its cursor.
         """
         deadline = time.monotonic() + max_wait
         while not self.queue.empty() or self.live_processing:
@@ -408,6 +422,19 @@ class ChainPoolStream:
                 return False
             await asyncio.sleep(min(.05, remaining))
         return True
+
+    def replay_under_pressure(self):
+        """Leave the shared RPC and SQLite budget to live logs until backlog drains."""
+        capacity = self.queue.maxsize
+        if capacity <= 0:
+            self.replay_paused = False
+            return False
+        pending = self.queue.qsize() + int(self.retry_event is not None) + int(self.live_processing)
+        if self.replay_paused:
+            self.replay_paused = pending > max(1, int(capacity * REPLAY_RESUME_QUEUE_FRACTION))
+        else:
+            self.replay_paused = pending >= max(1, int(capacity * REPLAY_PAUSE_QUEUE_FRACTION))
+        return self.replay_paused
 
     async def log_header(self, log):
         """Public nodes can publish a log before hash lookup is indexed.
@@ -635,7 +662,8 @@ class ChainPoolStream:
                 if not insert.rowcount:
                     await s.db.rollback()
                     return False
-                await self._fact("market-registry", market.storage, market.record())
+                fact_rows = [self._fact_params("market-registry", market.storage, market.record())]
+                candle_rows = []
                 events = []
                 bars = self.bars(market)
                 bar_keys = {}
@@ -645,17 +673,24 @@ class ChainPoolStream:
                     opened = (trade["t"] - offset) // width * width + offset
                     bar_keys[bar] = (opened, market.storage + ":" + bar + ":" + str(opened))
 
-                async def current_facts(kind, keys):
-                    placeholders = ",".join("?" for _ in keys)
-                    rows = await s.db.execute_fetchall(
-                        f"SELECT id,body FROM facts WHERE kind=? AND id IN ({placeholders})",
-                        (s.key(kind), *keys),
-                    )
-                    return {key: json.loads(value) for key, value in rows}
-
-                accumulators = await current_facts("pool-candle-acc", [bar_keys[bar][1] for bar in bars])
-                current_candles = await current_facts("market-candle", [market.storage + ":" + bar for bar in bars])
-                current_meta = await current_facts("candle-meta", [market.candle_key(bar) for bar in bars])
+                selectors = {
+                    "pool-candle-acc": [bar_keys[bar][1] for bar in bars],
+                    "market-candle": [market.storage + ":" + bar for bar in bars],
+                    "candle-meta": [market.candle_key(bar) for bar in bars],
+                }
+                where, args = [], []
+                for kind, keys in selectors.items():
+                    where.append("(kind=? AND id IN (" + ",".join("?" for _ in keys) + "))")
+                    args.extend((s.key(kind), *keys))
+                rows = await s.db.execute_fetchall(
+                    "SELECT kind,id,body FROM facts WHERE " + " OR ".join(where), tuple(args))
+                current = {kind: {} for kind in selectors}
+                kind_names = {s.key(kind): kind for kind in selectors}
+                for kind, key, value in rows:
+                    current[kind_names[kind]][key] = json.loads(value)
+                accumulators = current["pool-candle-acc"]
+                current_candles = current["market-candle"]
+                current_meta = current["candle-meta"]
                 for bar in bars:
                     width = BAR_MS[bar]
                     opened, key = bar_keys[bar]
@@ -675,8 +710,8 @@ class ChainPoolStream:
                         raise ValueError("invalid-chain-candle")
                     candle["confirmed"] = opened + width <= stamp
                     candle["observedAt"] = stamp
-                    await self._fact("pool-candle-acc", key, candle)
-                    await self._write_candle(market, bar, candle, stamp)
+                    fact_rows.append(self._fact_params("pool-candle-acc", key, candle))
+                    candle_rows.append(self._candle_params(market, bar, candle))
                     frame = {**market_frame, "bar": bar, "row": candle, "source": "Chain RPC",
                              "sourceEventAt": trade["t"], "receivedAt": received, "persistedAt": stamp,
                              "quality": "observed", "coverageFromBlock": self.coverage_from}
@@ -684,7 +719,7 @@ class ChainPoolStream:
                     old = current_candles.get(market.storage + ":" + bar) or {}
                     meta = current_meta.get(market.candle_key(bar)) or {}
                     if opened >= (old.get("row") or {}).get("t", 0):
-                        await self._fact("market-candle", market.storage + ":" + bar, frame)
+                        fact_rows.append(self._fact_params("market-candle", market.storage + ":" + bar, frame))
                         meta = {**meta, **market_frame, "source": "Chain RPC", "storage": market.storage,
                             "lastSuccessfulAt": stamp, "lastSourceEventAt": max(trade["t"], old.get("sourceEventAt") or 0),
                             "stale": False, "error": None, "transport": "websocket",
@@ -693,8 +728,12 @@ class ChainPoolStream:
                     marks[str(opened)] = stamp
                     if len(marks) > 1000:
                         marks = dict(sorted(marks.items(), key=lambda item: int(item[0]), reverse=True)[:1000])
-                    await self._fact("candle-meta", market.candle_key(bar), {
-                        **meta, "rowObservedAt": marks, "lastObservationAt": stamp})
+                    fact_rows.append(self._fact_params("candle-meta", market.candle_key(bar), {
+                        **meta, "rowObservedAt": marks, "lastObservationAt": stamp}))
+                # All rows are derived from one transaction snapshot. Grouping
+                # the writes avoids a worker-thread dispatch for every bar.
+                await s.db.executemany(FACT_UPSERT, fact_rows)
+                await s.db.executemany(CANDLE_UPSERT, candle_rows)
                 # Keep the original candle-then-trade event order, with one
                 # aiosqlite worker dispatch and the same transaction boundary.
                 events.append(("trade", body))
@@ -706,8 +745,10 @@ class ChainPoolStream:
                 raise
 
     async def _fact(self, kind, key, value):
-        await self.s.db.execute("INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body",
-                               (self.s.key(kind), key, json.dumps(value, allow_nan=False)))
+        await self.s.db.execute(FACT_UPSERT, self._fact_params(kind, key, value))
+
+    def _fact_params(self, kind, key, value):
+        return self.s.key(kind), key, json.dumps(value, allow_nan=False)
 
     async def _observe_bar(self, market, bar, opened, stamp):
         meta = await self.s.get("candle-meta",market.candle_key(bar)) or {}
@@ -779,12 +820,11 @@ class ChainPoolStream:
         self.last_closed=stamp
 
     async def _write_candle(self, market, bar, row, stamp):
-        await self.s.db.execute("""INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(asset,bar,openTime) DO UPDATE SET open=excluded.open,high=excluded.high,
-            low=excluded.low,close=excluded.close,volume=excluded.volume,volumeUsd=excluded.volumeUsd,
-            confirmed=excluded.confirmed""",
-            (self.s.key(market.storage), bar, row["t"], row["o"], row["h"], row["l"], row["c"],
-             row["v"], row["vu"], int(bool(row.get("confirmed")))))
+        await self.s.db.execute(CANDLE_UPSERT, self._candle_params(market, bar, row))
+
+    def _candle_params(self, market, bar, row):
+        return (self.s.key(market.storage), bar, row["t"], row["o"], row["h"], row["l"], row["c"],
+                row["v"], row["vu"], int(bool(row.get("confirmed"))))
 
     async def retract_trade(self, market, ident):
         from .market_streams import BAR_MS, trade_to_candle
@@ -927,6 +967,10 @@ class ChainPoolStream:
             })
             return result
 
+    def _paused_replay_result(self, lane, head, processed_block):
+        self.scan_page_metrics[lane]["pausedForLiveAt"] = now_ms()
+        return {'caughtUp': False, 'head': head, 'processedBlock': processed_block}
+
     async def _catch_up(self, lane="pools", max_ranges=3, initial_depth=2, head=None):
         """Only a successful full getLogs interval advances its own durable cursor.
 
@@ -935,6 +979,9 @@ class ChainPoolStream:
         advance the other when a provider fails or the process restarts.
         """
         current = await self.s.get("chain-stream-cursor", lane) or {}
+        if self.replay_under_pressure():
+            return self._paused_replay_result(
+                lane, number(head['number']) if head else self.latest_head, current.get('block'))
         if head is None:
             head = await self.rpc("eth_getBlockByNumber", ["latest", False])
         self.remember_header(head)
@@ -975,6 +1022,7 @@ class ChainPoolStream:
         if lane == "pools" and self.coverage_from is None:
             self.coverage_from = lane_coverage_from
         addresses = sorted(self.pools)
+        processed_block = current.get("block")
         if not addresses:
             return {'caughtUp': True, 'head': height, 'processedBlock': previous}
         if not anchors and start > 0:
@@ -987,6 +1035,8 @@ class ChainPoolStream:
         for _ in range(max_ranges):
             if start > height:
                 break
+            if self.replay_under_pressure():
+                return self._paused_replay_result(lane, height, processed_block)
             range_started = time.monotonic()
             range_rpc_ms = 0
             # Both PublicNode chains accept 300-block / 8-address filters.
@@ -1002,8 +1052,12 @@ class ChainPoolStream:
             # accept larger filters. Verified 8-address getLogs batches.
             page_size = 8 if self.chain in ("56", "4663") else 64
             for offset in range(0, len(addresses), page_size):
+                if self.replay_under_pressure():
+                    return self._paused_replay_result(lane, height, processed_block)
                 page_started = time.monotonic()
                 await self.wait_for_live()
+                if self.replay_under_pressure():
+                    return self._paused_replay_result(lane, height, processed_block)
                 rpc_started = time.monotonic()
                 logs = None
                 try:
@@ -1034,6 +1088,8 @@ class ChainPoolStream:
             ordered_logs = sorted(all_logs, key=lambda x: (
                 number(x["blockNumber"]), number(x.get("transactionIndex", "0x0")), number(x["logIndex"])))
             for index, log in enumerate(ordered_logs):
+                if self.replay_under_pressure():
+                    return self._paused_replay_result(lane, height, processed_block)
                 # One bounded live head start per eight replayed logs keeps
                 # high-volume ranges moving; the intervening yields and the
                 # mutation lock still let subscribed events run between them.
@@ -1041,7 +1097,11 @@ class ChainPoolStream:
                     await self.wait_for_live()
                 else:
                     await asyncio.sleep(0)
+                if self.replay_under_pressure():
+                    return self._paused_replay_result(lane, height, processed_block)
                 await self.process_log(log)
+            if self.replay_under_pressure():
+                return self._paused_replay_result(lane, height, processed_block)
             # WebSocket events may have arrived from an abandoned fork while
             # the paged HTTP/WS range was in progress. Remove them before the
             # durable watermark can certify this interval.
@@ -1054,12 +1114,17 @@ class ChainPoolStream:
                 raise ValueError("checkpoint-block-unavailable")
             if end_header["hash"].lower() != before["hash"].lower():
                 raise RuntimeError("chain-reorg-during-range")
+            if self.replay_under_pressure():
+                return self._paused_replay_result(lane, height, processed_block)
             anchors.append({"block": end, "hash": end_header["hash"]})
             anchors = anchors[-128:]
             await self.s.put("chain-stream-cursor", lane, {
                 "block": end, "hash": end_header["hash"], "coverageFrom": lane_coverage_from,
                 "updatedAt": now_ms(), "blockTime": number(end_header["timestamp"])*1000,
-                "poolCount": len(addresses), "anchors": anchors})
+                "poolCount": len(addresses), "anchors": anchors,
+                **({key: current[key] for key in ("rebasedAt", "rebasedFromBlock", "previousCoverageFrom")
+                    if key in current} if lane == "pools-live" else {})})
+            processed_block = end
             self.scan_page_metrics[lane].update({
                 "lastSuccessAt": now_ms(), "lastSuccessfulBlock": end,
                 "lastRangeFromBlock": start, "lastRangeToBlock": end,
@@ -1095,13 +1160,52 @@ class ChainPoolStream:
             self.last_prune = now_ms()
         return {'caughtUp': start > height, 'head': height, 'processedBlock': start - 1}
 
+    async def rebase_recent_if_far_behind(self, head):
+        """Restore a near-tip lane without certifying the skipped history.
+
+        A saved recent cursor can fall so far behind after an outage that the
+        three bounded replay ranges cannot catch the moving head. Its former
+        interval remains in the historical lane's explicit gap and is replayed
+        there. Existing trades remain persisted and replay is idempotent.
+        """
+        recent = await self.s.get("chain-stream-cursor", "pools-live") or {}
+        previous = recent.get("block")
+        height = number(head["number"])
+        if not isinstance(previous, int) or height - previous <= RECENT_REBASE_LAG_BLOCKS:
+            return False
+        historical = await self.s.get("chain-stream-cursor", "pools") or {}
+        if not isinstance(historical.get("block"), int):
+            return False
+        first = max(0, height - RECENT_REBASE_DEPTH_BLOCKS + 1)
+        anchor = await self.rpc("eth_getBlockByNumber", [hex(first - 1), False])
+        if not anchor or not anchor.get("hash"):
+            raise ValueError("recent-rebase-anchor-unavailable")
+        if self.replay_under_pressure():
+            return False
+        await self.s.put("chain-stream-cursor", "pools-live", {
+            "block": first - 1, "hash": anchor["hash"],
+            "coverageFrom": first, "updatedAt": now_ms(),
+            "blockTime": number(anchor["timestamp"]) * 1000,
+            "poolCount": len(self.pools),
+            "anchors": [{"block": first - 1, "hash": anchor["hash"]}],
+            "rebasedAt": now_ms(), "rebasedFromBlock": previous,
+            "previousCoverageFrom": recent.get("coverageFrom"),
+        })
+        return True
+
     async def reconcile_step(self):
         """Verify the current tip before spending the shared RPC budget on old history."""
         historical = await self.s.get("chain-stream-cursor", "pools") or {}
+        if self.replay_under_pressure():
+            return {'caughtUp': False, 'head': self.latest_head,
+                    'processedBlock': historical.get('block')}
         head = await self.rpc("eth_getBlockByNumber", ["latest", False])
         height = number(head["number"])
         historical_block = historical.get("block")
+        if self.replay_under_pressure():
+            return {'caughtUp': False, 'head': height, 'processedBlock': historical_block}
         if isinstance(historical_block, int) and height - historical_block > 32:
+            await self.rebase_recent_if_far_behind(head)
             # On the first dual-lane run, explicitly cover the last 300
             # blocks. On later runs the saved lane replays every missed block
             # after a disconnect, while the older gap stays on pools.
@@ -1204,6 +1308,7 @@ class ChainPoolStream:
         if reader.done():
             await reader
             raise RuntimeError("chain-stream-recovery-connection-closed")
+        await self.rebase_recent_if_far_behind(head)
         await self.catch_up("pools-live", max_ranges=3, initial_depth=299, head=head)
         self.recovery_needed = False
         await self.status_fact(force=True)

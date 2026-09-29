@@ -9,7 +9,8 @@ from fastapi import APIRouter, HTTPException
 
 from ..db import store
 from ..data_quality import evaluate_asset
-from ..state import DATA, fresh, reload_if_stale, _assessed_relations, _official_pools, _pool_totals, unquoted_market_status
+from ..state import _assessed_relations, _official_pools, _pool_totals, unquoted_market_status
+from ..scoped_reads import candidate_relations, stock_view, token_pools
 from .. import stock_quotes
 from ..market_quotes import enrich_asset
 from ..market_history import attach_market_detail
@@ -82,8 +83,6 @@ async def get_token(chain: str, address: str):
     address = address.lower()
     if chain not in ("196", "56", "4663") or not (address.startswith("0x") and len(address) == 42):
         raise HTTPException(status_code=400, detail="unsupported token")
-    await reload_if_stale()
-
     s = await store(chain)
     asset = await s.get("asset", address)
     if asset:
@@ -145,14 +144,11 @@ async def get_token(chain: str, address: str):
         raise HTTPException(status_code=404, detail="该地址尚未进入追踪索引")
 
     now = time.time() * 1000
-    relations = _assessed_relations([
-        r for r in DATA.relations if str(r.get("chainId")) == chain
-        and (r.get("token") == address or r.get("stock") == address)
-    ], now)
+    relations = _assessed_relations(await candidate_relations(s, chain, address), now)
     samples = await s.samples(address, 288)
     trades = await s.recent_trades(address, 50)
     events = [e for e in await s.events(address, 50)][:50]
-    pools = [p for p in await s.all("pool") if p.get("token0", "").lower() == address or p.get("token1", "").lower() == address]
+    pools = await token_pools(s, address)
     scan = await s.get("scan", address)
     day_ago = time.time() * 1000 - 86_400_000
     activity = await s.activity(address, day_ago)
@@ -164,9 +160,9 @@ async def get_token(chain: str, address: str):
     }
 
     verified = [r for r in relations if r.get("level") == "A"]
-    asset_view = unquoted_market_status(
-        _asset_view(asset, chain),
-        getattr(DATA, 'quote_jobs', {}).get((chain, address)), now)
+    quote_job = (await s.get('collector-job', 'quote:' + address)
+                 if asset.get('kind') in ('candidate', 'stock') and asset.get('price') is None else None)
+    asset_view = unquoted_market_status(_asset_view(asset, chain), quote_job, now)
     pool_totals = _pool_totals(_official_pools(verified), now)
     asset_view['pairLiquidityUsd'] = pool_totals['liquidityUsd']
     asset_view['pairLiquidityCoverage'] = pool_totals['coverage']
@@ -177,7 +173,7 @@ async def get_token(chain: str, address: str):
     asset_view["dataQuality"] = evaluate_asset(asset_view, verified, now)
 
     # Stock quote overlay for catalogue tokens that also exist as facts.
-    stock_row = next((r for r in DATA.stock_views() if str(r.get("chainId")) == chain and str(r.get("tokenContractAddress", "")).lower() == address), None)
+    stock_row = await stock_view(s, chain, address, asset)
     if not stock_row and chain == "56":
         token = stock_quotes.binance_token(address)
         if token:

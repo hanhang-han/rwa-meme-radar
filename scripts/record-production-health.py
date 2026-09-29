@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Record one bounded, sanitized production health observation.
 
-Run once per minute from the deployment root. Only the loopback health API and
-local file metadata are read; the research database is never opened.
+Run once per minute from the deployment root. Read the loopback health API,
+local file metadata, and small Linux procfs snapshots; never open the research
+database.
 """
 
 import argparse
 import datetime as dt
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -31,6 +33,18 @@ TASK_NAMES = (
     "maintenance",
 )
 SAFE_LABEL = re.compile(r"[A-Za-z0-9:._-]{1,96}\Z")
+MAX_PROC_BYTES = 64 * 1024
+MAX_PROC_FIELD_BYTES = 4096
+MAX_COUNTER = (1 << 63) - 1
+MAX_PID = 10_000_000
+MAX_PM2_DIRECTORY_ENTRIES = 256
+MAX_PM2_PIDS_PER_SERVICE = 16
+SERVICE_MARKERS = {
+    "memedashboard": b"src/server.ts",
+    "pyradar": b"app.main:app",
+    "pyradar-worker": b"app.worker",
+    "pyradar-projection": b"app.projection_worker",
+}
 
 
 def utc_text(value: dt.datetime) -> str:
@@ -208,6 +222,162 @@ def local_files_summary(root: Path):
     return {"walBytes": wal_bytes, "latestResearchBackup": latest_backup(root)}
 
 
+def read_bounded(path: Path, limit: int = MAX_PROC_FIELD_BYTES):
+    """Return a small procfs/PID-file snapshot, or None if it is unavailable."""
+    try:
+        with path.open("rb") as source:
+            value = source.read(limit + 1)
+        return value if len(value) <= limit else None
+    except OSError:
+        return None
+
+
+def bounded_integer(value):
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value if 0 <= value <= MAX_COUNTER else None
+
+
+def kilobytes(value):
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return bounded_integer(count * 1024)
+
+
+def meminfo_summary(proc_root: Path):
+    names = (b"MemTotal", b"MemAvailable", b"SwapTotal", b"SwapFree")
+    values = {name: None for name in names}
+    raw = read_bounded(proc_root / "meminfo", MAX_PROC_BYTES)
+    if raw is not None:
+        for line in raw.splitlines():
+            key, separator, value = line.partition(b":")
+            if separator and key in values:
+                match = re.fullmatch(rb"\s*([0-9]+)\s+kB\s*", value)
+                values[key] = kilobytes(match.group(1)) if match else None
+    swap_total, swap_free = values[b"SwapTotal"], values[b"SwapFree"]
+    return {
+        "memTotalBytes": values[b"MemTotal"],
+        "memAvailableBytes": values[b"MemAvailable"],
+        "swapTotalBytes": swap_total,
+        "swapUsedBytes": swap_total - swap_free
+                         if swap_total is not None and swap_free is not None and swap_free <= swap_total else None,
+    }
+
+
+def bounded_float(value, maximum):
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(result, 3) if math.isfinite(result) and 0 <= result <= maximum else None
+
+
+def load_summary(proc_root: Path):
+    raw = read_bounded(proc_root / "loadavg")
+    fields = raw.split() if raw is not None else []
+    return {name: bounded_float(fields[index], 1_000_000) if len(fields) > index else None
+            for index, name in enumerate(("load1", "load5", "load15"))}
+
+
+def pressure_values(proc_root: Path, kind: str):
+    values = {b"some": None, b"full": None}
+    raw = read_bounded(proc_root / "pressure" / kind)
+    for line in raw.splitlines() if raw is not None else ():
+        category, separator, _ = line.partition(b" ")
+        if separator and category in values:
+            match = re.search(rb"(?:^|\s)avg10=([^\s]+)", line)
+            values[category] = bounded_float(match.group(1), 100) if match else None
+    return values
+
+
+def valid_pid(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= MAX_PID else None
+
+
+def pm2_pids(pm2_home: Path):
+    """Find a few numeric PM2 IDs for only the services this recorder knows."""
+    paths = {service: [] for service in SERVICE_MARKERS}
+    try:
+        with os.scandir(pm2_home / "pids") as entries:
+            for index, entry in enumerate(entries):
+                if index >= MAX_PM2_DIRECTORY_ENTRIES:
+                    break
+                if not entry.name.endswith(".pid"):
+                    continue
+                service, separator, pm2_id = entry.name[:-4].rpartition("-")
+                if not separator or service not in paths or not re.fullmatch(r"[0-9]{1,6}", pm2_id):
+                    continue
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        paths[service].append((int(pm2_id), Path(entry.path)))
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    result = {}
+    for service, matches in paths.items():
+        pids = []
+        for _, path in sorted(matches, key=lambda item: item[0], reverse=True)[:MAX_PM2_PIDS_PER_SERVICE]:
+            raw = read_bounded(path, 32)
+            if raw is not None and re.fullmatch(rb"[0-9]{1,8}\s*", raw):
+                if (pid := valid_pid(int(raw))) is not None:
+                    pids.append(pid)
+        result[service] = tuple(pids)
+    return result
+
+
+def process_rss_bytes(proc_root: Path, pid: int, marker: bytes):
+    process = proc_root / str(pid)
+    command = read_bounded(process / "cmdline", MAX_PROC_FIELD_BYTES)
+    if command is None or not any(argument == marker or argument.endswith(b"/" + marker)
+                                  for argument in command.split(b"\0")):
+        return None
+    status = read_bounded(process / "status", MAX_PROC_BYTES)
+    if status is None:
+        return None
+    for line in status.splitlines():
+        if line.startswith(b"VmRSS:"):
+            match = re.fullmatch(rb"VmRSS:\s*([0-9]+)\s+kB\s*", line)
+            return kilobytes(match.group(1)) if match else None
+    return None
+
+
+def resource_summary(health=None, *, proc_root=Path("/proc"), pm2_home=None):
+    """Sample only fixed procfs files and the four known PM2 service PIDs."""
+    if pm2_home is None:
+        pm2_home = Path(os.environ.get("PM2_HOME") or Path.home() / ".pm2")
+    health = mapping(health)
+    api_pids = {
+        "pyradar-worker": valid_pid(mapping(health.get("collector")).get("pid")),
+        "pyradar-projection": valid_pid(mapping(health.get("projection")).get("pid")),
+    }
+    known_pm2_pids = pm2_pids(pm2_home)
+    rss = {}
+    for service, marker in SERVICE_MARKERS.items():
+        rss[service] = None
+        for pid in (*known_pm2_pids[service], api_pids.get(service)):
+            if pid is not None and (size := process_rss_bytes(proc_root, pid, marker)) is not None:
+                rss[service] = size
+                break
+    cpu_pressure = pressure_values(proc_root, "cpu")
+    memory_pressure = pressure_values(proc_root, "memory")
+    io_pressure = pressure_values(proc_root, "io")
+    return {
+        **meminfo_summary(proc_root),
+        **load_summary(proc_root),
+        "pressureAvg10": {
+            "cpuSome": cpu_pressure[b"some"],
+            "memorySome": memory_pressure[b"some"],
+            "memoryFull": memory_pressure[b"full"],
+            "ioSome": io_pressure[b"some"],
+            "ioFull": io_pressure[b"full"],
+        },
+        "processRssBytes": rss,
+    }
+
+
 def project_health(health, root: Path, now: dt.datetime):
     sources = health.get("sources") if isinstance(health.get("sources"), list) else []
     disk = mapping(health.get("disk"))
@@ -292,10 +462,12 @@ def retain_and_write(path: Path, sample: dict, now: dt.datetime):
         os.close(lock_fd)
 
 
-def record(root: Path, *, fetcher=fetch_health, now=None):
+def record(root: Path, *, fetcher=fetch_health, resource_sampler=resource_summary, now=None):
     now = now or dt.datetime.now(dt.timezone.utc)
+    health = {}
     try:
-        sample = project_health(fetcher(), root, now)
+        health = fetcher()
+        sample = project_health(health, root, now)
     except Exception as exc:
         sample = {
             "schemaVersion": SCHEMA_VERSION,
@@ -304,6 +476,11 @@ def record(root: Path, *, fetcher=fetch_health, now=None):
             "error": fetch_error(exc),
             "disk": local_files_summary(root),
         }
+    try:
+        sample["resources"] = resource_sampler(health)
+    except Exception:
+        # A local telemetry read must not turn a good API observation into an error.
+        sample["resources"] = resource_summary({}, proc_root=Path("/nonexistent"), pm2_home=Path("/nonexistent"))
     retain_and_write(root / "data" / OUTPUT_NAME, sample, now)
     return sample
 

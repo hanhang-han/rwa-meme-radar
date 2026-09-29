@@ -7,8 +7,8 @@
     <p v-if="error" role="alert" class="panel">{{ tr('状态读取失败。', 'Could not load status.') }} <button @click="load">{{ tr('重试', 'Retry') }}</button></p>
     <div class="status-summary">
       <div class="panel"><span>{{ tr('整体数据状态', 'Overall data status') }}</span><strong :class="healthTone">{{ overallLabel }}</strong><small>{{ tr('分别检查进程、任务和数据覆盖', 'Processes, jobs and coverage are checked separately') }}</small></div>
-      <div class="panel"><span>{{ tr('采集进程', 'Collection process') }}</span><strong :class="health?.collector?.ok ? 'up' : 'down'">{{ health?.collector?.ok ? tr('运行中', 'Running') : tr('需要检查', 'Check needed') }}</strong><small :class="collectorDegraded ? 'down' : ''">{{ collectorDegraded ? tr('有采集任务异常', 'A collection job needs attention') : tr('采集任务无异常报告', 'No collection job failure reported') }}</small><small>{{ tr('上次资产更新', 'Last asset update') }} {{ age(health?.latestAssetAt) }}</small></div>
-      <div class="panel"><span>{{ tr('统计进程', 'Projection process') }}</span><strong :class="health?.projection?.ok ? 'up' : 'down'">{{ health?.projection?.ok ? tr('运行中', 'Running') : tr('需要检查', 'Check needed') }}</strong><small :class="projectionDegraded ? 'down' : ''">{{ projectionDegraded ? tr('有统计任务异常', 'A projection job needs attention') : tr('统计任务无异常报告', 'No projection job failure reported') }}</small></div>
+      <div class="panel"><span>{{ tr('采集进程', 'Collection process') }}</span><strong :class="processTone(health?.collector)">{{ processLabel(health?.collector) }}</strong><small v-if="health" :class="collectorDegraded ? 'down' : ''">{{ collectorDegraded ? tr('有采集任务异常', 'A collection job needs attention') : tr('采集任务无异常报告', 'No collection job failure reported') }}</small><small>{{ tr('上次资产更新', 'Last asset update') }} {{ age(health?.latestAssetAt) }}</small></div>
+      <div class="panel"><span>{{ tr('统计进程', 'Projection process') }}</span><strong :class="processTone(health?.projection)">{{ processLabel(health?.projection) }}</strong><small v-if="health" :class="projectionDegraded ? 'down' : ''">{{ projectionDegraded ? tr('有统计任务异常', 'A projection job needs attention') : tr('统计任务无异常报告', 'No projection job failure reported') }}</small></div>
       <div class="panel"><span>{{ tr('磁盘剩余', 'Disk free') }}</span><strong :class="diskTone">{{ health?.disk?.freePercent == null ? '—' : `${health.disk.freePercent}%` }}</strong><small>{{ bytes(health?.disk?.freeBytes) }} {{ tr('可用', 'available') }}</small><small>{{ diskTrend }}</small></div>
     </div>
 
@@ -26,6 +26,7 @@
       <p v-if="!visibleSources.length" class="x-empty">{{ tr('尚无来源状态', 'Source status unavailable') }}</p>
       <p v-if="okxSource?.budget" class="hint">OKX {{ tr('当日额度', 'daily budget') }}：{{ num(okxSource.budget.daily) }} / {{ num(okxSource.budget.dailyLimit) }}；{{ tr('剩余', 'Remaining') }} {{ num(okxSource.budget.remaining) }}</p>
       <p v-if="okxSource?.budget?.lanes?.length" class="hint">{{ okxSource.budget.lanes.map(lane => `${lane.name} ${num(lane.used)}/${num(lane.limit)}`).join(' · ') }}</p>
+      <p class="hint">{{ tr('这里的更新时间是来源级状态时间。每个价格、成交额和流动性字段仍须分别核对其观测时间与来源。', 'These are source-level status times. Price, volume and liquidity each need their own observation time and source.') }}</p>
     </section>
 
     <section class="panel">
@@ -35,7 +36,7 @@
       </table></div>
       <p v-for="row in unavailableQuoteRows" :key="`unavailable-${row.key}`" class="hint">{{ row.label }}：{{ tr('已发现', 'Discovered') }} {{ num(row.total) }} · {{ tr('可报价', 'Quotable') }} {{ num(row.quotableTotal) }} · {{ tr('暂无可验证报价', 'No verifiable quote') }} {{ num(row.quoteUnavailable) }} · {{ tr('可报价部分达标', 'Quotable within target') }} {{ percent(row.quotableWithinTarget, row.quotableTotal) }}</p>
       <p v-if="unavailableQuoteRows.length" class="hint">{{ tr('表中达标率以全部已发现资产为分母；可报价部分单独计算，无法报价的资产继续保留在总数中。', 'The table rate uses all discovered assets; quotable coverage is shown separately, and unquotable assets remain in the total.') }}</p>
-      <p v-if="liquidityCoverage.total" class="hint">{{ tr('代币总流动性证据', 'Token-wide liquidity evidence') }}：{{ tr('当前', 'Current') }} {{ num(liquidityCoverage.fresh) }} · {{ tr('过期', 'Stale') }} {{ num(liquidityCoverage.stale) }} · {{ tr('未知', 'Unknown') }} {{ num(liquidityCoverage.unknown) }}</p>
+      <p v-if="liquidityCoverage.total" class="hint">{{ tr('代币总流动性证据', 'Token-wide liquidity evidence') }}：{{ tr('当前', 'Current') }} {{ num(liquidityCoverage.fresh) }} · {{ tr('过期', 'Stale') }} {{ num(liquidityCoverage.stale) }} · {{ tr('证据待核实', 'Evidence unverified') }} {{ num(liquidityCoverage.unverified) }} · {{ tr('时间不明', 'Unknown time') }} {{ num(liquidityCoverage.unknownTime) }} · {{ tr('无数值', 'No value') }} {{ num(liquidityCoverage.missing) }}</p>
       <p class="hint">{{ tr('来源提供行情时间时，以该时间判断新鲜度；未提供时使用收到报价的时间，并标明为来源观测，不能视为最新成交时间。发出请求本身不算新报价。', 'When a source provides market time, freshness uses that timestamp. Otherwise the received quote is labeled as a source observation, not a latest trade. A request alone does not count as a new quote.') }}</p>
     </section>
 
@@ -63,7 +64,7 @@
     <section class="panel">
       <h3>{{ tr('指标定义', 'Metric definitions') }}</h3>
       <dl class="status-definitions">
-        <div><dt>{{ tr('活跃 Meme', 'Active memes') }}</dt><dd>{{ tr('总流动性至少 $1,000、流动性来源观测不超过 30 分钟、价格观测不超过 15 分钟的候选币。来源未覆盖或观测过期的币不计入；计数会随证据过期而变化。', 'Candidates with at least $1,000 in total liquidity, a liquidity observation within 30 minutes and a price observation within 15 minutes. Missing or expired evidence excludes a token; the count can change as observations age.') }}</dd></div>
+        <div><dt>{{ tr('活跃 Meme', 'Active memes') }}</dt><dd>{{ tr('总流动性至少 $1,000、流动性来源观测不超过 30 分钟、价格观测不超过 15 分钟的候选币。来源未覆盖或观测过期的币不计入；计数为 0 也不表示网站没有成交。', 'Candidates with at least $1,000 in total liquidity, a liquidity observation within 30 minutes and a price observation within 15 minutes. Missing or expired evidence excludes a token; a zero count does not mean no trades occurred.') }}</dd></div>
         <div><dt>{{ tr('股票配对池', 'Stock pairs') }}</dt><dd>{{ tr('仅统计官方股票身份核验通过、关系为 A 级、池流动性至少 $1,000 且池估值观测不超过 15 分钟的配对池；按链与池地址去重。', 'Only grade-A pairs with verified official stock identity, at least $1,000 in pool liquidity and a pool valuation observed within 15 minutes; deduplicated by chain and pool address.') }}</dd></div>
         <div><dt>{{ tr('配对池流动性', 'Pair liquidity') }}</dt><dd>{{ tr('以上符合条件的配对池的双边流动性之和，区别于代币在全部池中的总流动性。', 'The sum of two-sided liquidity in the qualifying pairs above, separate from a token’s liquidity across all pools.') }}</dd></div>
         <div><dt>{{ tr('可排名资产', 'Rankable assets') }}</dt><dd>{{ tr('价格、成交、配对证据和池估值均达到排名时效要求的资产。', 'Assets whose price, volume, pair evidence and pool valuation meet ranking freshness rules.') }} {{ num(rankable) }} / {{ num(qualitySummary.total) }}</dd></div>
@@ -98,18 +99,25 @@ const chainStreams = computed(() => [...(health.value?.chainStreams ?? [])].sort
 const reference = computed(() => health.value?.capabilities?.stockReferences ?? health.value?.references);
 const collectorDegraded = computed(() => health.value?.issues?.includes('collector-degraded'));
 const projectionDegraded = computed(() => health.value?.issues?.includes('projection-degraded'));
-const healthTone = computed(() => health.value?.status === 'healthy' ? 'up' : health.value?.status === 'limited' ? 'warn' : 'down');
+const healthTone = computed(() => health.value?.status === 'healthy' ? 'up' : health.value?.status === 'limited' ? 'warn' : health.value?.status === 'degraded' ? 'down' : '');
 const diskTone = computed(() => health.value?.disk?.freePercent == null ? '' : health.value.disk.freePercent < 20 ? 'down' : health.value.disk.freePercent < 25 ? 'warn' : 'up');
 const overallLabel = computed(() => ({healthy:tr('正常', 'Healthy'),limited:tr('部分能力受限', 'Some capabilities limited'),degraded:tr('需要处理', 'Needs attention')})[health.value?.status] ?? tr('检查中', 'Checking'));
+function processTone(process) { return process?.ok === true ? 'up' : process?.ok === false ? 'down' : ''; }
+function processLabel(process) { return process?.ok === true ? tr('运行中', 'Running') : process?.ok === false ? tr('需要检查', 'Check needed') : tr('检查中', 'Checking'); }
 const liquidityCoverage = computed(() => {
   const rows = (store.snapshot?.unified?.assets ?? []).filter(row => row.kind === 'candidate');
   const now = minuteNow.value;
   const known = rows.filter(row => row.totalLiquidityUsd != null && Number.isFinite(Number(row.totalLiquidityUsd)));
+  const unknownTime = known.filter(row => !Number.isFinite(Number(row.totalLiquidityAt)) || Number(row.totalLiquidityAt)<=0).length;
   const fresh = known.filter(row => {
     const at = Number(row.totalLiquidityAt);
     return row.totalLiquidityStatus === 'current' && Number.isFinite(at) && at > 0 && at <= now + 1000 && now - at <= 1_800_000;
   }).length;
-  return {total:rows.length,known:known.length,fresh,stale:known.length-fresh,unknown:rows.length-known.length};
+  const stale = known.filter(row => {
+    const at=Number(row.totalLiquidityAt);
+    return Number.isFinite(at) && at>0 && (row.totalLiquidityStatus==='stale' || (row.totalLiquidityStatus==='current' && now-at>1_800_000));
+  }).length;
+  return {total:rows.length,known:known.length,fresh,stale,unverified:known.length-fresh-stale-unknownTime,unknownTime,missing:rows.length-known.length};
 });
 const coverageRows = computed(() => {
   const c = health.value?.coverage ?? {};
@@ -150,6 +158,8 @@ function issueLabel(code) {
     'assets-unavailable': tr('资产数据不可用', 'Asset data unavailable'),
     'worker-unavailable': tr('采集进程不可用', 'Collection process unavailable'),
     'projection-unavailable': tr('统计进程不可用', 'Projection process unavailable'),
+    'projection-snapshot-unavailable': tr('统计快照尚未同步，数据状态暂不可核验', 'Projection snapshot is out of sync; data health is temporarily unverified'),
+    'health-storage-unavailable': tr('数据存储暂时不可读取，健康状态无法核验', 'Data storage cannot be read; health status is unverified'),
     'disk-low': tr('磁盘空间低于 20%', 'Disk free below 20%'),
     'collector-degraded': tr('采集任务异常', 'Collection job failure'),
     'projection-degraded': tr('统计任务异常', 'Projection job failure'),

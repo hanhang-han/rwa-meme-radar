@@ -139,18 +139,22 @@ class ProjectionTest(unittest.TestCase):
 
 class DashboardMarketApiTest(unittest.IsolatedAsyncioTestCase):
     async def test_market_view_and_etag(self):
-        body = json.dumps({'now':1000,'realtime':{'revision':1,'cursor':2},'unified':{
+        full_body = json.dumps({'now':1000,'realtime':{'revision':1,'cursor':2},'unified':{
             'assets':[{'chainId':'56','token':'0xa','projectionKey':'56:0xa'}],
             'stockTokens':[],'relations':[],'themeMap':{'bubbles':[]},
         }})
-        with patch('app.api.dashboard.read_projection_json',new=AsyncMock(return_value=body)):
+        market = json.dumps(market_dashboard(json.loads(full_body)))
+        selected = AsyncMock(side_effect=lambda view: {'full': full_body, 'market': market}[view])
+        with patch('app.api.dashboard.read_projection_json',new=selected):
             response = await get_dashboard(Request({'type':'http','headers':[]}),view='market')
             self.assertEqual(response.status_code,200)
+            self.assertEqual(response.body, market.encode())
             self.assertEqual(json.loads(response.body)['unified']['snapshotScope'],'market')
             etag = response.headers['etag']
             cached = await get_dashboard(Request({'type':'http','headers':[(b'if-none-match',etag.encode())]}),view='market')
             self.assertEqual(cached.status_code,304)
             full = await get_dashboard(Request({'type':'http','headers':[]}),view='full')
-            self.assertEqual(full.body,body.encode())
+            self.assertEqual(full.body,full_body.encode())
+            self.assertEqual([call.args[0] for call in selected.await_args_list], ['market','market','full'])
             with self.assertRaises(HTTPException):
                 await get_dashboard(Request({'type':'http','headers':[]}),view='unknown')

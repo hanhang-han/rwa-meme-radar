@@ -67,14 +67,25 @@ class StreamCompressionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.headers.get('content-encoding'), 'gzip' if expected else None)
                     self.assertEqual(response.headers['vary'], 'Accept-Encoding')
                     self.assertEqual(response.headers['x-accel-buffering'], 'no')
-                    self.assertEqual(len(subscribers), 1)
+                    self.assertFalse(subscribers)
                     try:
                         chunk = await anext(response.body_iterator)
                         frame = zlib.decompressobj(wbits=31).decompress(chunk) if expected else chunk
                         self.assertEqual(frame, FRAMES[0])
+                        self.assertEqual(len(subscribers), 1)
                     finally:
                         await response.body_iterator.aclose()
                     self.assertFalse(subscribers)
+
+    async def test_unstarted_response_does_not_retain_subscriber(self):
+        subscribers = set()
+        with patch.object(stream, 'clients', return_value=subscribers), \
+             patch.object(stream, 'cursor', return_value=0), \
+             patch.object(stream, 'hello', side_effect=lambda queue: queue.put_nowait((None, FRAMES[0]))):
+            response = await stream.get_stream(last_event_id=None, snapshot=False)
+            self.assertFalse(subscribers)
+            await response.body_iterator.aclose()
+            self.assertFalse(subscribers)
 
     async def test_cancellation_removes_underlying_subscriber(self):
         subscribers = set()

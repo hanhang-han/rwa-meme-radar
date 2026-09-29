@@ -54,21 +54,25 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
                      protocol: int = 0, candles: str | None = None,
                      accept_encoding: str | None = Header(default=None, alias='Accept-Encoding')):
     q: asyncio.Queue = asyncio.Queue(maxsize=1024)
-    clients().add(q)
-    hello(q)
     # Browser reconnect headers take precedence over the original URL cursor.
     try:
         last_id = int(last_event_id if isinstance(last_event_id, str) else after)
     except (TypeError, ValueError):
         last_id = None
-    upper = cursor()
     candle_keys = set(candles.split(',')) if isinstance(candles, str) and candles != 'all' else None
 
     def visible(frame):
         return frame_visible(frame, protocol=protocol, candle_keys=candle_keys)
 
     async def frames():
+        # StreamingResponse may be abandoned before its body is iterated. Only
+        # register once the generator starts, so such requests cannot retain a
+        # subscriber queue for the lifetime of the API process.
+        subscribers = clients()
+        subscribers.add(q)
         try:
+            hello(q)
+            upper = cursor()
             seen = upper if last_id is None else last_id
             if last_id is not None:
                 while True:
@@ -120,7 +124,7 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
                         last_checkpoint = time.monotonic()
                     yield _frame('heartbeat', {'at': int(time.time()*1000)})
         finally:
-            clients().discard(q)
+            subscribers.discard(q)
 
     headers = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
                'Vary': 'Accept-Encoding'}

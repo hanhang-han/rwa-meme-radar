@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.api import misc
+from app import state
 
 
 class PairGradeTests(unittest.IsolatedAsyncioTestCase):
@@ -22,10 +23,11 @@ class PairGradeTests(unittest.IsolatedAsyncioTestCase):
             events=AsyncMock(return_value=[]), samples=AsyncMock(return_value=[]),
             activity=AsyncMock(return_value={}),
         )
-        with patch.object(misc.state, 'reload_if_stale', AsyncMock()), \
-             patch.object(misc.state, 'DATA', SimpleNamespace(relations=[relation])), \
+        with patch.object(state, 'reload_if_stale', AsyncMock()) as reload, \
+             patch.object(misc, 'candidate_relations', AsyncMock(return_value=[relation])), \
              patch.object(misc, 'store', AsyncMock(return_value=scoped)):
             result = await misc.get_pair('196', meme)
+            reload.assert_not_awaited()
         self.assertIsNone(result['relations'][0]['level'])
         self.assertEqual(result['relations'][0]['evidenceStatus'], 'liquidity-stale')
 

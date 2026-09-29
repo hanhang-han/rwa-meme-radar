@@ -10,7 +10,7 @@ trap 'rm -f "$PACKAGE"' EXIT
 
 npm run check
 npm test
-COPYFILE_DISABLE=1 tar --no-xattrs -czf "$PACKAGE" src/server.ts src/lib/market-enrichment.ts src/lib/stock-identity.ts src/lib/okx.ts src/lib/research-store.ts
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "$PACKAGE" src/server.ts src/lib/market-enrichment.ts src/lib/stock-identity.ts src/lib/okx.ts src/lib/dashboard-v2.ts src/lib/xlayer.ts src/lib/research-store.ts
 scp "${SSH_OPTS[@]}" "$PACKAGE" "$SERVER:/tmp/cliperx-market-enrichment.tar.gz"
 
 ssh "${SSH_OPTS[@]}" "$SERVER" 'bash -s' <<'REMOTE'
@@ -32,6 +32,8 @@ restore() {
     cp -a "$BACKUP/src/lib/market-enrichment.ts" src/lib/market-enrichment.ts
     cp -a "$BACKUP/src/lib/stock-identity.ts" src/lib/stock-identity.ts
     cp -a "$BACKUP/src/lib/okx.ts" src/lib/okx.ts
+    cp -a "$BACKUP/src/lib/dashboard-v2.ts" src/lib/dashboard-v2.ts
+    cp -a "$BACKUP/src/lib/xlayer.ts" src/lib/xlayer.ts
     cp -a "$BACKUP/src/lib/research-store.ts" src/lib/research-store.ts
   fi
   if [ "$STOPPED" -eq 1 ]; then
@@ -69,6 +71,8 @@ cp -a src/server.ts "$BACKUP/src/server.ts"
 cp -a src/lib/market-enrichment.ts "$BACKUP/src/lib/market-enrichment.ts"
 cp -a src/lib/stock-identity.ts "$BACKUP/src/lib/stock-identity.ts"
 cp -a src/lib/okx.ts "$BACKUP/src/lib/okx.ts"
+cp -a src/lib/dashboard-v2.ts "$BACKUP/src/lib/dashboard-v2.ts"
+cp -a src/lib/xlayer.ts "$BACKUP/src/lib/xlayer.ts"
 cp -a src/lib/research-store.ts "$BACKUP/src/lib/research-store.ts"
 cp -a data/state.json "$BACKUP/state.json"
 pm2 stop memedashboard >/dev/null
@@ -79,6 +83,8 @@ cp -a "$STAGING/src/server.ts" src/server.ts
 cp -a "$STAGING/src/lib/market-enrichment.ts" src/lib/market-enrichment.ts
 cp -a "$STAGING/src/lib/stock-identity.ts" src/lib/stock-identity.ts
 cp -a "$STAGING/src/lib/okx.ts" src/lib/okx.ts
+cp -a "$STAGING/src/lib/dashboard-v2.ts" src/lib/dashboard-v2.ts
+cp -a "$STAGING/src/lib/xlayer.ts" src/lib/xlayer.ts
 cp -a "$STAGING/src/lib/research-store.ts" src/lib/research-store.ts
 pm2 restart memedashboard >/dev/null
 

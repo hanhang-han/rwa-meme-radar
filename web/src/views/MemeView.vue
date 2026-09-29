@@ -5,11 +5,12 @@
       <input id="xMemeSearch" v-model="qInput" :placeholder="tr('搜索股票、Meme 或合约地址','Search stock, meme or address')" @input="onSearch">
       <select id="v2Chain" :value="scope" :aria-label="tr('网络','Chain')" @change="setQuery({chain:$event.target.value})"><option value="all">{{ tr('全部链','All chains') }}</option><option value="196">X Layer</option><option value="56">BNB Chain</option><option value="4663">Robinhood Chain</option></select>
       <select :value="relationFilter" :aria-label="tr('关系','Relationship')" @change="setQuery({rel:$event.target.value})"><option value="A">{{ tr('池配对','Paired') }}</option><option value="B">{{ tr('名称相关','Name match') }}</option><option value="A,B,C">{{ tr('全部关系','All relations') }}</option><option value="all">{{ tr('全部资产','All assets') }}</option></select>
-      <select :value="freshFilter" :aria-label="tr('时效','Freshness')" @change="setQuery({fresh:$event.target.value})"><option value="1">{{ tr('仅最新','Fresh only') }}</option><option value="0">{{ tr('含过期','Include stale') }}</option></select>
-      <select :value="minLiquidity" :aria-label="tr('最低流动性','Minimum liquidity')" @change="setQuery({minLiq:$event.target.value})"><option value="0">{{ tr('不限流动性','Any liquidity') }}</option><option value="1000">≥ $1K</option><option value="10000">≥ $10K</option><option value="100000">≥ $100K</option></select>
+      <select :value="freshFilter" :aria-label="tr('价格时效','Price freshness')" @change="setQuery({fresh:$event.target.value})"><option value="1">{{ tr('价格 15 分钟内','Price within 15m') }}</option><option value="0">{{ tr('含历史报价','Include historical quotes') }}</option></select>
+      <select :value="minLiquidity" :aria-label="tr('最低总流动性','Minimum total liquidity')" @change="setQuery({minLiq:$event.target.value})"><option value="0">{{ tr('不限总流动性','Any total liquidity') }}</option><option value="1000">≥ $1K</option><option value="10000">≥ $10K</option><option value="100000">≥ $100K</option></select>
       <label class="meme-risk-filter"><input type="checkbox" :checked="hideRisk" @change="setQuery({risk:$event.target.checked?'hide':undefined})"> {{ tr('隐藏风险标记','Hide flagged') }}</label>
       <span class="meme-result-count">{{ num(assets.length) }} {{ tr('个资产','assets') }}<template v-if="isOverview"> · {{ tr('概览数据', 'overview data') }}</template></span>
     </div>
+    <p class="hint">{{ tr('筛选“价格 15 分钟内”仅检查价格；成交、流动性、持币地址各有独立更新时间。', 'The 15-minute filter checks price only; volume, liquidity and holders have separate observation times.') }} {{ tr('资产总流动性证据', 'Token-wide liquidity evidence') }} {{ num(currentLiquidityCount) }}/{{ num(assets.length) }} · {{ tr('可比较成交 / 流动性', 'Comparable volume / liquidity') }} {{ num(comparableRatioCount) }}/{{ num(assets.length) }}。{{ tr('“—”表示缺少可比较证据，不是零。', 'A dash means comparable evidence is unavailable, not zero.') }}</p>
     <div class="meme-table-controls"><select id="v2Sort" :value="sort" :aria-label="tr('排序','Sort')" @change="setQuery({sort:$event.target.value})"><option value="volume24h">{{ tr('24h 成交','24h volume') }}</option><option value="price">{{ tr('价格','Price') }}</option><option value="change24h">{{ tr('24h 涨跌','24h change') }}</option><option value="totalLiquidityUsd">{{ tr('总流动性','Total liquidity') }}</option><option value="holders">{{ tr('持币地址','Holders') }}</option><option value="firstSeen">{{ tr('首次收录','First indexed') }}</option></select></div>
     <div class="scroll v2-table-scroll" id="xMemeRows">
       <div v-if="!pageGroups.length" class="x-empty">
@@ -17,7 +18,7 @@
         <button v-if="store.snapshot" type="button" @click="resetFilters">{{ tr('清除筛选','Clear filters') }}</button>
       </div>
       <table v-else class="tbl v2-meme-table">
-        <thead><tr><th>{{ tr('资产','Asset') }}</th><th>{{ tr('关联股票','Stocks') }}</th><th>{{ tr('价格','Price') }}</th><th>24h</th><th>{{ tr('24h 成交','24h volume') }}</th><th>{{ tr('总流动性','Total liquidity') }}</th><th>{{ tr('成交 / 流动性','Vol / Liq') }}</th><th>{{ tr('持币地址','Holders') }}</th><th>{{ tr('风险','Risk') }}</th><th>{{ tr('更新','Updated') }}</th></tr></thead>
+        <thead><tr><th>{{ tr('资产','Asset') }}</th><th>{{ tr('关联股票','Stocks') }}</th><th>{{ tr('价格','Price') }}</th><th>24h</th><th>{{ tr('24h 成交','24h volume') }}</th><th>{{ tr('总流动性','Total liquidity') }}</th><th>{{ tr('成交 / 流动性','Vol / Liq') }}</th><th>{{ tr('持币地址','Holders') }}</th><th>{{ tr('风险','Risk') }}</th><th>{{ tr('价格观测','Price observed') }}</th></tr></thead>
         <tbody><template v-for="group in pageGroups" :key="group.symbol"><MemeRow :a="group.members[0]" :relations="relations" :store="store" :extra="group.members.length>1?group.members.length-1:0" @toggle-group="toggleGroup(group.symbol)" /><template v-if="openGroups.has(group.symbol)"><MemeRow v-for="member in group.members.slice(1)" :key="member.chainId+':'+member.token" :a="member" :relations="relations" :store="store" child /></template></template></tbody>
       </table>
     </div>
@@ -34,7 +35,7 @@ import { tr } from '../i18n';
 import { num } from '../utils/format';
 import { chainScope, inChainScope } from '../utils/chain-scope';
 import { relationMatchesAsset } from '../utils/relations';
-import { relationLevel, riskFlags } from '../utils/product-labels';
+import { relationLevel, riskFlags, volumeLiquidityRatio } from '../utils/product-labels';
 
 const route=useRoute(), router=useRouter(), store=useDashboardStore();
 const qInput=ref(String(route.query.q??''));
@@ -50,6 +51,11 @@ const sort=computed(()=>String(route.query.sort??'volume24h'));
 const page=computed(()=>Math.max(0,Number(route.query.page)||0));
 const relations=computed(()=>store.relations);
 const isOverview=computed(()=>store.snapshot?.unified?.snapshotScope==='overview');
+function isCurrentLiquidity(asset){
+  const at=Number(asset.totalLiquidityAt ?? asset.fieldTimes?.totalLiquidityUsd);
+  return asset.totalLiquidityUsd!=null && Number.isFinite(Number(asset.totalLiquidityUsd))
+    && asset.totalLiquidityStatus==='current' && Number.isFinite(at) && at>0 && at<=Date.now()+1000 && Date.now()-at<=1800000;
+}
 const assets=computed(()=>{
   const selected=new Set(relationFilter.value.split(','));
   const floor=Number(minLiquidity.value)||0;
@@ -61,14 +67,16 @@ const assets=computed(()=>{
     if(relationFilter.value!=='all'&&![...levels].some(level=>selected.has(level)))return false;
     if(freshFilter.value==='1'){
       const at=asset.fieldTimes?.price??asset.quoteAt??0;
-      if(!at||Date.now()-Number(at)>900000)return false;
+      if(!at||Number(at)>Date.now()+1000||Date.now()-Number(at)>900000)return false;
     }
-    if(floor && !(asset.totalLiquidityUsd!=null&&Number(asset.totalLiquidityUsd)>=floor))return false;
+    if(floor && !(isCurrentLiquidity(asset)&&Number(asset.totalLiquidityUsd)>=floor))return false;
     if(hideRisk.value&&riskFlags(asset).length)return false;
     if(legacy.value==='history'&&asset.dataQuality?.tier!=='historical')return false;
     return true;
   });
 });
+const currentLiquidityCount=computed(()=>assets.value.filter(isCurrentLiquidity).length);
+const comparableRatioCount=computed(()=>assets.value.filter(asset=>volumeLiquidityRatio(asset)!=null).length);
 const groups=computed(()=>{
   const bySymbol=new Map();
   for(const asset of assets.value){const symbol=String(asset.symbol||asset.name||asset.token).toUpperCase();if(!bySymbol.has(symbol))bySymbol.set(symbol,[]);bySymbol.get(symbol).push(asset);}

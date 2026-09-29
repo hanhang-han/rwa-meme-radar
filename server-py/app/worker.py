@@ -60,24 +60,28 @@ async def run() -> None:
     from .collectors.factory_discovery import FactoryDiscovery
     from .collectors.live_quotes import refresh_live_quotes, refresh_base_candidates, refresh_base_stocks
     from .collectors.main_round import refresh_liquidity, refresh_main_round, refresh_discovery
+    from .collectors.okx_catalogue import sync_okx_catalogues
     from .collectors.candles import refresh_watched_candles
     from .collectors.comparison_inputs import refresh_comparison_inputs
     from .collectors.scheduler import shutdown_loops, spawn_loop
     from .collectors.trades import refresh_hot_trades
-    from .db import close_all, store, write_lock_snapshot
+    from .db import (close_all, prepare_quote_stores, quote_store_scope,
+                     store, write_lock_snapshot)
     from .stream_hub import flush_legacy
 
     # Finish additive schema work before concurrent ingestion starts. Large
     # historical indexes must not race live writers or a second connection.
     for chain in ('196','56','4663','system','ai'):
         await store(chain)
+    await prepare_quote_stores()
     await chain_stream.prepare_streams()
     async def writer_diagnostics():
         import json
         while True:
             await asyncio.sleep(5)
             snapshot = write_lock_snapshot()
-            if snapshot['heldMs'] > 1000 or os.getenv('RESEARCH_WRITER_DIAGNOSTICS') == '1':
+            if (snapshot['heldMs'] > 1000 or snapshot['quote']['heldMs'] > 1000
+                    or os.getenv('RESEARCH_WRITER_DIAGNOSTICS') == '1'):
                 print('[research-writer] ' + json.dumps(snapshot), flush=True)
 
     diagnostic_task = asyncio.create_task(writer_diagnostics(), name='writer-diagnostics')
@@ -107,10 +111,17 @@ async def run() -> None:
 
         spawn_loop('factoryDiscovery', 10, factory_round, 15)
     # CPU-heavy projections run in app.projection_worker, on another event loop.
-    spawn_loop("liveQuotes", 300, refresh_live_quotes)
+    async def quote_round(fn):
+        with quote_store_scope():
+            return await fn()
+
+    spawn_loop("liveQuotes", 300, lambda: quote_round(refresh_live_quotes))
+    # Baseline quotes start at +5s/+15s and can consume their brief budget
+    # without racing a large catalogue recovery. New identities follow at +90s.
+    spawn_loop("okxCatalogue", 300, sync_okx_catalogues, 90)
     spawn_loop("binanceApply", 10, lambda: _sync_apply(binance_collector), 3)
-    spawn_loop("baseCandidates", 300, refresh_base_candidates, 5)
-    spawn_loop("baseStocks", 300, refresh_base_stocks, 15)
+    spawn_loop("baseCandidates", 300, lambda: quote_round(refresh_base_candidates), 5)
+    spawn_loop("baseStocks", 300, lambda: quote_round(refresh_base_stocks), 15)
     spawn_loop("candles", 10, refresh_watched_candles, 10)
     spawn_loop("binance", 30, binance_collector.refresh_binance, 20)
     spawn_loop("comparisonInputs", 300, refresh_comparison_inputs, 24)

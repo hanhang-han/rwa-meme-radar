@@ -12,7 +12,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from .db import retry_busy_write, store, transaction_view
-from .dashboard_projection import compact_dashboard, projection_key
+from .dashboard_projection import compact_dashboard, market_dashboard, overview_dashboard, projection_key
 from .realtime_schema import enqueue_event
 from .source_snapshots import bind_snapshots
 from .projection_facts import ProjectionFacts
@@ -27,6 +27,7 @@ _serialized_projection = None
 _committed_facts = None
 _building_facts = ContextVar('building_projection_facts', default=None)
 _SNAPSHOT_MAGIC = b'CRP1\x00'
+_FEED_CHAINS = ('196', '56', '4663')
 
 
 def _dump(value):
@@ -177,7 +178,39 @@ async def _build_payload(connection):
         async with transaction_view(connection):
             data = DashboardData()
             await data.reload(facts=facts)
-            return compact_dashboard(await data.payload(include_groups=False))
+            feed = _feed_snapshot(data)
+            return compact_dashboard(await data.payload(include_groups=False)), feed
+
+
+def _feed_snapshot(data):
+    """Retain only the inputs /feed needs from its consistent fact view.
+
+    Selection happens before publication because the overview ranks by volume,
+    while /feed ranks verified candidates by their latest trade. Keep thirty
+    events per chain so filtering a quiet chain cannot lose its recent events.
+    """
+    from .state import BASE_QUOTE_SYMBOLS
+
+    related = {(str(row.get('chainId') or '196'), row.get('token'))
+               for row in data.relations if row.get('status') == 'verified'}
+    by_chain = {chain: [] for chain in _FEED_CHAINS}
+    for asset in data.assets:
+        chain = str(asset.get('chainId') or '196')
+        if (chain in by_chain and asset.get('tradeAt') and asset.get('kind') == 'candidate'
+                and (chain, asset.get('token')) in related
+                and str(asset.get('symbol') or '').upper() not in BASE_QUOTE_SYMBOLS):
+            by_chain[chain].append(asset)
+    assets = [{'chainId': chain, 'token': asset['token'], 'symbol': asset.get('symbol')}
+              for chain in _FEED_CHAINS
+              for asset in sorted(by_chain[chain], key=lambda row: -(row.get('tradeAt') or 0))[:10]]
+    signals = []
+    counts = {chain: 0 for chain in _FEED_CHAINS}
+    for signal in data.signals:
+        chain = str(signal.get('chainId'))
+        if chain in counts and counts[chain] < 30:
+            signals.append(signal)
+            counts[chain] += 1
+    return {'assets': assets, 'signals': signals}
 
 
 async def projection_tick(force=False, expiry_ms=30_000):
@@ -244,7 +277,7 @@ async def _projection_tick_once(force=False, expiry_ms=30_000):
                 facts = await ProjectionFacts.capture(reader, prior_facts, changes)
                 binding = _building_facts.set(facts)
                 try:
-                    payload = await _build_payload(reader)
+                    payload, feed = await _build_payload(reader)
                 finally:
                     _building_facts.reset(binding)
         # JSON comparison/encoding and full catalogue traversal never hold the
@@ -262,7 +295,14 @@ async def _projection_tick_once(force=False, expiry_ms=30_000):
             revision = (old_row['revision'] if old_row else 0) + changed
             delta.update(revision=revision, invalidations=invalidations, now=payload['now'])
             payload['realtime'] = {'schema': SCHEMA, 'cursor': read_cursor, 'revision': revision}
-            encoded = _encode_snapshot(_dump(payload))
+            feed['now'] = payload['now']
+            feed['realtime'] = payload['realtime']
+            bodies = {
+                'full': _encode_snapshot(_dump(payload)),
+                'overview': _encode_snapshot(_dump(overview_dashboard(payload))),
+                'market': _encode_snapshot(_dump(market_dashboard(payload))),
+                'feed': _encode_snapshot(_dump(feed)),
+            }
             affected = _derived_dependencies(previous, payload, changes)
         async with scoped._guard_write():
             await db.execute('BEGIN IMMEDIATE')
@@ -275,7 +315,7 @@ async def _projection_tick_once(force=False, expiry_ms=30_000):
                         'revision': current['revision'] if current else 0,
                         'cursor': current['cursor'] if current else 0}
             if tape_only:
-                await db.execute("UPDATE dashboard_projection SET input_cursor=? WHERE name='full'", (high,))
+                await db.execute("UPDATE dashboard_projection SET input_cursor=? WHERE name IN ('full','overview','market','feed')", (high,))
                 await db.execute('DELETE FROM change_outbox WHERE id<=?', (high-1000,))
                 await db.commit()
                 if _committed_facts and _committed_facts[0] == (scoped.path, id(scoped.db), old_input):
@@ -284,10 +324,10 @@ async def _projection_tick_once(force=False, expiry_ms=30_000):
                         'inputCursor': high, 'durationMs': round((time.monotonic()-started)*1000, 1)}
             sequence = await enqueue_event(db, 'projection.delta', delta) if changed else read_cursor
             await _queue_derived(db, affected, high)
-            await db.execute('''INSERT INTO dashboard_projection VALUES ('full',?,?,?,?,?)
+            await db.executemany('''INSERT INTO dashboard_projection VALUES (?,?,?,?,?,?)
                 ON CONFLICT(name) DO UPDATE SET revision=excluded.revision,cursor=excluded.cursor,
                 input_cursor=excluded.input_cursor,body=excluded.body,built_at=excluded.built_at''',
-                (revision, read_cursor, high, encoded, now))
+                [(name, revision, read_cursor, high, body, now) for name, body in bodies.items()])
             # Changes committed AFTER the read snapshot retain ids above high.
             await db.execute('DELETE FROM change_outbox WHERE id<=?', (high-1000,))
             await db.commit()
@@ -296,33 +336,58 @@ async def _projection_tick_once(force=False, expiry_ms=30_000):
         return {'changed': changed, 'revision': revision, 'cursor': read_cursor, 'eventCursor': sequence,
                 'inputCursor': high, 'durationMs': round((time.monotonic()-started)*1000, 1)}
 
-async def read_projection_json():
+async def read_projection_json(view='full'):
     # A separate read connection never observes an uncommitted bootstrap.
-    # The full HTTP response can use this serialized body directly: parsing
-    # and re-encoding several MB per viewer has no semantic benefit.
+    # Read the small named row directly. During a rolling upgrade, an older
+    # worker may have published only 'full'; derive dashboard views from that
+    # exact revision instead of serving an older named row.
+    if view not in ('full', 'overview', 'market', 'feed'):
+        raise ValueError(f'unsupported projection view: {view}')
     global _serialized_projection
     import aiosqlite
     scoped = await store('196')
+
     async def read():
         global _serialized_projection
         async with aiosqlite.connect(scoped.path, timeout=15) as reader:
             # The stamp and body must describe the same commit if a worker
             # publishes between these SELECTs. This is a read transaction.
             await reader.execute('BEGIN')
-            version = await (await reader.execute("SELECT revision,cursor,built_at FROM dashboard_projection WHERE name='full'")).fetchone()
-            if version is None:
+            full = await (await reader.execute("SELECT revision,cursor,input_cursor,built_at FROM dashboard_projection WHERE name='full'")).fetchone()
+            if full is None:
                 return None
-            stamp = (scoped.path, id(scoped.db), *version)
+            selected = full if view == 'full' else await (await reader.execute(
+                'SELECT revision,cursor,input_cursor,built_at FROM dashboard_projection WHERE name=?',
+                (view,))).fetchone()
+            current = selected is not None and tuple(selected) == tuple(full)
+            stamp = (scoped.path, id(scoped.db), view, *full, *(tuple(selected) if selected else ()))
             if _serialized_projection and _serialized_projection[0] == stamp:
                 return _serialized_projection[1]
-            row = await (await reader.execute("SELECT body FROM dashboard_projection WHERE name='full'")).fetchone()
+            if view == 'feed' and not current:
+                return None
+            source = view if current else 'full'
+            row = await (await reader.execute('SELECT body FROM dashboard_projection WHERE name=?',
+                                              (source,))).fetchone()
         body = _decode_snapshot(row[0])
+        if not current:
+            full_payload = json.loads(body)
+            body = _dump(overview_dashboard(full_payload) if view == 'overview'
+                         else market_dashboard(full_payload))
         _serialized_projection = (stamp, body)
         return body
+
     body = await read()
     if body is None:
-        await projection_tick(force=True)
-        body = await read()
+        # A concurrent (older) publisher can win the optimistic commit check.
+        # Retry a bounded number of times before reporting an unavailable feed;
+        # never substitute the dashboard's globally truncated signal list.
+        for _ in range(3):
+            await projection_tick(force=True)
+            body = await read()
+            if body is not None:
+                break
+    if body is None:
+        raise RuntimeError(f'projection view unavailable: {view}')
     return body
 
 

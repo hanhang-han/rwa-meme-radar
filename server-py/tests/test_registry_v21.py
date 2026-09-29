@@ -1,6 +1,8 @@
 import os
+import asyncio
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app import registry
@@ -23,6 +25,24 @@ def relation(**changes):
 
 
 class RegistryV21Test(unittest.IsolatedAsyncioTestCase):
+    async def test_cold_rpc_cache_is_shared_by_concurrent_readers(self):
+        calls = 0
+
+        def read():
+            nonlocal calls
+            calls += 1
+            time.sleep(0.03)
+            return [(MEME, NATIVE, 'NVDA', bytes(32), 1)]
+
+        contract = SimpleNamespace(functions=SimpleNamespace(all=lambda: SimpleNamespace(call=read)))
+        client = SimpleNamespace(eth=SimpleNamespace(contract=lambda **_: contract))
+        with patch.object(registry, '_contract', return_value='0x' + 'a' * 40), \
+             patch.object(registry, 'w3', return_value=client), \
+             patch.object(registry, '_cache', None):
+            results = await asyncio.gather(*(registry.onchain_pairs() for _ in range(8)))
+        self.assertEqual(calls, 1)
+        self.assertTrue(all(result == results[0] for result in results))
+
     async def test_historical_onchain_record_is_not_current_evidence_when_relation_downgrades(self):
         rows = [{'meme': MEME, 'stock': NATIVE, 'ticker': 'NVDA',
                  'evidence': '0x' + '0' * 64, 'registeredAt': 1}]

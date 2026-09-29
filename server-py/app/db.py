@@ -7,7 +7,7 @@ import json
 import os
 import sqlite3
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 
 from .realtime_schema import REALTIME_SCHEMA, trigger_schema
@@ -16,6 +16,7 @@ import aiosqlite
 
 DB_PATH = os.environ.get("RESEARCH_DB", "data/research.sqlite")
 WAL_JOURNAL_SIZE_LIMIT_BYTES = 256 * 1024 * 1024
+QUOTE_BUSY_TIMEOUT_MS = 2000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(kind,id));
@@ -120,19 +121,64 @@ async def retry_busy_write(operation, attempts: int = 3):
 def write_lock_snapshot():
     """Read-only diagnostics suitable for worker health (no keys or locals)."""
     result = _global_write_lock.snapshot()
+    result['quote'] = _quote_write_lock.snapshot()
     result['connections'] = {
         scope: {'inTransaction': bool(scoped.db.in_transaction)}
         for scope, scoped in _stores.items() if scoped.db is not None
     }
+    result['connections'].update({
+        f'quote:{scope}': {'inTransaction': bool(scoped.db.in_transaction)}
+        for scope, scoped in _quote_stores.items() if scoped.db is not None
+    })
     return result
 
 
+_MISSING = object()
+
+
+def _same_market_field(value, field, field_value, observed, field_sources, maps,
+                       price_metadata):
+    """Ignore a later receipt of the same provider observation.
+
+    Only market-timed observations qualify. A row without provider time uses
+    receipt time as its clock and must continue to advance normally.
+    """
+    times = value.get('fieldTimes') or {}
+    if observed != float(times.get(field) or 0) or value.get(field, _MISSING) != field_value:
+        return False
+    old_maps = {key: value.get(key) or {} for key in maps}
+    old_observation = old_maps['fieldObservations'].get(field)
+    new_observation = maps['fieldObservations'].get(field)
+    if not (isinstance(old_observation, dict) and isinstance(new_observation, dict)
+            and old_observation.get('timeKind') == new_observation.get('timeKind') == 'market'
+            and old_observation.get('marketAt') == new_observation.get('marketAt') == observed
+            and old_observation.get('receivedAt')):
+        return False
+    if (value.get('fieldSources') or {}).get(field, _MISSING) != field_sources.get(field, _MISSING):
+        return False
+    for key, incoming in maps.items():
+        previous = old_maps[key].get(field, _MISSING)
+        current = incoming.get(field, _MISSING)
+        if key == 'fieldObservations':
+            if {k: v for k, v in previous.items() if k != 'receivedAt'} != {
+                    k: v for k, v in current.items() if k != 'receivedAt'}:
+                return False
+        elif previous != current:
+            return False
+    if field == 'price' and any(value.get(key, _MISSING) != item
+                                for key, item in price_metadata.items()):
+        return False
+    return True
+
+
 class ResearchStore:
-    def __init__(self, path: str = DB_PATH, scope: str = "196"):
+    def __init__(self, path: str = DB_PATH, scope: str = "196", *,
+                 write_lock: WriterLock | None = None, busy_timeout_ms: int = 15000):
         self.path = path
         self.scope = scope
         self.db: aiosqlite.Connection | None = None
-        self._write_lock = _global_write_lock
+        self._write_lock = write_lock if write_lock is not None else _global_write_lock
+        self.busy_timeout_ms = busy_timeout_ms
 
     @asynccontextmanager
     async def _guard_write(self):
@@ -141,7 +187,7 @@ class ResearchStore:
                 yield
             except BaseException as exc:
                 if isinstance(exc, aiosqlite.OperationalError) and 'locked' in str(exc).lower():
-                    print('[research-db] locked ' + json.dumps({**write_lock_snapshot(),
+                    print('[research-db] locked ' + json.dumps({**self._write_lock.snapshot(),
                         'sqliteErrorCode': getattr(exc, 'sqlite_errorcode', None),
                         'sqliteErrorName': getattr(exc, 'sqlite_errorname', None)}), flush=True)
                 # Cancellation during an implicit SQLite transaction must not
@@ -164,6 +210,10 @@ class ResearchStore:
             # process lock as collector transactions; otherwise a concurrent
             # connect can wait on a transaction whose task is waiting for DDL.
             async with self._guard_write():
+                # A fresh connection may need to run idempotent schema setup
+                # while another process is writing. Give startup the normal
+                # DDL budget, then use the quote lane's short timeout for
+                # recurring observations after initialization completes.
                 await self.db.execute("PRAGMA busy_timeout=15000")
                 await self.db.execute("PRAGMA journal_mode=WAL")
                 if self.path != ':memory:':
@@ -178,6 +228,8 @@ class ResearchStore:
                     await self.db.executescript('BEGIN IMMEDIATE;\n' + trigger_schema(replace=True))
                     await self.db.execute("INSERT INTO realtime_schema_version VALUES ('triggers',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", (version,))
                 await self.db.commit()
+                if self.busy_timeout_ms != 15000:
+                    await self.db.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
         except BaseException:
             await self.db.close()
             self.db = None
@@ -222,6 +274,38 @@ class ResearchStore:
                 await self.db.commit()
         await retry_busy_write(write)
 
+    async def checkpoint_job(self, domain: str, key: str, *, success: bool,
+                             reason=None, now: int, retry_ms=None) -> dict:
+        """Update a durable collector checkpoint with one short atomic write.
+
+        Reading the previous failure count outside the transaction can lose a
+        concurrent success. Quote tasks use their isolated connection and a
+        short SQLite busy timeout; contention is retried outside the lock.
+        """
+        ident = f'{domain}:{key}'
+        async def write():
+            async with self._guard_write():
+                await self.db.execute('BEGIN IMMEDIATE')
+                row = await self.fetchone(
+                    'SELECT body FROM facts WHERE kind=? AND id=?',
+                    (self.key('collector-job'), ident),
+                )
+                previous = json.loads(row[0]) if row else {}
+                failures = 0 if success else min(10, (previous.get('failureCount') or 0) + 1)
+                value = {**previous, 'id': ident, 'domain': domain, 'key': key,
+                         'lastAttemptAt': now,
+                         'lastSuccessAt': now if success else previous.get('lastSuccessAt'),
+                         'failureCount': failures, 'reason': reason,
+                         'nextRetryAt': 0 if success else now + (
+                             retry_ms or min(3_600_000, 60_000 * 2 ** failures))}
+                await self.db.execute(
+                    'INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body',
+                    (self.key('collector-job'), ident, json.dumps(value, ensure_ascii=False)),
+                )
+                await self.db.commit()
+                return value
+        return await retry_busy_write(write)
+
     async def patch_fact(self, kind: str, id: str, patch: dict) -> dict:
         """Merge selected fields atomically without rewriting unrelated data.
 
@@ -250,19 +334,32 @@ class ResearchStore:
     async def merge_asset_observation(
         self, id: str, base_patch: dict, timed_fields: dict[str, tuple[object, float]],
         sample: tuple[float, float | None, float] | None = None,
-    ) -> dict:
+        *, return_changed: bool = False,
+    ) -> dict | tuple[dict, bool]:
         """Atomically merge a quote and its optional five-minute sample.
 
         Each field is monotonic by source observation time, so a delayed
         response cannot overwrite a newer value from another collector.
+        Repeated market observations leave the asset and sample untouched;
+        return_changed lets callers suppress duplicate publications.
         """
+        return await retry_busy_write(
+            lambda: self._merge_asset_observation_once(
+                id, base_patch, timed_fields, sample, return_changed=return_changed))
+
+    async def _merge_asset_observation_once(
+        self, id: str, base_patch: dict, timed_fields: dict[str, tuple[object, float]],
+        sample: tuple[float, float | None, float] | None = None,
+        *, return_changed: bool = False,
+    ) -> dict | tuple[dict, bool]:
         async with self._guard_write():
             await self.db.execute("BEGIN IMMEDIATE")
             try:
                 row = await self.fetchone(
                     "SELECT body FROM facts WHERE kind=? AND id=?", (self.key("asset"), id)
                 )
-                value = json.loads(row[0]) if row else {}
+                previous = json.loads(row[0]) if row else {}
+                value = dict(previous)
                 base_patch = dict(base_patch)
                 previous_updated_at = float(value.get("updatedAt") or 0)
                 price_metadata = {key: base_patch.pop(key) for key in (
@@ -278,8 +375,13 @@ class ResearchStore:
                 sources = dict(value.get("fieldSources") or {})
                 merged_maps = {key:dict(value.get(key) or {}) for key in maps}
                 accepted = set()
+                same_market_price = False
                 for field, (field_value, observed) in timed_fields.items():
                     if observed >= float(times.get(field) or 0):
+                        if _same_market_field(value, field, field_value, observed,
+                                              field_sources, maps, price_metadata):
+                            same_market_price = same_market_price or field == 'price'
+                            continue
                         value[field] = field_value
                         times[field] = observed
                         accepted.add(field)
@@ -296,11 +398,21 @@ class ResearchStore:
                 value["fieldSources"] = sources
                 value.update(merged_maps)
                 value["updatedAt"] = max(previous_updated_at, float(value.get("updatedAt") or 0), *(x[1] for x in timed_fields.values()), 0)
-                await self.db.execute(
-                    "INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body",
-                    (self.key("asset"), id, json.dumps(value, ensure_ascii=False)),
-                )
-                if sample and "price" in accepted:
+                asset_changed = value != previous
+                if asset_changed:
+                    await self.db.execute(
+                        "INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body",
+                        (self.key("asset"), id, json.dumps(value, ensure_ascii=False)),
+                    )
+                sample_changed = bool(sample and ('price' in accepted or (
+                    'marketCap' in accepted and value.get('price') == sample[0]
+                    and times.get('price') == sample[2])))
+                if sample and same_market_price and not sample_changed:
+                    bucket = int(sample[2] // 300000 * 300000)
+                    present = await self.fetchone(
+                        'SELECT 1 FROM samples WHERE asset=? AND t=?', (self.key(id), bucket))
+                    sample_changed = present is None
+                if sample and sample_changed:
                     price, cap, observed = sample
                     bucket = int(observed // 300000 * 300000)
                     await self.db.execute(
@@ -315,7 +427,7 @@ class ResearchStore:
                     else:
                         await self.db.execute('DELETE FROM sample_evidence WHERE asset=? AND t=?',(self.key(id),bucket))
                 await self.db.commit()
-                return value
+                return (value, asset_changed or sample_changed) if return_changed else value
             except BaseException:
                 await self.db.rollback()
                 raise
@@ -659,7 +771,28 @@ class ResearchStore:
 # One store per chain scope, mirroring the Node side's per-scope map.
 _stores: dict[str, ResearchStore] = {}
 _store_init_lock = asyncio.Lock()
+_quote_stores: dict[str, ResearchStore] = {}
+_quote_init_lock = asyncio.Lock()
+_quote_write_lock = WriterLock()
+_store_lane: ContextVar[str] = ContextVar('research_store_lane', default='shared')
 _read_connection: ContextVar = ContextVar("research_read_connection", default=None)
+
+
+@contextmanager
+def quote_store_scope():
+    """Keep quote reads/writes off the chain replay connection and lock."""
+    token = _store_lane.set('quote')
+    try:
+        yield
+    finally:
+        _store_lane.reset(token)
+
+
+async def prepare_quote_stores(chains=('196', '56', '4663')):
+    """Initialize quote connections before collectors and streams start."""
+    with quote_store_scope():
+        for chain in chains:
+            await store(chain)
 
 
 async def store(chain: str = "196") -> ResearchStore:
@@ -668,6 +801,14 @@ async def store(chain: str = "196") -> ResearchStore:
         facade = ResearchStore(scope=chain)
         facade.db = pinned
         return facade
+    if _store_lane.get() == 'quote':
+        if chain not in _quote_stores:
+            async with _quote_init_lock:
+                if chain not in _quote_stores:
+                    _quote_stores[chain] = await ResearchStore(
+                        DB_PATH, chain, write_lock=_quote_write_lock,
+                        busy_timeout_ms=QUOTE_BUSY_TIMEOUT_MS).connect()
+        return _quote_stores[chain]
     if chain not in _stores:
         # Single flight before publishing the connection. All known scopes
         # are initialized at service startup, before collector write locks.
@@ -678,11 +819,14 @@ async def store(chain: str = "196") -> ResearchStore:
 
 
 async def close_all() -> None:
-    global _store_init_lock
-    for s in _stores.values():
+    global _store_init_lock, _quote_init_lock, _quote_write_lock
+    for s in (*_quote_stores.values(), *_stores.values()):
         await s.close()
+    _quote_stores.clear()
     _stores.clear()
     _store_init_lock = asyncio.Lock()
+    _quote_init_lock = asyncio.Lock()
+    _quote_write_lock = WriterLock()
 
 
 @asynccontextmanager

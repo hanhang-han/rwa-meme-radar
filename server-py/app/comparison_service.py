@@ -379,9 +379,8 @@ async def read_comparison(chain, token, pool=None):
     now = int(time.time()*1000)
     packet = await s.get("comparison", token)
     if not packet or packet.get("method") != VERSION:
-        from .state import reload_if_stale
-        await reload_if_stale()
-        row = next((r for r in DATA.stock_views() if str(r.get("chainId")) == chain and str(r.get("tokenContractAddress", "")).lower() == token), None)
+        from .scoped_reads import stock_view
+        row = await stock_view(s, chain, token, include_comparison=False)
         packet = {"chainId": chain, "token": token, "method": VERSION,
                   "premium": row["premium"] if row else unavailable("pending"), "pairs": [], "calculatedAt": now}
     key = subject(token, pool)
