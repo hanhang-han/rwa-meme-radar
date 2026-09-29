@@ -204,6 +204,26 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 1000)
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 150)
 
+    async def test_production_sized_queue_yields_before_half_full(self):
+        await self.store.put('chain-stream-cursor', 'pools', {
+            'block': 50, 'hash': '0x32', 'coverageFrom': 40})
+        self.collector.latest_head = 1000
+        self.collector.rpc = AsyncMock()
+        for index in range(31):
+            self.collector.queue.put_nowait(index)
+        self.assertFalse(self.collector.replay_under_pressure())
+        self.collector.queue.put_nowait(31)
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            paused = await self.collector.reconcile_step()
+        self.assertFalse(paused['caughtUp'])
+        self.collector.rpc.assert_not_awaited()
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
+        for _ in range(23):
+            self.collector.queue.get_nowait()
+        self.assertTrue(self.collector.replay_under_pressure())  # Nine pending.
+        self.collector.queue.get_nowait()
+        self.assertFalse(self.collector.replay_under_pressure())
+
     async def test_queue_filling_during_replay_discards_partial_range(self):
         await self.store.put('chain-stream-cursor', 'pools', {'block': 50, 'hash': '0x32'})
         self.collector.pools = {f'0x{i:040x}': {} for i in range(65)}

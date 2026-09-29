@@ -54,6 +54,10 @@ const candleInfo = ref(null);
 const candleTail = computed(() => candleTailState(candleInfo.value, bar.value, now.value));
 const candleStatusLabel = computed(() => {
   const info=candleInfo.value;
+  // A recent, persisted pool trade is useful even while the historical
+  // scanner is behind. Keep the gap visible without calling its live tail old.
+  if(info?.coverageStatus==='backfilling' && info.lastTradeAt && now.value-Number(info.lastTradeAt)>=0 && now.value-Number(info.lastTradeAt)<=30000)
+    return tr('刚收到真实成交；较早历史仍在回补', 'Recent real trade received; older history is still being backfilled');
   if(info?.coverageStatus==='backfilling' && info.marketStatus==='live' && !info.stale)return tr('实时成交已接入，历史回补中', 'Live trades connected; historical data is being backfilled');
   if(info?.marketStatus==='quiet' && !info.stale && now.value-Number(info.scanAt||0)<=20000)return tr('采集正常，观测范围内暂无新成交', 'Collection healthy; no new trades in the observed range');
   const declared = info?.status;

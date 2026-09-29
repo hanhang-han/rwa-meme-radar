@@ -66,8 +66,14 @@ try{
  await page.evaluate(packet=>window.__send('candle',packet,14),{chainId:'196',token:'0xabc',venue:'dex',marketId:'aggregate',bar:'5m',source:'OKX DEX',priceCurrency:'USD',volumeCurrency:'USD',sourceEventAt:now+3,receivedAt:now+3,row:{t:barAt,o:2,h:4,l:2,c:4,v:9,vu:36,confirmed:false}});
  await page.waitForFunction(()=>document.querySelector('[data-chart-ohlc]')?.textContent.includes('C 4'));
  await page.evaluate(packet=>window.__send('trade',packet,15),{chainId:'196',token:'0xabc',venue:'binance-alpha',marketId:'ALPHA_1U',source:'Binance Alpha',scope:'exchange',id:'trade-1',t:now,price:4,priceCurrency:'U',quoteQuantity:8,volumeCurrency:'U',type:'buy'});
- await page.getByText('市场实时成交',{exact:true}).waitFor();
+ await page.locator('[data-market-trades] tbody tr.trade-new').waitFor();
  assert.match(await page.locator('body').innerText(),/ALPHA_1U/);
+ assert.equal(await page.locator('[data-market-trades] tbody tr.trade-new').count(),1,'new market trade is visibly highlighted');
+ assert.equal(await page.locator('[data-market-trades]').evaluate(node=>{
+  const chart=node.closest('.x-grid')?.querySelector('[data-chart-ohlc]');
+  const collected=[...document.querySelectorAll('section.panel')].find(section=>section.querySelector('h2')?.textContent.trim()==='链上成交采集记录');
+  return Boolean(chart && collected && node.compareDocumentPosition(collected)&Node.DOCUMENT_POSITION_FOLLOWING);
+ }),true,'market tape sits beside the chart and before collected on-chain trades');
  await page.evaluate(packet=>window.__send('trade-remove',packet,16),{chainId:'196',token:'0xabc',venue:'binance-alpha',marketId:'ALPHA_1U',ids:['trade-1']});
  await page.waitForFunction(()=>!document.body.innerText.includes('ALPHA_1U'));
  // A quote replaces the asset object but keeps the market identity. Existing

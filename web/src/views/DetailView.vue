@@ -68,20 +68,33 @@
         <CandleChart :asset="asset" :samples="data.samples ?? []" :pool="selectedPoolId" />
       </section>
       <section class="panel">
-        <h2>{{ tr('前10大地址持仓占比', 'Top-10 address share') }}</h2>
-        <template v-if="asset.risk?.top10 != null">
-          <strong class="kpi-value">{{ num(asset.risk.top10) }}%</strong>
-          <progress max="100" :value="Math.max(0, Math.min(100, asset.risk.top10))"></progress>
-          <p>{{ date(asset.risk.checkedAt) }} · {{ asset.risk.provider ?? asset.fieldSources?.holderTop10 ?? tr('来源待核实', 'Source unverified') }}</p>
-        </template>
-        <div v-else class="x-empty">{{ tr('上游尚未提供集中度数据。', 'Holder concentration is not available from the source yet.') }}</div>
+        <div class="panel-head">
+          <h2>{{ tr('最新市场成交', 'Recent market trades') }}</h2>
+          <span class="hint">{{ marketFreshnessLabel }}</span>
+        </div>
+        <p class="hint">{{ tr('仅展示已接入市场的逐笔记录；新成交到达时自动插入，不代表全部市场成交。时间为实际成交时间。', 'Per-trade records from connected markets only; new trades appear automatically. This is not all market activity. Times are trade times.') }}</p>
+        <div v-if="marketTrades.length" class="scroll" data-market-trades>
+          <table class="tbl">
+            <thead><tr><th>{{ tr('时间', 'Time') }}</th><th>{{ tr('来源 / 市场', 'Source / market') }}</th><th>{{ tr('方向', 'Side') }}</th><th>{{ tr('成交价', 'Price') }}</th><th>{{ tr('成交额', 'Quote amount') }}</th></tr></thead>
+            <tbody>
+              <tr v-for="t in marketTrades" :key="marketTradeKey(t)" :class="{ 'trade-new': newMarketIds.has(marketTradeKey(t)) }">
+                <td>{{ date(t.t) }}</td>
+                <td>{{ t.source ?? t.venue ?? tr('来源待核实', 'Source unverified') }}<small>{{ t.marketId ?? tr('市场待核实', 'Market unverified') }}</small></td>
+                <td :class="t.type==='buy'?'up':t.type==='sell'?'down':''">{{ t.type==='buy'?tr('买入','Buy'):t.type==='sell'?tr('卖出','Sell'):tr('未提供','Unknown') }}</td>
+                <td>{{ money(t.price,t.priceCurrency) }}</td>
+                <td>{{ money(t.quoteQuantity,t.volumeCurrency??t.priceCurrency) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="x-empty">{{ tr('当前没有已接入市场的逐笔成交记录；不代表没有交易。', 'No per-trade records from connected markets yet; this does not mean there were no trades.') }}</div>
       </section>
     </div>
 
     <section class="panel">
       <div class="panel-head">
-        <h2>{{ tr('最近链上成交', 'Recent on-chain trades') }}</h2>
-        <span class="hint">{{ tr('保存并按成交 ID 去重', 'Persisted and deduplicated by trade ID') }}</span>
+        <h2>{{ tr('链上成交采集记录', 'Collected on-chain trades') }}</h2>
+        <span class="hint">{{ tr('按后台采集和历史回补进度更新', 'Updated as collection and historical backfill progress') }}</span>
       </div>
       <p class="hint">{{ statText }}</p>
       <div v-if="bucketSummary.length" class="v3-bucket-strip">
@@ -108,10 +121,14 @@
       <div v-else class="x-empty">{{ tr('当前保存范围内暂无成交记录。', 'No trades in the saved coverage.') }}</div>
     </section>
 
-    <section v-if="data.marketTrades?.length" class="panel">
-      <div class="panel-head"><h2>{{ tr('市场实时成交', 'Streaming market trades') }}</h2><span class="hint">{{ tr('按真实交易场所与计价币展示，与聚合 DEX 统计分开', 'Actual venue and quote units; separate from aggregated DEX statistics') }}</span></div>
-      <div class="scroll"><table class="tbl"><thead><tr><th>{{ tr('时间', 'Time') }}</th><th>{{ tr('市场', 'Market') }}</th><th>{{ tr('方向', 'Side') }}</th><th>{{ tr('成交价', 'Price') }}</th><th>{{ tr('成交额', 'Quote amount') }}</th></tr></thead>
-      <tbody><tr v-for="t in data.marketTrades" :key="`${t.venue}:${t.marketId}:${t.id}`"><td>{{ date(t.t) }}</td><td>{{ t.source ?? t.venue }}<small>{{ t.marketId }}</small></td><td :class="t.type==='buy'?'up':t.type==='sell'?'down':''">{{ t.type==='buy'?tr('买入','Buy'):t.type==='sell'?tr('卖出','Sell'):tr('未提供','Unknown') }}</td><td>{{ money(t.price,t.priceCurrency) }}</td><td>{{ money(t.quoteQuantity,t.volumeCurrency??t.priceCurrency) }}</td></tr></tbody></table></div>
+    <section class="panel">
+      <h2>{{ tr('前10大地址持仓占比', 'Top-10 address share') }}</h2>
+      <template v-if="asset.risk?.top10 != null">
+        <strong class="kpi-value">{{ num(asset.risk.top10) }}%</strong>
+        <progress max="100" :value="Math.max(0, Math.min(100, asset.risk.top10))"></progress>
+        <p>{{ date(asset.risk.checkedAt) }} · {{ asset.risk.provider ?? asset.fieldSources?.holderTop10 ?? tr('来源待核实', 'Source unverified') }}</p>
+      </template>
+      <div v-else class="x-empty">{{ tr('上游尚未提供集中度数据。', 'Holder concentration is not available from the source yet.') }}</div>
     </section>
 
     <section class="panel x-ai">
@@ -172,6 +189,11 @@ const insightStatus = ref('queued');
 const { lang } = useI18n();
 const riskLabel = flag => tr(...RISK_LABELS[flag]);
 const newIds = reactive(new Set());
+const newMarketIds = reactive(new Set());
+const knownMarketIds = new Set();
+const marketFlashTimers = new Set();
+let marketRowsPrimed = false;
+const marketClock = ref(Date.now());
 const priceFlash = ref(false);
 const knownTradeIds = new Set();
 // Raw numeric SSE values: assignment compares numbers (formatted strings
@@ -196,6 +218,15 @@ const asset = computed(() => {
 });
 const relations = computed(() => data.value?.relations ?? []);
 const trades = computed(() => data.value?.trades ?? []);
+const marketTrades = computed(() => data.value?.marketTrades ?? []);
+const marketTradeKey = t => `${t.venue ?? ''}:${t.marketId ?? ''}:${t.id}`;
+const marketFreshnessLabel = computed(() => {
+  marketClock.value;
+  const latest = marketTrades.value[0];
+  return latest?.t
+    ? `${tr('最近成交', 'Latest trade')} ${age(latest.t)}`
+    : tr('暂无逐笔记录', 'No per-trade records');
+});
 const events = computed(() => data.value?.events ?? []);
 const bucketSummary = computed(() => ['1m', '5m', '1h'].flatMap((bar) => {
   const rows = data.value?.tradeBuckets?.[bar] ?? [];
@@ -232,6 +263,24 @@ const volumeScopeLabel = computed(() => {
     return asset.value.provider ?? asset.value.venue ?? tr('交易所', 'Exchange');
   }
   return asset.value.provider ?? asset.value.venue ?? 'DEX';
+});
+watch(() => marketTrades.value.map(marketTradeKey), keys => {
+  if (!marketRowsPrimed) {
+    keys.forEach(key => knownMarketIds.add(key));
+    marketRowsPrimed = true;
+    return;
+  }
+  for (const key of keys) {
+    if (knownMarketIds.has(key)) continue;
+    knownMarketIds.add(key);
+    newMarketIds.add(key);
+    const timer = setTimeout(() => {
+      newMarketIds.delete(key);
+      marketFlashTimers.delete(timer);
+    }, 2000);
+    marketFlashTimers.add(timer);
+  }
+  while (knownMarketIds.size > 1000) knownMarketIds.delete(knownMarketIds.values().next().value);
 });
 
 const okxUrl = computed(() => {
@@ -350,6 +399,7 @@ function onSseTrades(e) {
 
 let pollTimer;
 let insightTimer;
+let marketClockTimer;
 let releaseActive;
 let lastDetailLoad=0;
 function onResourceChange(event){
@@ -364,6 +414,7 @@ onMounted(() => {
   load();
   pollTimer = setInterval(() => { if (!document.hidden && (!dash.hasProjectionStream || Date.now()-lastDetailLoad>60000)) {lastDetailLoad=Date.now();load(true);} }, 20000);
   insightTimer = setInterval(() => {if(!dash.hasProjectionStream&&!document.hidden)loadInsight();}, 15000);
+  marketClockTimer = setInterval(() => (marketClock.value = Date.now()), 30000);
   window.addEventListener('manual-refresh', onManualRefresh);
   window.addEventListener('sse-price', onSsePrice);
   window.addEventListener('sse-stock-quote', onSseStockQuote);
@@ -375,6 +426,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('resource-change',onResourceChange);
   clearInterval(pollTimer);
   clearInterval(insightTimer);
+  clearInterval(marketClockTimer);
+  for (const timer of marketFlashTimers) clearTimeout(timer);
   detail.unwatch();
   window.removeEventListener('sse-price', onSsePrice);
   window.removeEventListener('sse-stock-quote', onSseStockQuote);

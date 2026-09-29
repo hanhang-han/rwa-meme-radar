@@ -97,7 +97,7 @@ try{
    if(node.getClientRects().length)values[`kpi:${node.closest('.kpi')?.querySelector('.kpi-label')?.textContent||index}`]=node.textContent.trim();
   }
   for(const [index,node]of [...document.querySelectorAll('[data-chart-ohlc]')].entries())values[`candle:${index}`]=node.textContent.trim();
-  const marketSection=[...document.querySelectorAll('.view section')].find(section=>/^(市场实时成交|Streaming market trades)$/.test(section.querySelector('h2')?.textContent.trim()||''));
+  const marketSection=[...document.querySelectorAll('.view section')].find(section=>/^(最新市场成交|Recent market trades)$/.test(section.querySelector('h2')?.textContent.trim()||''));
   const marketTradeRows=marketSection?[...marketSection.querySelectorAll('tbody tr')].map(row=>row.textContent.trim()):[];
   return {values,marketTradeRows,marketSelection:document.querySelector('[data-chart-market]')?.value,marketOptions:[...document.querySelectorAll('[data-chart-market] option')].map(e=>({value:e.value,text:e.textContent})),status:document.querySelector('#updatedAt')?.textContent,chartStatus:[...document.querySelectorAll('[data-chart-status]')].map(n=>n.textContent.trim()),canvases:document.querySelectorAll('.x-candles canvas').length};
  });}

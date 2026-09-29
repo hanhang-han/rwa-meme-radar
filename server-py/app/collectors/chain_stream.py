@@ -34,6 +34,11 @@ RECENT_REBASE_LAG_BLOCKS = 1800
 RECENT_REBASE_DEPTH_BLOCKS = 300
 REPLAY_PAUSE_QUEUE_FRACTION = .5
 REPLAY_RESUME_QUEUE_FRACTION = .25
+# A 4,096-entry queue can represent minutes of lag long before it is half
+# full. Give subscribed logs the shared RPC/SQLite budget after a small
+# backlog; the unfinished replay range retains its unadvanced cursor.
+REPLAY_PAUSE_QUEUE_CAP = 32
+REPLAY_RESUME_QUEUE_CAP = 8
 DEFAULTS = {
     "196": (["wss://ws.xlayer.tech", "wss://xlayerws.okx.com"], "https://xlayerrpc.okx.com"),
     "56": (["wss://bsc-rpc.publicnode.com"], "https://bsc-rpc.publicnode.com"),
@@ -430,10 +435,14 @@ class ChainPoolStream:
             self.replay_paused = False
             return False
         pending = self.queue.qsize() + int(self.retry_event is not None) + int(self.live_processing)
+        pause_at = max(1, min(int(capacity * REPLAY_PAUSE_QUEUE_FRACTION),
+                              REPLAY_PAUSE_QUEUE_CAP))
+        resume_above = max(1, min(int(capacity * REPLAY_RESUME_QUEUE_FRACTION),
+                                  REPLAY_RESUME_QUEUE_CAP))
         if self.replay_paused:
-            self.replay_paused = pending > max(1, int(capacity * REPLAY_RESUME_QUEUE_FRACTION))
+            self.replay_paused = pending > resume_above
         else:
-            self.replay_paused = pending >= max(1, int(capacity * REPLAY_PAUSE_QUEUE_FRACTION))
+            self.replay_paused = pending >= pause_at
         return self.replay_paused
 
     async def log_header(self, log):
