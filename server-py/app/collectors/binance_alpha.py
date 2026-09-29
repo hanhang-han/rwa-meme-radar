@@ -4,6 +4,7 @@ The directory is joined through alphaId == exchangeInfo.baseAsset, never by
 human-readable symbol. USDT, USDC and U remain different quote currencies.
 """
 import asyncio
+import json
 import os
 import re
 
@@ -18,6 +19,19 @@ EXCHANGE_INFO='https://www.binance.com/bapi/defi/v1/public/alpha-trade/get-excha
 CHAINS=('196','56','4663')
 _feed=None
 _directory_task=None
+
+
+async def _registry_snapshot(s):
+    rows=await s.fetchall('SELECT id,body FROM facts WHERE kind=? AND id LIKE ?',
+                          (s.key('market-registry'),'binance-alpha:%'))
+    current={}
+    for key,body in rows:
+        try:
+            current[key]=json.loads(body)
+        except (TypeError,ValueError):
+            # The previous full replacement repaired malformed registry rows.
+            current[key]=None
+    return current
 
 
 def map_markets(tokens,exchange_info):
@@ -78,13 +92,27 @@ async def refresh_directory():
         # One transaction per chain prevents partially published directories.
         for chain,rows in by_chain.items():
             s=await store(chain)
+            desired={market.storage:market.record() for market in rows}
+            kind=s.key('market-registry')
+            existing=await _registry_snapshot(s)
+            if existing==desired:
+                continue
             async with s._guard_write():
                 await s.db.execute('BEGIN IMMEDIATE')
                 try:
-                    await s.db.execute('DELETE FROM facts WHERE kind=? AND id LIKE ?',
-                                       (s.key('market-registry'),'binance-alpha:%'))
-                    for market in rows:
-                        await _feed_fact(s,market)
+                    # Recheck after acquiring the writer: a concurrent
+                    # directory update must not be lost by the earlier read.
+                    existing=await _registry_snapshot(s)
+                    removed=existing.keys()-desired.keys()
+                    changed=[(key,record) for key,record in desired.items()
+                             if existing.get(key)!=record]
+                    if removed:
+                        await s.db.executemany('DELETE FROM facts WHERE kind=? AND id=?',
+                                               [(kind,key) for key in sorted(removed)])
+                    if changed:
+                        await s.db.executemany('INSERT INTO facts VALUES (?,?,?) '
+                            'ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body',
+                            [(kind,key,json.dumps(record,allow_nan=False)) for key,record in changed])
                     await s.db.commit()
                 except BaseException:
                     await s.db.rollback()
@@ -99,11 +127,6 @@ async def refresh_directory():
             **previous,'status':'stale' if previous.get('updatedAt') else 'error',
             'error':type(error).__name__,'lastAttemptAt':now_ms()})
         return {'requested':2,'accepted':0,'failed':1}
-
-
-async def _feed_fact(s,market):
-    from .market_streams import MarketStreamProcessor
-    await MarketStreamProcessor._fact(s,'market-registry',market.storage,market.record())
 
 
 async def markets():

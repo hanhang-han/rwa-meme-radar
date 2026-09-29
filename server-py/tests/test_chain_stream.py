@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from app.db import ResearchStore
 from app.collectors.chain_stream import ChainPoolStream, SWAP_V2, SWAP_V3, SYNC_V2, WATCHED_POOL_BURST, decode_swap
 from app.collectors.market_streams import Market
@@ -34,6 +36,123 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual(row["sqrtPriceX96"], str(2 ** 96))
         self.assertIsNone(decode_swap({"topics": [SWAP_V3], "data": encoded(1, 2, 3, 4, 5)}, TOKEN0, TOKEN0, 18, 6))
         self.assertIsNone(decode_swap({"topics": [SWAP_V3], "data": "0x"}, TOKEN0, TOKEN0, 18, 6))
+
+
+class RpcTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_rpc_uses_verified_http_while_chain_identity_stays_on_wss(self):
+        for chain in ('56', '4663'):
+            with self.subTest(chain=chain):
+                methods = []
+
+                def respond(request):
+                    body = json.loads(request.content)
+                    methods.append(body['method'])
+                    results = {'eth_chainId': hex(int(chain)), 'eth_getLogs': [],
+                               'eth_getBlockByNumber': {'number': '0x1'}, 'eth_call': '0x1'}
+                    return httpx.Response(200, json={'result': results[body['method']]})
+
+                collector = ChainPoolStream(chain)
+                # Robinhood needs an explicitly configured HTTP provider that
+                # accepts the full replay page; its default PublicNode does not.
+                collector.http_reads_enabled = True
+                collector.rpc_interval = 0
+                collector.ws = object()
+                collector.ws_call = AsyncMock(return_value=hex(int(chain)))
+                async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as collector.http:
+                    self.assertEqual(await collector.rpc('eth_getLogs', [{}]), [])
+                    self.assertEqual(await collector.rpc('eth_getBlockByNumber', ['0x1', False]),
+                                     {'number': '0x1'})
+                    self.assertEqual(await collector.rpc('eth_call', [{'to': TOKEN0}, 'latest']), '0x1')
+                    self.assertEqual(await collector.rpc('eth_chainId', []), hex(int(chain)))
+                self.assertEqual(methods, ['eth_chainId', 'eth_getLogs',
+                                           'eth_getBlockByNumber', 'eth_call'])
+                collector.ws_call.assert_awaited_once_with(collector.ws, 'eth_chainId', [])
+
+    async def test_default_robinhood_replay_avoids_unsupported_http_page(self):
+        with patch.dict(os.environ, {'ROBINHOOD_STREAM_HTTP_READS': 'false'}):
+            collector = ChainPoolStream('4663')
+        collector.rpc_interval = 0
+        collector.ws = object()
+        collector.ws_call = AsyncMock(return_value=[])
+
+        def fail_if_http_used(request):
+            self.fail('default Robinhood HTTP rejects 100 and 300-block / 8-pool log pages')
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fail_if_http_used)) as collector.http:
+            self.assertEqual(await collector.rpc('eth_getLogs', [{}]), [])
+        collector.ws_call.assert_awaited_once_with(collector.ws, 'eth_getLogs', [{}])
+
+    async def test_wrong_http_chain_never_supplies_replay_logs(self):
+        methods = []
+
+        def respond(request):
+            method = json.loads(request.content)['method']
+            methods.append(method)
+            return httpx.Response(200, json={'result': '0x1'})
+
+        collector = ChainPoolStream('56')
+        collector.rpc_interval = 0
+        collector.ws = object()
+        collector.ws_call = AsyncMock(return_value=[])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as collector.http:
+            self.assertEqual(await collector.rpc('eth_getLogs', [{}]), [])
+            self.assertEqual(await collector.rpc('eth_getLogs', [{}]), [])
+        self.assertEqual(methods, ['eth_chainId'])
+        self.assertEqual(collector.ws_call.await_count, 2)
+        self.assertFalse(collector.http_chain_verified)
+
+    async def test_wrong_http_chain_without_wss_fails_closed(self):
+        methods = []
+
+        def respond(request):
+            methods.append(json.loads(request.content)['method'])
+            return httpx.Response(200, json={'result': None})
+
+        collector = ChainPoolStream('56')
+        collector.rpc_interval = 0
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as collector.http:
+            with self.assertRaisesRegex(ValueError, 'wrong-http-chain-id'):
+                await collector.rpc('eth_getLogs', [{}])
+        self.assertEqual(methods, ['eth_chainId'])
+
+    async def test_wrong_http_chain_cannot_supply_block_height(self):
+        methods = []
+
+        def respond(request):
+            methods.append(json.loads(request.content)['method'])
+            return httpx.Response(200, json={'result': '0x1'})
+
+        collector = ChainPoolStream('56')
+        collector.rpc_interval = 0
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as collector.http:
+            with self.assertRaisesRegex(ValueError, 'wrong-http-chain-id'):
+                await collector.rpc('eth_blockNumber', [])
+        self.assertEqual(methods, ['eth_chainId'])
+
+    async def test_http_transport_failure_falls_back_then_revalidates(self):
+        methods = []
+
+        def respond(request):
+            method = json.loads(request.content)['method']
+            methods.append(method)
+            if method == 'eth_getLogs' and methods.count(method) == 1:
+                return httpx.Response(403)
+            return httpx.Response(200, json={'result': '0x1237' if method == 'eth_chainId' else []})
+
+        collector = ChainPoolStream('4663')
+        collector.http_reads_enabled = True
+        collector.rpc_interval = 0
+        collector.ws = object()
+        collector.ws_call = AsyncMock(return_value=[])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as collector.http:
+            self.assertEqual(await collector.rpc('eth_getLogs', [{}]), [])
+            self.assertEqual(await collector.rpc('eth_getLogs', [{}]), [])
+            collector.http_fallback_until = 0
+            self.assertEqual(await collector.rpc('eth_getLogs', [{}]), [])
+        self.assertEqual(methods, ['eth_chainId', 'eth_getLogs', 'eth_chainId', 'eth_getLogs'])
+        self.assertEqual(collector.ws_call.await_count, 2)
+        self.assertTrue(collector.http_chain_verified)
+        self.assertEqual(collector.rpc_rate_failures, 0)
 
 
 class DurablePoolTests(unittest.IsolatedAsyncioTestCase):

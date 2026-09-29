@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from contextlib import ExitStack
 from email.utils import formatdate
@@ -43,15 +44,18 @@ class ChainRpcBudgetTests(unittest.IsolatedAsyncioTestCase):
                 calls = []
 
                 def respond(request):
-                    calls.append(clock.now)
-                    return httpx.Response(200, json={'jsonrpc': '2.0', 'result': '0x1'})
+                    method = json.loads(request.content)['method']
+                    calls.append((clock.now, method))
+                    result = hex(int(chain)) if method == 'eth_chainId' else '0x1'
+                    return httpx.Response(200, json={'jsonrpc': '2.0', 'result': result})
 
                 collector = ChainPoolStream(chain)
                 async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as collector.http:
                     with clock.patch():
                         results = await asyncio.gather(*(collector.rpc('eth_blockNumber', []) for _ in range(5)))
                 self.assertEqual(results, ['0x1'] * 5)
-                self.assertEqual(calls, [100 + interval * n for n in range(5)])
+                methods = (['eth_chainId'] if chain in ('56', '4663') else []) + ['eth_blockNumber'] * 5
+                self.assertEqual(calls, [(100 + interval * n, method) for n, method in enumerate(methods)])
 
     async def test_http_retry_after_and_exponential_cooldown_precede_every_retry(self):
         clock = Clock()
@@ -147,6 +151,7 @@ class ChainRpcBudgetTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(429 if len(calls) == 1 else 200, json={'result': '0x1'})
 
         collector = ChainPoolStream('56')
+        collector.http_chain_verified = True  # Isolate rate recovery from initial chain validation.
         collector.s = SimpleNamespace(get=AsyncMock(return_value={}), put=AsyncMock())
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as collector.http:
             with clock.patch():

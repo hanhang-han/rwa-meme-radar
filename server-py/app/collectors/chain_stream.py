@@ -133,6 +133,12 @@ class ChainPoolStream:
         urls, rpc = DEFAULTS[self.chain]
         self.urls = [u.strip() for u in os.environ.get(prefix + "_WS_URLS", ",".join(urls)).split(",") if u.strip()]
         self.rpc_url = os.environ.get(prefix + "_STREAM_RPC", rpc)
+        # PublicNode HTTP accepts BSC's 300-block / 8-pool replay pages.
+        # Robinhood HTTP rejects even 100-block / 8-pool pages (403); its
+        # supported 50-block pages cannot keep up with the current catalogue.
+        self.http_reads_enabled = (self.chain == "56" or
+                                   self.chain == "4663" and os.environ.get(
+                                       "ROBINHOOD_STREAM_HTTP_READS", "false").lower() == "true")
         self.http = None
         self.pools = {}
         self.assets = {}
@@ -176,6 +182,8 @@ class ChainPoolStream:
         self.watched_pools = set()
         self.watched_burst = 0
         self.ws = None
+        self.http_chain_verified = False
+        self.http_fallback_until = 0.0
         self.pending_pools = set()
         self.scan_page_metrics = {}
         self.last_closed = 0
@@ -258,32 +266,74 @@ class ChainPoolStream:
         import re
         from email.utils import parsedate_to_datetime
 
+        async def budget_slot():
+            deadline = max(self.rpc_cooldown_until,
+                           self.last_rpc + self.rpc_interval if self.last_rpc is not None else 0)
+            while deadline > time.monotonic():
+                await asyncio.sleep(deadline - time.monotonic())
+            self.last_rpc = time.monotonic()
+
         async with self.rpc_gate:
             for attempt in range(3):
                 if self.rpc_recovery_after and time.monotonic() >= self.rpc_recovery_after:
                     self.rpc_interval = self.rpc_base_interval
                     self.rpc_rate_failures = 0
                     self.rpc_recovery_after = 0.0
-                deadline = max(self.rpc_cooldown_until,
-                               self.last_rpc + self.rpc_interval if self.last_rpc is not None else 0)
-                while deadline > time.monotonic():
-                    await asyncio.sleep(deadline - time.monotonic())
-                self.last_rpc = time.monotonic()
+                await budget_slot()
                 response = None
+
+                async def http_call(call_method, call_params):
+                    nonlocal response
+                    response = await self.http.post(self.rpc_url, json={
+                        "jsonrpc": "2.0", "id": 1, "method": call_method, "params": call_params})
+                    response.raise_for_status()
+                    body = response.json()
+                    if body.get("error") or "result" not in body:
+                        detail = body.get("error") or {}
+                        raise RuntimeError("RPC " + str(detail.get("code", "invalid-response"))
+                                           + ":" + str(detail.get("message") or "")[:180])
+                    return body["result"]
+
                 try:
-                    # The same public WSS connection supports read RPC. Some
-                    # nodes accept WSS while blocking HTTP POST in this region.
-                    if self.ws is not None and self.chain in ("56", "4663"):
+                    # Keep chain identity and subscriptions on WSS. Read RPC
+                    # uses HTTP so replay cannot flood the live socket.
+                    public_ws = self.ws is not None and self.chain in ("56", "4663")
+                    if public_ws and (method == "eth_chainId" or not self.http_reads_enabled
+                                      or self.http is None
+                                      or time.monotonic() < self.http_fallback_until):
                         result = await self.ws_call(self.ws, method, params)
                     else:
-                        response = await self.http.post(self.rpc_url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-                        response.raise_for_status()
-                        body = response.json()
-                        if body.get("error") or "result" not in body:
-                            detail = body.get("error") or {}
-                            raise RuntimeError("RPC " + str(detail.get("code", "invalid-response"))
-                                               + ":" + str(detail.get("message") or "")[:180])
-                        result = body["result"]
+                        try:
+                            verify_http = (self.chain in ("56", "4663")
+                                           and method != "eth_chainId")
+                            if verify_http and not self.http_chain_verified:
+                                actual = await http_call("eth_chainId", [])
+                                try:
+                                    same_chain = number(actual) == int(self.chain)
+                                except (TypeError, ValueError):
+                                    same_chain = False
+                                if not same_chain:
+                                    raise ValueError("wrong-http-chain-id")
+                                self.http_chain_verified = True
+                                await budget_slot()
+                            result = await http_call(method, params)
+                        except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as http_error:
+                            # An unavailable or wrong-chain HTTP endpoint must
+                            # not stall durable replay. The already validated
+                            # live WSS connection is a temporary read fallback.
+                            status = (http_error.response.status_code
+                                      if isinstance(http_error, httpx.HTTPStatusError) else None)
+                            fallback = (isinstance(http_error, httpx.RequestError)
+                                        or status in (403, 404, 408)
+                                        or (status is not None and 500 <= status < 600)
+                                        or str(http_error) == "wrong-http-chain-id")
+                            if not public_ws or not fallback:
+                                raise
+                            self.http_chain_verified = False
+                            self.http_fallback_until = time.monotonic() + 60
+                            await budget_slot()
+                            response = None
+                            result = await self.ws_call(self.ws, method, params)
                 except Exception as error:
                     limited = (isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429)
                     limited = limited or bool(re.search(
@@ -1452,6 +1502,7 @@ class ChainPoolStream:
                     if self.retry_event is not None or not self.queue.empty():
                         self.recovery_needed = True
                     self.ws = None
+                    self.http_chain_verified = False
                     for task in (reader, replay):
                         if task:
                             task.cancel()
