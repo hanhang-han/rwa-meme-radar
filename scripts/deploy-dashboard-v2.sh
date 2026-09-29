@@ -62,7 +62,7 @@ NGINX_SNIPPET=/opt/memedashboard/nginx/dashboardv2.conf
 NGINX_BIN=/www/server/nginx/sbin/nginx
 cd "$ROOT"
 test -x "$NGINX_BIN"
-test -f "$SITE_CONF"
+sudo -n test -f "$SITE_CONF"
 test ! -e "$NGINX_SNIPPET"
 test ! -L "$NGINX_SNIPPET"
 test -f server-py/.venv/bin/python
