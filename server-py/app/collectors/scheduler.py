@@ -7,6 +7,7 @@ import time
 
 TASKS: dict[str, dict] = {}
 _running: set[asyncio.Task] = set()
+DEFER_POLL_SECONDS = 5
 
 
 def _save_health() -> None:
@@ -51,7 +52,45 @@ def apply_result(status, outcome, finished_at):
         status.update(status='idle', outcome='nothing-due')
 
 
-def spawn_loop(name: str, interval_s: float, fn, initial_delay_s: float = 0):
+async def _defer_for_live_backlog(status, defer_when, max_deferral_s, resume_stagger_s):
+    """Give a backed-up live stream a bounded head start over background work."""
+    began = None
+    clear_since = None
+    while True:
+        now = time.monotonic()
+        busy = defer_when()
+        if began is None:
+            if not busy:
+                return False
+            began = now
+            status['deferredSinceAt'] = int(time.time() * 1000)
+        if now - began >= max_deferral_s:
+            status['lastDeferralMs'] = int((now - began) * 1000)
+            status['lastDeferralExpiredAt'] = int(time.time() * 1000)
+            status.pop('deferredSinceAt', None)
+            return True
+        if busy:
+            clear_since = None
+            reason = 'live-backlog'
+            remaining = max_deferral_s - (now - began)
+        else:
+            clear_since = clear_since or now
+            remaining = resume_stagger_s - (now - clear_since)
+            if remaining <= 0:
+                status['lastDeferralMs'] = int((now - began) * 1000)
+                status.pop('deferredSinceAt', None)
+                return True
+            reason = 'live-recovery-stagger'
+        wait = min(DEFER_POLL_SECONDS, remaining, max_deferral_s - (now - began))
+        status.update(status='deferred', outcome=reason,
+                      nextRunAt=int((time.time() + wait) * 1000))
+        _save_health()
+        await asyncio.sleep(wait)
+
+
+def spawn_loop(name: str, interval_s: float, fn, initial_delay_s: float = 0, *,
+               defer_when=None, max_deferral_s: float = 180,
+               resume_stagger_s: float = 0):
     async def runner():
         if initial_delay_s > 0:
             TASKS[name] = {
@@ -63,9 +102,21 @@ def spawn_loop(name: str, interval_s: float, fn, initial_delay_s: float = 0):
             await asyncio.sleep(initial_delay_s)
         next_run = time.monotonic()
         while True:
-            started = time.time()
             status = TASKS.setdefault(name, {})
+            deferred = False
+            if defer_when is not None:
+                try:
+                    deferred = await _defer_for_live_backlog(
+                        status, defer_when, max_deferral_s, resume_stagger_s)
+                except asyncio.CancelledError:
+                    status.update(status='stopped', stoppedAt=int(time.time() * 1000))
+                    _save_health()
+                    raise
+            started = time.time()
             status.update(status="running", startedAt=int(started * 1000), error=None)
+            if deferred:
+                status.pop('outcome', None)
+            _save_health()
             try:
                 outcome = await fn()
                 apply_result(status, outcome, int(time.time() * 1000))
@@ -78,7 +129,10 @@ def spawn_loop(name: str, interval_s: float, fn, initial_delay_s: float = 0):
                 print(f"[{name}] {type(e).__name__}: {e}", flush=True)
             finally:
                 status["durationMs"] = int((time.time() - started) * 1000)
-            next_run = max(next_run + interval_s, time.monotonic())
+            # A deferred task must not immediately run a second time because
+            # its original cadence elapsed while waiting for live traffic.
+            next_run = max(next_run + interval_s,
+                           time.monotonic() + (interval_s if deferred else 0))
             status["nextRunAt"] = int((time.time() + max(0, next_run - time.monotonic())) * 1000)
             _save_health()
             await asyncio.sleep(max(0, next_run - time.monotonic()))

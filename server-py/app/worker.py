@@ -13,6 +13,17 @@ from pathlib import Path
 
 from .config import load_env
 
+LIVE_BACKLOG_QUEUE_DEPTH = 32
+
+
+def live_stream_backlogged(stream_for) -> bool:
+    """Use in-memory live queues; a stale persisted status can mislead a gate."""
+    for chain in ('196', '56', '4663'):
+        stream = stream_for(chain)
+        if stream is not None and stream.queue.qsize() >= LIVE_BACKLOG_QUEUE_DEPTH:
+            return True
+    return False
+
 
 def record_disk_sample(usage, at_ms: int, path="data/disk-health.json"):
     """Keep a small independent resource history for the data-health page."""
@@ -127,9 +138,19 @@ async def run() -> None:
     spawn_loop("comparisonInputs", 300, refresh_comparison_inputs, 24)
     spawn_loop("aiInsights", 15, insights.refresh_insights, 25)
     spawn_loop("aiBriefing", 60, briefing.refresh_briefing, 30)
-    spawn_loop("mainRound", 300, refresh_main_round, 35)
-    spawn_loop("liquidityRefresh", 30, refresh_liquidity, 45)
-    spawn_loop("discovery", 300, refresh_discovery, 50)
+    # Defer long, non-live writes while subscribed logs are behind. Each
+    # collector retains its normal cadence after running, and the 3-minute
+    # ceiling prevents identity/discovery maintenance from starving forever.
+    background_gate = {
+        'defer_when': lambda: live_stream_backlogged(chain_stream.stream_for),
+        'max_deferral_s': 180,
+    }
+    spawn_loop("mainRound", 300, refresh_main_round, 35,
+               resume_stagger_s=0, **background_gate)
+    spawn_loop("liquidityRefresh", 30, refresh_liquidity, 45,
+               resume_stagger_s=5, **background_gate)
+    spawn_loop("discovery", 300, refresh_discovery, 50,
+               resume_stagger_s=10, **background_gate)
     spawn_loop("hotTrades", 300, refresh_hot_trades, 60)
 
     async def maintenance():
@@ -148,7 +169,8 @@ async def run() -> None:
         return {'updated':deleted,'accepted':1,'diskFreeBytes':usage.free,
                 'diskFreePercent':round(usage.free/usage.total*100,2), 'failed':0}
 
-    spawn_loop('maintenance',3600,maintenance,120)
+    spawn_loop('maintenance',3600,maintenance,120,
+               resume_stagger_s=15, **background_gate)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
