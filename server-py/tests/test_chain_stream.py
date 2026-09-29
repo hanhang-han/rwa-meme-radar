@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.db import ResearchStore
-from app.collectors.chain_stream import ChainPoolStream, SWAP_V2, SWAP_V3, SYNC_V2, WATCHED_POOL_BURST, decode_swap
+from app.collectors.chain_stream import ChainPoolStream, SWAP_V2, SWAP_V3, SYNC_V2, WATCHED_POOL_BURST, decode_swap, event_key
 from app.collectors.market_streams import Market
 
 TOKEN0 = "0x" + "1" * 40
@@ -175,6 +175,20 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
                 "quoteQuantity": 3 * size, "type": "buy", "blockHash": "0xabc",
                 "blockNumber": 200, "logIndex": offset}
 
+    async def busy_shared_reader(self):
+        started, release = threading.Event(), threading.Event()
+
+        def hold():
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError('test shared reader was not released')
+            return 1
+
+        await self.store.db.create_function('hold_shared_reader', 0, hold)
+        blocked = asyncio.create_task(self.store.db.execute_fetchall('SELECT hold_shared_reader()'))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        return release, blocked
+
     async def prepare_logs(self):
         await self.store.db.execute('''CREATE TABLE chain_stream_logs (
             chain TEXT NOT NULL, id TEXT NOT NULL, pool TEXT NOT NULL,
@@ -256,6 +270,129 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         await self.collector.process_log({**sync, 'removed': True})
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 0)
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM chain_stream_logs'))[0], 0)
+
+    async def test_usd_anchor_merge_bypasses_busy_shared_connection(self):
+        log = await self.prepare_logs()
+        await self.collector._open_trade_db()
+        await self.store.put('asset', TOKEN0, {
+            'price': 1, 'priceCurrency': 'USD', 'marketCap': 100,
+            'fieldTimes': {'price': self.at - 2000},
+        })
+        await self.store.put('asset', TOKEN1, {
+            'price': 2, 'priceCurrency': 'USD',
+            'fieldTimes': {'price': self.at - 1000},
+            'fieldSources': {'price': 'independent-provider'},
+        })
+        real_get = self.store.get
+        release = blocked = None
+
+        async def intercept_get(kind, ident):
+            nonlocal release, blocked
+            result = await real_get(kind, ident)
+            if kind == 'asset' and ident == TOKEN1:
+                release, blocked = await self.busy_shared_reader()
+            return result
+
+        decoded = decode_swap(log, TOKEN0, TOKEN0, 18, 6)
+        with patch.object(self.store, 'get', new=intercept_get):
+            task = asyncio.create_task(self.collector.pool_asset_quote(
+                self.collector.pools[POOL], TOKEN0, decoded, self.at, 200, event_key(log)))
+            completed_while_blocked = False
+            quote = None
+            try:
+                done, _ = await asyncio.wait({task}, timeout=1.5)
+                completed_while_blocked = task in done and release is not None
+                if completed_while_blocked:
+                    await task
+                    quote = await self.collector.trade_store.get('asset', TOKEN0)
+            finally:
+                if release is not None:
+                    release.set()
+                    await blocked
+                await task
+        self.assertTrue(completed_while_blocked)
+        self.assertEqual(quote['price'], 6)
+        self.assertEqual(quote['fieldSources']['price'], 'Chain RPC')
+        self.assertEqual(quote['priceProvenance']['quoteToken'], TOKEN1)
+
+    async def test_relation_pool_quote_bypasses_busy_shared_connection(self):
+        swap = await self.prepare_logs()
+        await self.collector._open_trade_db()
+        sync = {**swap, 'transactionHash': '0xfee', 'logIndex': '0x2',
+                'topics': [SYNC_V2], 'data': encoded(2 * 10 ** 18, 6_000_000)}
+        self.collector.relations[POOL] = [{'id': 'relation', 'pool': POOL,
+                                            'token': TOKEN0, 'stockSide': TOKEN1}]
+        real_get = self.store.get
+        release = blocked = None
+
+        async def intercept_get(kind, ident):
+            nonlocal release, blocked
+            result = await real_get(kind, ident)
+            if kind == 'pool-quote':
+                release, blocked = await self.busy_shared_reader()
+            return result
+
+        with patch.object(self.store, 'get', new=intercept_get), \
+             patch.object(self.collector, 'reserve_valuation', new=AsyncMock()):
+            task = asyncio.create_task(self.collector.process_log(sync))
+            completed_while_blocked = False
+            quote = None
+            try:
+                done, _ = await asyncio.wait({task}, timeout=1.5)
+                completed_while_blocked = task in done and release is not None
+                if completed_while_blocked:
+                    await task
+                    quote = await self.collector.trade_store.get('pool-quote', POOL)
+            finally:
+                if release is not None:
+                    release.set()
+                    await blocked
+                await task
+        self.assertTrue(completed_while_blocked)
+        self.assertAlmostEqual(quote['memePerStock'], 1 / 3)
+        self.assertEqual(quote['method'], 'v2-sync-stream')
+
+    async def test_reserve_valuation_bypasses_busy_shared_connection(self):
+        await self.prepare_logs()
+        await self.collector._open_trade_db()
+        self.collector.relations[POOL] = [{'id': 'relation', 'pool': POOL,
+                                            'token': TOKEN0, 'stockSide': TOKEN1}]
+        await self.store.put('asset', TOKEN0, {'price': 2, 'priceCurrency': 'USD',
+                             'fieldTimes': {'price': self.at - 1000}})
+        await self.store.put('asset', TOKEN1, {'price': 3, 'priceCurrency': 'USD',
+                             'fieldTimes': {'price': self.at - 1000}})
+        await self.store.put('relation', 'relation', {'id': 'relation', 'name': 'existing'})
+        real_get = self.store.get
+        release = blocked = None
+
+        async def intercept_get(kind, ident):
+            nonlocal release, blocked
+            result = await real_get(kind, ident)
+            if kind == 'relation':
+                release, blocked = await self.busy_shared_reader()
+            return result
+
+        with patch.object(self.store, 'get', new=intercept_get):
+            task = asyncio.create_task(self.collector.reserve_valuation(
+                self.collector.pools[POOL], (2 * 10 ** 18, 6_000_000), 18, 6,
+                self.at, 200, '0xabc', 2))
+            completed_while_blocked = False
+            relation = None
+            try:
+                done, _ = await asyncio.wait({task}, timeout=1.5)
+                completed_while_blocked = task in done and release is not None
+                if completed_while_blocked:
+                    await task
+                    relation = await self.collector.trade_store.get('relation', 'relation')
+            finally:
+                if release is not None:
+                    release.set()
+                    await blocked
+                await task
+        self.assertTrue(completed_while_blocked)
+        self.assertEqual(relation['liquidityUsd'], 22)
+        self.assertEqual(relation['name'], 'existing')
+        self.assertEqual(relation['valuationOrder'], [200, 2])
 
     async def test_metadata_wait_does_not_block_removal_or_restore_orphan(self):
         log = await self.prepare_logs()
@@ -776,6 +913,101 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
             await self.store.db.rollback()
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 0)
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0], 0)
+
+    async def test_failed_dedicated_fact_write_does_not_rollback_shared_read_transaction(self):
+        await self.collector._open_trade_db()
+        self.assertIs(self.collector.trade_store.db, self.collector.trade_db)
+        self.assertIs(self.collector.trade_store._write_lock, self.store._write_lock)
+        await self.store.db.execute('BEGIN')
+        await self.store.fetchone('SELECT COUNT(*) FROM facts')
+        self.assertTrue(self.store.db.in_transaction)
+        try:
+            with self.assertRaisesRegex(Exception, 'NOT NULL constraint failed'):
+                await self.collector.trade_store.put('pool-quote', None, {'price': 1})
+            self.assertTrue(self.store.db.in_transaction)
+            self.assertFalse(self.collector.trade_db.in_transaction)
+        finally:
+            await self.store.db.rollback()
+
+    async def test_cancelled_dedicated_fact_write_rolls_back_before_releasing_write_lock(self):
+        await self.collector._open_trade_db()
+        started, release = threading.Event(), threading.Event()
+
+        def hold_fact_insert():
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError('test fact insert was not released')
+            return 1
+
+        await self.collector.trade_db.create_function('hold_fact_insert', 0, hold_fact_insert)
+        await self.collector.trade_db.execute('''CREATE TEMP TRIGGER hold_fact_insert_trigger
+            BEFORE INSERT ON facts BEGIN SELECT hold_fact_insert(); END''')
+        task = asyncio.create_task(self.collector.trade_store.put(
+            'pool-quote', POOL, {'memePerStock': 3}))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        try:
+            task.cancel()
+            await asyncio.sleep(.02)
+            self.assertTrue(self.store._write_lock.locked())
+        finally:
+            release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        self.assertFalse(self.store._write_lock.locked())
+        self.assertFalse(self.collector.trade_db.in_transaction)
+        self.assertIsNone(await self.store.get('pool-quote', POOL))
+
+    async def test_raw_log_and_processed_flag_bypass_busy_shared_connection(self):
+        log = await self.prepare_logs()
+        await self.collector._open_trade_db()
+        started, release = threading.Event(), threading.Event()
+        blocked = None
+        lookups = 0
+        real_fetchone = self.store.fetchone
+
+        def hold_shared_reader():
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError('test shared reader was not released')
+            return 1
+
+        async def intercept_fetchone(query, parameters=()):
+            nonlocal blocked, lookups
+            result = await real_fetchone(query, parameters)
+            if query.startswith('SELECT processed FROM chain_stream_logs'):
+                lookups += 1
+                if lookups == 2:
+                    blocked = asyncio.create_task(self.store.db.execute_fetchall('SELECT hold_shared_reader()'))
+                    self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            return result
+
+        async def observe_raw_before_trade(market, trade):
+            rows = await self.collector.trade_db.execute_fetchall(
+                'SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?',
+                (self.collector.chain, event_key(log)))
+            self.assertEqual(rows[0][0], 0)
+            return True
+
+        await self.store.db.create_function('hold_shared_reader', 0, hold_shared_reader)
+        with patch.object(self.store, 'fetchone', new=intercept_fetchone), \
+             patch.object(self.collector, 'commit_trade', new=observe_raw_before_trade), \
+             patch.object(self.collector, 'pool_asset_quote', new=AsyncMock()):
+            task = asyncio.create_task(self.collector.process_log(log))
+            completed_while_blocked = False
+            try:
+                done, _ = await asyncio.wait({task}, timeout=1.5)
+                completed_while_blocked = task in done
+                if completed_while_blocked:
+                    rows = await self.collector.trade_db.execute_fetchall(
+                        'SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?',
+                        (self.collector.chain, event_key(log)))
+                    self.assertEqual(rows[0][0], 1)
+            finally:
+                release.set()
+                if blocked is not None:
+                    await blocked
+                await task
+        self.assertTrue(completed_while_blocked)
 
     async def test_cancelled_dedicated_trade_rolls_back_before_releasing_write_lock(self):
         await self.collector._open_trade_db()

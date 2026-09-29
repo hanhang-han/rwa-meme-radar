@@ -9,6 +9,7 @@ import math
 import os
 import time
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from decimal import Decimal, localcontext
 
 import aiosqlite
@@ -16,7 +17,7 @@ import httpx
 import websockets
 from web3 import Web3
 
-from ..db import store
+from ..db import ResearchStore, store
 from ..pool_quotes import pool_ratio
 
 SWAP_V2 = Web3.to_hex(Web3.keccak(text="Swap(address,uint256,uint256,uint256,uint256,address)"))
@@ -127,6 +128,24 @@ def event_key(log):
     return ":".join(str(log.get(k) or "").lower() for k in ("blockHash", "transactionHash", "logIndex"))
 
 
+class _StreamWriteStore(ResearchStore):
+    @asynccontextmanager
+    async def _guard_write(self):
+        # The shared store shields rollback, which can leave a dedicated
+        # rollback running after cancellation releases the global write lock.
+        async with self._write_lock:
+            try:
+                yield
+            except BaseException as exc:
+                if isinstance(exc, aiosqlite.OperationalError) and 'locked' in str(exc).lower():
+                    print('[research-db] locked ' + json.dumps({**self._write_lock.snapshot(),
+                        'sqliteErrorCode': getattr(exc, 'sqlite_errorcode', None),
+                        'sqliteErrorName': getattr(exc, 'sqlite_errorname', None)}), flush=True)
+                if self.db is not None:
+                    await self.db.rollback()
+                raise
+
+
 class ChainPoolStream:
     def __init__(self, chain):
         self.chain = str(chain)
@@ -142,6 +161,7 @@ class ChainPoolStream:
                                        "ROBINHOOD_STREAM_HTTP_READS", "false").lower() == "true")
         self.http = None
         self.trade_db = None
+        self.trade_store = None
         self.pools = {}
         self.assets = {}
         self.relations = {}
@@ -222,12 +242,29 @@ class ChainPoolStream:
             await connection.close()
             raise
         self.trade_db = connection
+        self.trade_store = _StreamWriteStore(self.s.path, self.s.scope,
+                                             write_lock=self.s._write_lock,
+                                             busy_timeout_ms=self.s.busy_timeout_ms)
+        self.trade_store.db = connection
 
     async def close(self):
         connection, self.trade_db = self.trade_db, None
+        self.trade_store = None
         self.initialized = False
         if connection is not None:
             await connection.close()
+
+    async def _write_stream_log(self, query, params):
+        """Commit one raw-log state change without waiting on shared reads."""
+        db = self.trade_db or self.s.db
+        guard = self.s._write_lock if db is not self.s.db else self.s._guard_write()
+        async with guard:
+            try:
+                await db.execute(query, params)
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def catalogue(self):
         rows = await self.s.all("pool")
@@ -607,17 +644,13 @@ class ChainPoolStream:
             if unsupported:
                 # A permanently unsupported ABI must not hold back every
                 # other pool on this chain. Transport errors remain retryable.
-                async with self.s._guard_write():
-                    await self.s.db.execute("INSERT OR REPLACE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,1)",
-                        (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log)))
-                    await self.s.db.commit()
+                await self._write_stream_log("INSERT OR REPLACE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,1)",
+                    (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log)))
                 self.unsupported += 1
                 return
             # Store unprocessed input first; a crash is safely retried by the watermark.
-            async with self.s._guard_write():
-                await self.s.db.execute("INSERT OR IGNORE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,0)",
-                                       (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log)))
-                await self.s.db.commit()
+            await self._write_stream_log("INSERT OR IGNORE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,0)",
+                (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log)))
             topic = str((log.get("topics") or [""])[0]).lower()
             reserves = words(log.get("data"), 2) if topic == SYNC_V2.lower() else None
             sqrt = None
@@ -647,7 +680,7 @@ class ChainPoolStream:
                     order = [height, number(log.get("logIndex", "0x0"))]
                     old_order = old.get("eventOrder") or [old.get("block") or 0, -1]
                     if ratio and at >= (old.get("at") or 0) and order >= old_order:
-                        await self.s.put("pool-quote", pool["pool"], {
+                        await (self.trade_store or self.s).put("pool-quote", pool["pool"], {
                             "chainId": self.chain, "pool": pool["pool"], "token": rel["token"],
                             "stockSide": rel.get("stockSide") or rel.get("stock"), "memePerStock": ratio,
                             "at": at, "block": height, "blockHash": block_hash, "timeKind": "market",
@@ -661,9 +694,8 @@ class ChainPoolStream:
                 accepted = True
             if not accepted:
                 self.unsupported += 1
-            async with self.s._guard_write():
-                await self.s.db.execute("UPDATE chain_stream_logs SET processed=1 WHERE chain=? AND id=?", (self.chain, ident))
-                await self.s.db.commit()
+            await self._write_stream_log("UPDATE chain_stream_logs SET processed=1 WHERE chain=? AND id=?",
+                                         (self.chain, ident))
             self.processed += 1
             self.last_event = now_ms()
             self.last_source_event = max(self.last_source_event, at)
@@ -700,7 +732,7 @@ class ChainPoolStream:
             return
         # The price is a current native execution multiplied by an explicitly
         # dated USD anchor; never label its conversion as an independent quote.
-        await self.s.merge_asset_observation(token, {
+        await (self.trade_store or self.s).merge_asset_observation(token, {
             "priceCurrency": "USD", "priceProvenance": {
                 "provider": "Chain RPC", "venue": "dex", "scope": "pool", "pool": pool["pool"],
                 "quoteType": "pool-derived", "quoteToken": other, "quoteAt": anchor_at,
@@ -734,7 +766,7 @@ class ChainPoolStream:
             order = [height, log_index]
             if at < (current.get("reservesAt") or 0) or order < (current.get("valuationOrder") or [current.get("valuationBlock") or 0, -1]):
                 continue
-            await self.s.patch_fact("relation", rel["id"], {
+            await (self.trade_store or self.s).patch_fact("relation", rel["id"], {
                 "liquidityUsd": total, "liquidityAt": min(at, *times),
                 "reservesAt": at, "priceAt": min(times), "valuationAt": now_ms(),
                 "liquidityMethod": "streamed-v2-two-sided-reserves", "valuationBlock": height,
