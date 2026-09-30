@@ -35,6 +35,10 @@ MAX_QUOTE_AGE_MS = 15 * 60_000
 HISTORY_MS = 48 * 60 * 60_000
 MAX_SAMPLES = 576
 MAX_WINDOW_ROWS = 16
+BACKLOG_WAIT_STEPS = 10
+BACKLOG_WAIT_SECONDS = 1
+FORCE_SAMPLE_AGE_MS = 10 * 60_000
+MAX_ROUND_RPC_CALLS = 12
 
 
 class OracleDeferred(RuntimeError):
@@ -105,6 +109,26 @@ def _backlogged(stream):
     # A live stream normally has both a shallow queue and an active processor.
     # Skipping that ordinary state would starve every five-minute oracle run.
     return pending >= 32
+
+
+async def _wait_for_backlog(stream, steps):
+    """Return (clear, seconds waited) within the round's shared wait budget."""
+    if not _backlogged(stream):
+        return True, 0
+    for waited in range(steps):
+        await asyncio.sleep(BACKLOG_WAIT_SECONDS)
+        if not _backlogged(stream):
+            return True, waited + 1
+    return False, steps
+
+
+async def _force_due(scoped, now):
+    """Use persisted sample receipt times so restarts cannot reset deferral."""
+    statuses = await latest_sample_status(scoped)
+    return any((not isinstance(row['observedAt'], int)
+                or row['observedAt'] > now
+                or now - row['observedAt'] >= FORCE_SAMPLE_AGE_MS)
+               for row in statuses.values())
 
 
 async def verified_sample(rpc, *, quote_token=WBNB, observed_at=None, should_pause=None):
@@ -290,25 +314,48 @@ async def latest_sample_status(scoped):
 
 
 async def refresh_bnb_anchor():
-    """Independent five-minute oracle task; at most nine eth_call reads."""
+    """Independent five-minute oracle task, bounded even under live backlog."""
     from .chain_stream import stream_for
 
     stream = stream_for(CHAIN_ID)
     totals = {'requested': 0, 'accepted': 0, 'updated': 0,
               'failed': 0, 'unsupported': 0, 'skipped': 0}
-    if stream is None or _backlogged(stream):
+    if stream is None:
         totals['skipped'] = len(FEEDS)
         return totals
+    clear, waited = await _wait_for_backlog(stream, BACKLOG_WAIT_STEPS)
     scoped = await store(CHAIN_ID)
+    force = not clear and await _force_due(scoped, int(time.time() * 1000))
+    if not clear and not force:
+        totals['skipped'] = len(FEEDS)
+        return totals
+
+    calls = 0
+
+    async def budgeted_rpc(method, params):
+        nonlocal calls
+        if calls >= MAX_ROUND_RPC_CALLS:
+            raise RuntimeError('oracle-rpc-round-budget')
+        calls += 1
+        return await stream.rpc(method, params)
+
     for index, token in enumerate(FEEDS):
         remaining = len(FEEDS) - index
-        if _backlogged(stream):
-            totals['skipped'] += remaining
-            break
+        if not force:
+            clear, just_waited = await _wait_for_backlog(
+                stream, BACKLOG_WAIT_STEPS - waited)
+            waited += just_waited
+        if not force and not clear:
+            force = await _force_due(scoped, int(time.time() * 1000))
+            if not force:
+                totals['skipped'] += remaining
+                break
         try:
             async with asyncio.timeout(15):
-                sample = await verified_sample(stream.rpc, quote_token=token,
-                    should_pause=lambda: _backlogged(stream))
+                # Once a feed is admitted, finish its four bounded calls.
+                # Rechecking the queue between eth_calls caused repeated
+                # partial reads at the same traffic peak every five minutes.
+                sample = await verified_sample(budgeted_rpc, quote_token=token)
         except OracleDeferred:
             totals['skipped'] += remaining
             break

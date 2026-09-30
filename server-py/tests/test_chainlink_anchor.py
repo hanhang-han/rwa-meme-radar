@@ -258,16 +258,89 @@ class ChainlinkAnchorTests(unittest.IsolatedAsyncioTestCase):
             anchor._sample_id(bnb['updatedAt'], anchor.FEED)))
 
     async def test_sampler_defers_when_live_logs_backed_up(self):
+        for token in anchor.FEEDS:
+            sample, _ = await self.sample(token)
+            self.assertTrue(await anchor.save_sample(self.scoped, sample))
         stream = SimpleNamespace(queue=asyncio.Queue(), live_processing=False,
                                  rpc=AsyncMock())
         for _ in range(32):
             stream.queue.put_nowait(object())
         with patch('app.collectors.chain_stream.stream_for', return_value=stream), \
-             patch.object(anchor, 'store', new_callable=AsyncMock, return_value=self.scoped) as store:
+             patch.object(anchor, 'store', new_callable=AsyncMock, return_value=self.scoped) as store, \
+             patch.object(anchor.asyncio, 'sleep', new_callable=AsyncMock) as sleep, \
+             patch.object(anchor.time, 'time', return_value=(self.now + 300_000) / 1000):
             result = await anchor.refresh_bnb_anchor()
         self.assertEqual(result['skipped'], 3)
         stream.rpc.assert_not_called()
-        store.assert_not_awaited()
+        store.assert_awaited_once()
+        self.assertEqual(sleep.await_count, anchor.BACKLOG_WAIT_STEPS)
+
+    async def test_persistent_backlog_forces_bounded_round_after_ten_minutes(self):
+        for token in anchor.FEEDS:
+            sample, _ = await self.sample(token)
+            self.assertTrue(await anchor.save_sample(self.scoped, sample))
+        queue = asyncio.Queue()
+        for _ in range(32):
+            queue.put_nowait(object())
+        clock = [self.now + 300_000]
+        by_feed = {spec['feed']: spec for spec in anchor.FEEDS.values()}
+        calls = []
+
+        async def rpc(method, params):
+            calls.append(method)
+            if method == 'eth_chainId':
+                return '0x38'
+            spec = by_feed[params[0]['to']]
+            selector = params[0]['data']
+            if selector == '0x7284e416':
+                return description(spec['description'])
+            if selector == '0x313ce567':
+                return '0x' + word(8).hex()
+            updated = clock[0] // 1000 - 30
+            return latest(3, 100_000_000, updated - 1, updated)
+
+        stream = SimpleNamespace(queue=queue, live_processing=True, rpc=rpc)
+        with patch('app.collectors.chain_stream.stream_for', return_value=stream), \
+             patch.object(anchor, 'store', new_callable=AsyncMock, return_value=self.scoped), \
+             patch.object(anchor.asyncio, 'sleep', new_callable=AsyncMock), \
+             patch.object(anchor.time, 'time', side_effect=lambda: clock[0] / 1000):
+            deferred = await anchor.refresh_bnb_anchor()
+            self.assertEqual(deferred['skipped'], 3)
+            self.assertEqual(calls, [])
+            clock[0] = self.now + anchor.FORCE_SAMPLE_AGE_MS + 1000
+            forced = await anchor.refresh_bnb_anchor()
+        self.assertEqual(forced, {'requested': 3, 'accepted': 3, 'updated': 3,
+                                  'failed': 0, 'unsupported': 0, 'skipped': 0})
+        self.assertEqual(len(calls), 12)
+        self.assertEqual(calls.count('eth_call'), 9)
+
+    async def test_cancelled_backlog_wait_does_not_reset_restart_freshness(self):
+        for token in anchor.FEEDS:
+            sample, _ = await self.sample(token)
+            self.assertTrue(await anchor.save_sample(self.scoped, sample))
+        queue = asyncio.Queue()
+        for _ in range(32):
+            queue.put_nowait(object())
+        entered = asyncio.Event()
+
+        async def paused_sleep(_seconds):
+            entered.set()
+            await asyncio.Future()
+
+        stream = SimpleNamespace(queue=queue, live_processing=False, rpc=AsyncMock())
+        with patch('app.collectors.chain_stream.stream_for', return_value=stream), \
+             patch.object(anchor, 'store', new_callable=AsyncMock, return_value=self.scoped), \
+             patch.object(anchor.asyncio, 'sleep', side_effect=paused_sleep):
+            task = asyncio.create_task(anchor.refresh_bnb_anchor())
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        stream.rpc.assert_not_called()
+        await self.scoped.close()
+        self.scoped = await ResearchStore(self.path, '56').connect()
+        with patch.object(anchor.time, 'time', return_value=(self.now + 601_000) / 1000):
+            self.assertTrue(await anchor._force_due(self.scoped, self.now + 601_000))
 
     async def test_sampler_tracks_three_feeds_and_stale_provider_time(self):
         current = int(time.time())
