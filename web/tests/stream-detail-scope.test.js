@@ -28,6 +28,10 @@ test('detail changes scope only trade events and leaving detail restores the glo
       trades: returningToGlobal ? [{ chainId: '56', token: '0xelsewhere', venue: 'dex',
         marketId: '0xpool', id: 'global-return', t: 200 }] : [], relationships: [], at: 200,
     }), { status: 200 });
+    if (url.includes('/token/')) return new Response(JSON.stringify({
+      realtime: {schema: 1, cursor: 100, revision: 1}, revision: 1,
+      asset: {chainId: url.includes('/token/56/') ? '56' : '196', token: '0xabc', price: 1}, relations: [],
+    }), {status: 200});
     if (url.includes('/stream?')) {
       requests.push(url);
       const body = new ReadableStream({

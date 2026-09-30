@@ -272,6 +272,7 @@ async def health_data(request: Request):
 
 
 async def health_data_payload():
+    from .collectors.discovery_coverage import discovery_coverage_snapshot
     """Internal diagnostics. Only the authenticated HTTP wrapper exposes it."""
     from . import state
     now = int(time.time() * 1000)
@@ -406,11 +407,27 @@ async def health_data_payload():
         warnings.append('stock-references-coverage-limited')
     history = disk_history()
     disk_samples = [*history, {'at': now, 'freeBytes': disk.free, 'totalBytes': disk.total}][-49:]
+    try:
+        discovery_coverage = await discovery_coverage_snapshot(now)
+    except Exception:
+        # An optional external cross-check must not make the local health
+        # endpoint fail. An unreadable report is never treated as 100%.
+        discovery_coverage = {"chains": [
+            {"chainId": chain, "status": "unverified", "scope": "report-unavailable",
+             "checkedAt": None, "eligible": 0, "covered": 0, "missing": 0}
+            for chain in _HEALTH_CHAINS]}
+    for coverage_row in discovery_coverage.get("chains", []):
+        if (coverage_row.get("status") == "complete"
+                and coverage_row.get("missing", 0) > 0):
+            issues.append("discovery-coverage-missing")
+        elif coverage_row.get("status") in ("partial", "stale"):
+            warnings.append("discovery-coverage-unverified")
     core_ok = not issues
     return {
         "ok": core_ok,
         "status": 'degraded' if issues else 'limited' if warnings else 'healthy',
         "issues":issues,"warnings":warnings,"coverage":coverage,"discovery":discovery,
+        "discoveryCoverage":discovery_coverage,
         "chainStreams":chain_streams,
         "failedTasks":failed_tasks,"disk":{"freeBytes":disk.free,"freePercent":round(disk.free/disk.total*100,2)},
         "diskSamples":disk_samples,"references":reference_coverage,

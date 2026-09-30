@@ -23,6 +23,10 @@
       <span v-if="candleInfo.nextRefreshAt > now && candleInfo.status !== 'current'"> · {{ tr('预计下次采集', 'Next collection due') }}：{{ chartDateTime(candleInfo.nextRefreshAt / 1000) }}</span>
       <span v-if="candleInfo.error === 'quota-exhausted'"> · {{ tr('OKX 当日额度已用尽', 'OKX daily budget exhausted') }}</span>
     </p>
+    <div v-if="offerNativePool" class="chart-native-fallback" data-chart-native-fallback role="status">
+      <span>{{ tr('美元图表更新较慢。这个链上池最近有成交；切换后图表改为 ' + nativePool.priceCurrency + ' 计价。', 'The USD chart is delayed. This on-chain pool has recent trades; switching changes the chart unit to ' + nativePool.priceCurrency + '.') }}</span>
+      <button type="button" @click="emit('select-pool', nativePool.poolId)">{{ tr('查看实时池价', 'View live pool price') }} →</button>
+    </div>
   </div>
 </template>
 
@@ -52,6 +56,11 @@ export function candleDelayLabel(info, bar, nowMs = Date.now(), language = 'zh')
   const minutes = Math.floor(delay / 60_000);
   return language === 'en' ? `Market data delayed ${minutes} min` : `行情延迟 ${minutes} 分钟`;
 }
+
+export function shouldOfferNativePool(info, bar, nowMs, selectedPool, nativePool) {
+  return !selectedPool && info?.priceCurrency === 'USD' && !!nativePool?.poolId
+    && !!nativePool?.priceCurrency && candleDelayMs(info, bar, nowMs) >= 600_000;
+}
 </script>
 
 <script setup>
@@ -68,7 +77,9 @@ const props = defineProps({
   asset: { type: Object, required: true },
   samples: { type: Array, default: () => [] },
   pool: { type: String, default: '' },
+  nativePool: { type: Object, default: null },
 });
+const emit = defineEmits(['select-pool']);
 
 const streams = useCandleStore();
 const dashboard = useDashboardStore();
@@ -81,6 +92,7 @@ const hint = ref('');
 const now = ref(Date.now());
 const candleInfo = ref(null);
 const candleTail = computed(() => candleTailState(candleInfo.value, bar.value, now.value));
+const offerNativePool = computed(() => shouldOfferNativePool(candleInfo.value, bar.value, now.value, props.pool, props.nativePool));
 const candleStatusLabel = computed(() => {
   const info=candleInfo.value;
   // A recent, persisted pool trade is useful even while the historical
@@ -419,3 +431,9 @@ onBeforeUnmount(() => {
 });
 function onManualRefresh() { paint(false, true); }
 </script>
+
+<style scoped>
+.chart-native-fallback {display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0 14px;padding:12px 14px;border:1px solid rgba(245,184,61,.38);border-radius:8px;background:rgba(245,184,61,.06);color:var(--text);font-size:12px;line-height:1.5;}
+.chart-native-fallback button {flex:none;min-height:34px;padding:6px 10px;border:1px solid var(--warning);border-radius:8px;background:transparent;color:var(--warning);font:inherit;cursor:pointer;}
+@media(max-width:700px){.chart-native-fallback{align-items:flex-start;flex-direction:column;}}
+</style>

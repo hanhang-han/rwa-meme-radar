@@ -348,6 +348,21 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 0)
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM chain_stream_logs'))[0], 0)
 
+    async def test_swap_log_keeps_native_trade_unit_without_inventing_tx_wallet(self):
+        swap = await self.prepare_logs()
+        # A V2 Swap's indexed sender is the pool caller (often a router),
+        # while wallet means transaction.from, which is absent from this log.
+        swap['topics'] = [SWAP_V2, '0x' + '0' * 24 + TOKEN1[2:],
+                          '0x' + '0' * 24 + TOKEN0[2:]]
+        await self.collector.process_log(swap)
+        market = self.collector.market(self.collector.pools[POOL], TOKEN0)
+        body = (await self.store.recent_trades(market.storage, 1))[0]
+        self.assertEqual((body['price'], body['size'], body['quoteQuantity']), (3, 2, 6))
+        self.assertEqual(body['priceCurrency'], TOKEN1)
+        self.assertEqual(body['quoteToken'], TOKEN1)
+        self.assertIsNone(body['volume'])
+        self.assertNotIn('wallet', body)
+
     async def test_usd_anchor_merge_bypasses_busy_shared_connection(self):
         log = await self.prepare_logs()
         await self.collector._open_trade_db()
@@ -913,6 +928,89 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         frames = await cur.fetchall()
         self.assertEqual(sum(row[0] == "trade" for row in frames), 2)
         self.assertEqual(sum(row[0] == "candle" for row in frames), 6)
+
+    async def put_quote_price(self, price, at, *, kind='market', currency='USD',
+                              provider='OKX', chain='196', independent=True):
+        await self.store.merge_asset_observation(TOKEN1, {
+            'token': TOKEN1, 'chainId': chain,
+            'fieldSources': {'price': provider},
+            'fieldObservations': {'price': {
+                'provider': provider, 'scope': 'token', 'venue': 'dex',
+                'currency': currency, 'timeKind': kind,
+                'marketAt': at if kind == 'market' else None, 'receivedAt': at,
+                'independent': independent,
+            }},
+            'fieldTimeKinds': {'price': kind},
+        }, {'price': (price, at)}, sample=(price, None, at))
+
+    async def test_chain_trade_uses_dated_same_chain_usd_quote_without_repricing_candle(self):
+        market = replace(self.market, quote_token=TOKEN1)
+        await self.put_quote_price(1.02, self.at - 30_000)
+        trade = self.trade('dated-usd', 2)
+        self.assertTrue(await self.collector.commit_trade(market, trade))
+        body = (await self.store.recent_trades(market.storage, 1))[0]
+        self.assertEqual((body['price'], body['quoteQuantity']), (3, 6))
+        self.assertAlmostEqual(body['volume'], 6.12)
+        self.assertEqual(body['volumeCurrency'], 'USD')
+        self.assertEqual(body['quoteAt'], self.at - 30_000)
+        self.assertEqual(body['volumeProvenance'], {
+            'method': 'native-quote-quantity-times-dated-usd-price',
+            'chainId': '196', 'quoteToken': TOKEN1, 'quotePriceUsd': 1.02,
+            'quoteAt': self.at - 30_000, 'timeKind': 'market',
+            'provider': 'OKX', 'evidence': 'asset-fact',
+        })
+        candle = await self.store.get('market-candle', market.storage + ':1m')
+        self.assertEqual((candle['row']['v'], candle['row']['vu'], candle['priceCurrency']),
+                         (2, 6, 'USDG'))
+        self.assertFalse(await self.collector.commit_trade(market, trade))
+        self.assertEqual((await self.store.recent_trades(market.storage, 1))[0]['volume'], 6.12)
+
+    async def test_historical_replay_uses_prior_sample_instead_of_current_quote(self):
+        market = replace(self.market, quote_token=TOKEN1)
+        await self.put_quote_price(1.01, self.at - 120_000)
+        await self.put_quote_price(9, self.at + 60_000)
+        await self.collector.commit_trade(market, self.trade('replayed', 2))
+        body = (await self.store.recent_trades(market.storage, 1))[0]
+        self.assertAlmostEqual(body['volume'], 6.06)
+        self.assertEqual(body['quoteAt'], self.at - 120_000)
+        self.assertEqual(body['volumeProvenance']['evidence'], 'asset-sample')
+
+    async def test_usd_volume_requires_independent_market_time_and_same_chain(self):
+        market = replace(self.market, quote_token=TOKEN1)
+        cases = (
+            ('received-time-only', self.at - 30_000, 'received', 'USD', 'OKX', '196', True),
+            ('future-quote', self.at + 1, 'market', 'USD', 'OKX', '196', True),
+            ('stale-quote', self.at - 900_001, 'market', 'USD', 'OKX', '196', True),
+            ('native-currency', self.at - 30_000, 'market', 'USDT', 'OKX', '196', True),
+            ('derived-quote', self.at - 30_000, 'market', 'USD', 'Chain RPC', '196', False),
+            ('not-independent', self.at - 30_000, 'market', 'USD', 'OKX', '196', False),
+            ('unverified-quote', self.at - 30_000, 'market', 'USD', 'OKX', '196', None),
+            ('wrong-chain', self.at - 30_000, 'market', 'USD', 'OKX', '56', True),
+        )
+        for name, quote_at, kind, currency, provider, chain, independent in cases:
+            with self.subTest(name=name):
+                await self.store.db.execute('DELETE FROM samples WHERE asset=?', (self.store.key(TOKEN1),))
+                await self.store.db.execute('DELETE FROM sample_evidence WHERE asset=?', (self.store.key(TOKEN1),))
+                await self.store.db.execute('DELETE FROM facts WHERE kind=? AND id=?',
+                                            (self.store.key('asset'), TOKEN1))
+                await self.store.db.commit()
+                await self.put_quote_price(1, quote_at, kind=kind, currency=currency,
+                                           provider=provider, chain=chain, independent=independent)
+                await self.collector.commit_trade(market, self.trade(name, 2))
+                body = (await self.store.recent_trades(market.storage, 1))[0]
+                self.assertIsNone(body['volume'])
+                self.assertEqual(body['volumeCurrency'], 'USDG')
+                self.assertNotIn('quoteAt', body)
+                self.assertNotIn('volumeProvenance', body)
+
+    async def test_usd_volume_does_not_infer_peg_or_accept_invalid_quantity(self):
+        market = replace(self.market, quote_token=TOKEN1)
+        await self.collector.commit_trade(market, self.trade('symbol-is-not-peg', 2))
+        self.assertIsNone((await self.store.recent_trades(market.storage, 1))[0]['volume'])
+        await self.put_quote_price(1, self.at - 1000)
+        await self.collector.commit_trade(market, {**self.trade('bad-quantity', 2, 1000),
+                                                    'quoteQuantity': 0})
+        self.assertIsNone((await self.store.recent_trades(market.storage, 1))[0]['volume'])
 
     async def test_market_registry_is_written_only_when_definition_changes(self):
         self.assertTrue(await self.collector.commit_trade(self.market, self.trade('registry-first', 2)))

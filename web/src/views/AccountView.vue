@@ -1,7 +1,8 @@
 <template>
   <div class="account-page">
+    <div class="section-page-heading"><h2>{{ tr('我的', 'My account') }}</h2><span>{{ tr('账号、关注与提醒', 'Account, watchlist and alerts') }}</span></div>
     <section class="panel">
-      <div class="panel-head"><h2>{{ tr('我的', 'My account') }}</h2><RouterLink to="/watch">{{ tr('我的关注', 'My watchlist') }} →</RouterLink></div>
+      <div class="panel-head"><h2>{{ tr('账号', 'Account') }}</h2><RouterLink to="/watch">{{ tr('我的关注', 'My watchlist') }} →</RouterLink></div>
       <p v-if="!account.ready" role="status">{{ tr('加载中…','Loading…') }}</p>
       <template v-else-if="account.session">
         <p>{{ account.session.user.email }}</p>

@@ -1,5 +1,5 @@
 <template>
-  <section class="panel meme-page">
+  <div class="meme-page">
     <div class="meme-heading">
       <h2>Meme</h2>
       <div class="meme-view-switch" :aria-label="tr('查看方式','View')">
@@ -7,6 +7,7 @@
         <button type="button" :class="{active:view==='pool'}" :aria-pressed="view==='pool'" @click="switchView('pool')">{{ tr('按池','By pool') }}</button>
       </div>
     </div>
+    <section class="panel meme-results">
     <PoolListView v-if="view==='pool'" :scope="scope" :qualified="qualified" />
     <template v-else>
       <div class="meme-toolbar">
@@ -55,7 +56,8 @@
       </template>
       <p class="meme-note">{{ tr('池子配对：同池交易。名称匹配：名称关联。','Pool pair: traded in one pool. Name match: a name association.') }}</p>
     </template>
-  </section>
+    </section>
+  </div>
 </template>
 
 <script setup>

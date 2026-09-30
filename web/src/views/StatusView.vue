@@ -40,6 +40,20 @@
       <p class="hint">{{ tr('时效以来源的行情时间为准；未提供时标记报价接收时间，不等同于成交时间。', 'Freshness uses the source timestamp, or the quote receipt time when unavailable. Receipt time is not trade time.') }}</p>
     </section>
 
+    <section class="panel discovery-coverage" aria-labelledby="discovery-coverage-title">
+      <div class="panel-head"><h2 id="discovery-coverage-title">{{ tr('新池发现对账', 'New pool discovery check') }}</h2></div>
+      <div class="discovery-coverage-rows">
+        <div v-for="row in discoveryRows" :key="row.chainId" class="discovery-coverage-row">
+          <strong>{{ chainName(row.chainId) }}</strong>
+          <span v-if="row.status === 'complete' && Number(row.eligible) > 0" class="mono" :class="Number(row.missing) > 0 ? 'warn' : 'up'">{{ percent(row.covered, row.eligible) }} <small>{{ num(row.covered) }} / {{ num(row.eligible) }}</small></span>
+          <span v-else-if="row.status === 'complete'" class="muted">{{ tr('无可比较池', 'No comparable pools') }}</span>
+          <span v-else class="muted" :title="discoveryStatusReason(row.status)">{{ tr('未验证', 'Unverified') }}<small v-if="row.status === 'partial' && Number(row.missing) > 0" class="discovery-known-missing"> · {{ tr('已发现缺池 ' + num(row.missing), num(row.missing) + ' indexed pools missing') }}</small></span>
+          <small :title="date(row.checkedAt)">{{ row.checkedAt ? age(row.checkedAt) : tr('暂无检查记录', 'No check recorded') }}</small>
+        </div>
+      </div>
+      <p class="hint">{{ tr('仅对照 DexScreener 已索引的白名单交易池，不代表全链池子覆盖。', 'This checks allowlisted pools indexed by DexScreener; it does not measure full-chain coverage.') }}</p>
+    </section>
+
     <details v-if="chainStreams.length" :open="health?.issues?.includes('chain-stream-degraded') ? true : undefined" class="panel status-tasks">
       <summary>{{ tr('链上成交与 K 线覆盖', 'On-chain trades and candle coverage') }}</summary>
       <p class="hint">{{ tr('实时成交和历史记录分别统计。存在历史缺口时，K 线只覆盖已收录区间。', 'Live and historical coverage are listed separately. Candles cover recorded intervals only.') }}</p>
@@ -65,7 +79,7 @@
       <h3>{{ tr('指标定义', 'Metric definitions') }}</h3>
       <dl class="status-definitions">
         <div><dt>{{ tr('活跃 Meme', 'Active memes') }}</dt><dd>{{ tr('总流动性至少 $1,000、流动性来源观测不超过 30 分钟、价格观测不超过 15 分钟的候选币。来源未覆盖或观测过期的币不计入；计数为 0 也不表示网站没有成交。', 'Candidates with at least $1,000 in total liquidity, a liquidity observation within 30 minutes and a price observation within 15 minutes. Missing or expired evidence excludes a token; a zero count does not mean no trades occurred.') }}</dd></div>
-        <div><dt>{{ tr('股票配对池', 'Stock pairs') }}</dt><dd>{{ tr('仅统计官方股票身份核验通过、关系为 A 级、池流动性至少 $1,000 且池估值观测不超过 15 分钟的配对池；按链与池地址去重。', 'Only grade-A pairs with verified official stock identity, at least $1,000 in pool liquidity and a pool valuation observed within 15 minutes; deduplicated by chain and pool address.') }}</dd></div>
+        <div><dt>{{ tr('股票配对池', 'Stock pairs') }}</dt><dd>{{ tr('仅统计股票代币身份已确认、关系为 A 级、池流动性至少 $1,000 且池估值观测不超过 15 分钟的配对池；按链与池地址去重。', 'Only grade-A pairs with confirmed stock-token identity, at least $1,000 in pool liquidity and a pool valuation observed within 15 minutes; deduplicated by chain and pool address.') }}</dd></div>
         <div><dt>{{ tr('配对池流动性', 'Pair liquidity') }}</dt><dd>{{ tr('以上符合条件的配对池的双边流动性之和，区别于代币在全部池中的总流动性。', 'The sum of two-sided liquidity in the qualifying pairs above, separate from a token’s liquidity across all pools.') }}</dd></div>
         <div><dt>{{ tr('可排名资产', 'Rankable assets') }}</dt><dd>{{ tr('价格、成交、配对证据和池估值均达到排名时效要求的资产。', 'Assets whose price, volume, pair evidence and pool valuation meet ranking freshness rules.') }} {{ num(rankable) }} / {{ num(qualitySummary.total) }}</dd></div>
         <div><dt>{{ tr('缺失与过期', 'Missing and stale') }}</dt><dd>{{ tr('“—”表示无可用值；灰色历史值附上实际更新时间。真实的零显示为 0。', 'A dash means no available value. Historical values show their actual update time. A real zero is shown as zero.') }}</dd></div>
@@ -96,6 +110,10 @@ const identityVersion = computed(() => store.snapshot?.unified?.identityCatalogV
 const visibleSources = computed(() => health.value?.sources ?? store.sources);
 const okxSource = computed(() => visibleSources.value.find(source => source.id === 'okx:dex'));
 const chainStreams = computed(() => [...(health.value?.chainStreams ?? [])].sort((a, b) => ['196','56','4663'].indexOf(String(a.chainId)) - ['196','56','4663'].indexOf(String(b.chainId))));
+const discoveryRows = computed(() => {
+  const byChain = new Map((health.value?.discoveryCoverage?.chains ?? []).map(row => [String(row.chainId), row]));
+  return ['56','196','4663'].map(chainId => byChain.get(chainId) ?? {chainId,status:'unverified'});
+});
 const reference = computed(() => health.value?.capabilities?.stockReferences ?? health.value?.references);
 const collectorDegraded = computed(() => health.value?.issues?.includes('collector-degraded'));
 const projectionDegraded = computed(() => health.value?.issues?.includes('projection-degraded'));
@@ -146,6 +164,7 @@ function bytes(value) { return value != null && Number.isFinite(Number(value)) ?
 function blocks(value) { return value != null && Number.isFinite(Number(value)) ? num(Math.max(0, Number(value))) : '—'; }
 function lag(value) { return value != null && Number.isFinite(Number(value)) ? `${Math.round(Number(value) / 1000)} ${tr('秒延迟', 's delay')}` : '—'; }
 function chainName(id) { return ({'196':'X Layer','56':'BNB Chain','4663':'Robinhood Chain'})[String(id)] ?? String(id); }
+function discoveryStatusReason(status) { return ({partial:tr('部分对照未完成', 'Comparison is incomplete'),unsupported:tr('当前链暂无可用对照', 'No comparable index for this chain'),stale:tr('对照已过期', 'Comparison has expired'),unverified:tr('尚无完整对照', 'No complete comparison yet')})[status] ?? tr('尚无完整对照', 'No complete comparison yet'); }
 function sourceTone(source) { if (source.status === 'ready') return 'up'; if (!source.required || ['partial','reserved','critical-only','starting'].includes(source.status)) return 'warn'; return 'down'; }
 function sourceUse(source) { return ({'dex-quotes':tr('关键 · 链上行情', 'Core · on-chain quotes'),'exchange-token-quotes':tr('关键 · 交易所代币行情', 'Core · exchange token quotes'),'issuer-quotes':tr('关键 · 发行方行情', 'Core · issuer quotes'),'stock-references':tr('可选 · 股票标的参考', 'Optional · underlying stock references'),'supplemental-quotes':tr('可选 · 补充行情', 'Optional · supplemental quotes')})[source.kind] ?? tr('补充来源', 'Supplemental source'); }
 function sourceStatus(status) { return ({ready:tr('正常', 'Ready'),live:tr('在线', 'Live'),'catching-up':tr('回补中', 'Catching up'),reconnecting:tr('重新连接中', 'Reconnecting'),stale:tr('过期', 'Stale'),partial:tr('部分可用', 'Partial'),error:tr('异常', 'Error'),'entitlement-required':tr('授权不足', 'Entitlement required'),'quota-exhausted':tr('额度用尽', 'Quota exhausted'),'budget-exhausted':tr('日额度用尽', 'Daily budget exhausted'),'critical-only':tr('仅保留关键请求', 'Critical requests only'),reserved:tr('背景额度不足', 'Background budget low'),starting:tr('启动中', 'Starting'),unconfigured:tr('未配置', 'Not configured'),unknown:tr('状态未知', 'Unknown')})[status] ?? status ?? tr('状态未知', 'Unknown'); }
@@ -169,7 +188,9 @@ function issueLabel(code) {
     'stock-references-coverage-limited': tr('独立股票参考价覆盖有限', 'Independent stock references are limited'),
     'candidate-no-verified-market': tr('部分候选币暂无可验证市场报价', 'Some candidate tokens have no verifiable market quote'),
     'stock-no-verified-market': tr('部分股票代币暂无可验证交易报价', 'Some stock tokens have no verifiable trading quote'),
-    'collector-unsupported-observations': tr('部分上游数据未返回或不受支持', 'Some upstream observations are unavailable or unsupported'),
+    'collector-unsupported-observations': tr('部分行情缺失或不受支持', 'Some market observations are unavailable or unsupported'),
+    'discovery-coverage-missing': tr('已索引新池仍有收录缺口', 'Indexed pools are missing from discovery'),
+    'discovery-coverage-unverified': tr('新池发现对账未完成', 'New pool discovery check is unverified'),
     'discovery-unsupported-pools': `${tr('有不兼容的池接口', 'Pool interfaces unsupported')} (${num(unsupported)})`,
   };
   if (labels[code]) return labels[code];
@@ -182,13 +203,19 @@ onMounted(load);
 
 <style scoped>
 .status-page .up { color: var(--up); }
-.status-page .warn { color: var(--accent); }
+.status-page .warn { color: var(--warning); }
 .status-page .down { color: var(--down); }
 .status-page .status-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .status-alerts p + p { margin-top: 8px; }
 .status-table td small { display: block; color: var(--muted); font-size: 11px; }
 .status-tasks summary { cursor: pointer; }
 .status-tasks .scroll { margin-top: 14px; }
+.discovery-coverage-rows { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px; }
+.discovery-coverage-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 10px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--surface-raised); }
+.discovery-coverage-row>strong {font-size:13px;}
+.discovery-coverage-row>span {font-size:13px;text-align:right;}
+.discovery-coverage-row small {color:var(--muted);font-size:11px;}
+.discovery-coverage-row>small {grid-column:1/-1;}
 @media (max-width: 1100px) { .status-page .status-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 700px) { .status-page .status-summary { grid-template-columns: 1fr; } }
+@media (max-width: 700px) { .status-page .status-summary,.discovery-coverage-rows { grid-template-columns: 1fr; } }
 </style>

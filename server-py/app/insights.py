@@ -1,136 +1,148 @@
-"""Persisted, worker-owned per-asset AI readouts.
+"""Asset readouts from the published fact revision.
 
-HTTP requests only publish a short demand lease and read the latest result.
-The collector worker is the sole owner of paid model calls, so page refreshes
-cannot multiply upstream requests.
+HTTP reads never run a model. They immediately render a bounded four-line
+fact template; the worker may publish a validated rephrasing for the exact
+same fact hash when model publication is explicitly enabled.
 """
-import hashlib
-import json
+import os
 import time
 
 from .ai import MODEL, ai_enabled, ai_failure, ai_narrate
+from .asset_facts import (READOUT_MAX_AGE_MS, build_fact_packet, fact_hash,
+                          template_lines, validate_model_text)
 from .db import store
+from .realtime_projection import ProjectionUnavailable, read_token_projection
 
-CHAINS = ("196", "56", "4663")
-FRESH_MS = 15 * 60_000
+
+CHAINS = ('196', '56', '4663')
 DEMAND_MS = 2 * 60_000
 RETRY_MS = 5 * 60_000
+PROMPT_VERSION = 4
 
 
 def _id(address: str, lang: str) -> str:
-    return f"{address}:{lang}"
+    return f'{address}:{lang}'
+
+
+def _model_publication_enabled() -> bool:
+    # The PRD calls for a 100-asset manual contradiction audit before model
+    # prose is published. Deterministic templates remain available now.
+    return os.environ.get('INSIGHT_MODEL_PUBLISH') == '1' and ai_enabled()
+
+
+def _response(facts, lang, now, saved=None):
+    digest = fact_hash(facts)
+    stale = (facts['dataAsOf'] is None or now - facts['dataAsOf'] > READOUT_MAX_AGE_MS)
+    source = 'template'
+    lines = template_lines(facts, lang)
+    if (_model_publication_enabled() and not stale and saved and saved.get('inputHash') == digest
+            and saved.get('promptVersion') == PROMPT_VERSION
+            and saved.get('source') == 'model'):
+        approved = validate_model_text(saved.get('text'), facts, lang)
+        if approved:
+            source, lines = 'model', approved
+    return {'text': '\n'.join(lines), 'lines': lines,
+            'status': 'stale' if stale else 'ready', 'stale': stale,
+            'source': source, 'factHash': digest, 'facts': facts,
+            'missing': facts['missing'], 'dataAsOf': facts['dataAsOf'],
+            'refreshIntervalMs': 60_000}
 
 
 async def request_insight(chain: str, address: str, lang: str) -> dict:
-    """Read the latest result and enqueue a refresh without calling AI."""
+    """Read one published asset revision; enqueue paid work only by lease."""
+    lang = 'en' if lang == 'en' else 'zh'
+    address = address.lower()
     now = int(time.time() * 1000)
+    try:
+        snapshot = await read_token_projection(chain, address)
+    except ProjectionUnavailable:
+        return {'text': None, 'lines': [], 'status': 'not_ready',
+                'reason': 'snapshot-not-ready', 'stale': True, 'dataAsOf': None}
+    if snapshot.get('asset') is None:
+        return {'text': None, 'lines': [], 'status': 'not_indexed',
+                'reason': 'not_indexed', 'stale': True, 'dataAsOf': None}
+    facts = build_fact_packet(snapshot, chain, address)
+    if facts is None:
+        return {'text': None, 'lines': [], 'status': 'no_verified_pool',
+                'reason': 'no-verified-stock-pool', 'stale': True, 'dataAsOf': None}
     s = await store(chain)
     ident = _id(address, lang)
-    saved = await s.get("insight", ident)
-    fresh = bool(saved and now - int(saved.get("at") or 0) < FRESH_MS)
-    if not fresh:
+    saved = await s.get('insight', ident)
+    response = _response(facts, lang, now, saved)
+    if _model_publication_enabled() and not response['stale'] and response['source'] != 'model':
         from .demand_leases import publish_lease
-        publish_lease(s, "insight-demand", ident, {
-            "chainId": chain,
-            "address": address,
-            "lang": lang,
-            "requestedAt": now,
-            "expiresAt": now + DEMAND_MS,
+        publish_lease(s, 'insight-demand', ident, {
+            'chainId': chain, 'address': address, 'lang': lang,
+            'factHash': response['factHash'], 'requestedAt': now,
+            'expiresAt': now + DEMAND_MS,
         })
-    if saved:
-        return {**saved, "stale": not fresh,
-                "status": "ready" if fresh else "refreshing"}
-    job = await s.get("insight-job", ident) or {}
-    status = job.get("status") or ("queued" if ai_enabled() else "disabled")
-    return {"text": None, "status": status,
-            "reason": "disabled" if not ai_enabled() else None}
+    return response
 
 
 async def refresh_insights() -> None:
-    """Generate due demand leases; called only by the collector worker."""
+    """Worker-only model pass; never publish a claim that fails validation."""
+    if not _model_publication_enabled():
+        return
     now = int(time.time() * 1000)
     for chain in CHAINS:
         s = await store(chain)
-        for ident, demand in await s.all_kv("insight-demand"):
-            if int(demand.get("expiresAt") or 0) < now:
+        for ident, demand in await s.all_kv('insight-demand'):
+            if int(demand.get('expiresAt') or 0) < now:
                 continue
-            address = str(demand.get("address") or "").lower()
-            lang = "en" if demand.get("lang") == "en" else "zh"
-            saved = await s.get("insight", ident)
-            if saved and now - int(saved.get("at") or 0) < FRESH_MS:
+            address = str(demand.get('address') or '').lower()
+            lang = 'en' if demand.get('lang') == 'en' else 'zh'
+            if not (address.startswith('0x') and len(address) == 42):
                 continue
-            job = await s.get("insight-job", ident) or {}
-            if int(job.get("nextRetryAt") or 0) > now:
+            try:
+                snapshot = await read_token_projection(chain, address)
+            except ProjectionUnavailable:
                 continue
-            if not ai_enabled():
-                await s.put("insight-job", ident, {
-                    "status": "disabled", "updatedAt": now, "attempts": 0,
-                })
+            facts = build_fact_packet(snapshot, chain, address)
+            if facts is None or facts['dataAsOf'] is None or now - facts['dataAsOf'] > READOUT_MAX_AGE_MS:
                 continue
-            asset = await s.get("asset", address)
-            if not asset:
-                await s.put("insight-job", ident, {
-                    "status": "not_indexed", "updatedAt": now,
-                })
+            digest = fact_hash(facts)
+            if demand.get('factHash') != digest:
                 continue
-            relations = [
-                r for r in await s.all("relation")
-                if r.get("token") == address or r.get("stock") == address
-            ]
-            data = {
-                "asset": {
-                    "symbol": asset.get("symbol"), "name": asset.get("name"),
-                    "price": asset.get("price"), "change24h": asset.get("change24h"),
-                    "volume24h": asset.get("volume24h"), "liquidity": asset.get("liquidity"),
-                    "holders": asset.get("holders"), "kind": asset.get("kind"),
-                    "dataAsOf": asset.get("updatedAt"),
-                },
-                "relations": [
-                    {"ticker": r.get("ticker"), "status": r.get("status"),
-                     "poolLiquidityUsd": r.get("liquidityUsd"),
-                     "checkedAt": r.get("checkedAt")}
-                    for r in relations
-                ],
-            }
-            input_hash = hashlib.sha256(
-                json.dumps(data, ensure_ascii=False, sort_keys=True).encode()
-            ).hexdigest()
-            attempts = int(job.get("attempts") or 0) + 1
-            await s.put("insight-job", ident, {
-                "status": "running", "startedAt": now, "updatedAt": now,
-                "attempts": attempts, "inputHash": input_hash,
+            saved = await s.get('insight', ident)
+            if saved and saved.get('inputHash') == digest and saved.get('promptVersion') == PROMPT_VERSION:
+                continue
+            job = await s.get('insight-job', ident) or {}
+            if int(job.get('nextRetryAt') or 0) > now:
+                continue
+            attempts = int(job.get('attempts') or 0) + 1
+            await s.put('insight-job', ident, {
+                'status': 'running', 'startedAt': now, 'attempts': attempts,
+                'inputHash': digest,
             })
+            template = '\n'.join(template_lines(facts, lang))
             task = (
-                "Write an 80-120 word data readout for this asset detail page. "
-                "Focus on the evidence status of its stock relationship."
-                if lang == "en" else
-                "为这个资产的详情页写一段 120-180 字的数据解读，重点说明它与股票的关系证据状态。"
+                'Rewrite the four short fact lines. Keep their four labels, '
+                'all figures and evidence meaning unchanged. Each line at most '
+                '40 characters. Add no claims or advice. Return four plain lines. '
+                'The verified template is:\n' + template
             )
-            ai_key = f"insight:{chain}:{address}:{input_hash}"
-            result = await ai_narrate(
-                ai_key, lang, FRESH_MS,
-                data, task, force=True,
-            )
+            key = f'insight:{chain}:{address}:{digest}:v{PROMPT_VERSION}'
+            result = await ai_narrate(key, lang, 30 * 60_000, facts, task, force=True)
             finished = int(time.time() * 1000)
-            if not result:
-                failure = ai_failure(ai_key, lang) or {}
-                await s.put("insight-job", ident, {
-                    "status": "upstream_failed", "updatedAt": finished,
-                    "attempts": attempts,
-                    "nextRetryAt": failure.get("retryAt") or finished + RETRY_MS,
-                    "errorReason": failure.get("reason", "upstream_failed"),
-                    "inputHash": input_hash,
+            approved = validate_model_text((result or {}).get('text'), facts, lang)
+            if approved:
+                record = {'text': '\n'.join(approved), 'lines': approved,
+                          'at': result['at'], 'lang': lang, 'chainId': chain,
+                          'address': address, 'inputHash': digest,
+                          'promptVersion': PROMPT_VERSION, 'source': 'model',
+                          'model': MODEL, 'dataAsOf': facts['dataAsOf']}
+                await s.put('insight', ident, record)
+                await s.put('insight-job', ident, {
+                    'status': 'success', 'updatedAt': finished,
+                    'lastSuccessAt': finished, 'attempts': attempts,
+                    'inputHash': digest,
                 })
-                continue
-            record = {
-                "text": result["text"], "at": result["at"], "lang": lang,
-                "chainId": chain, "address": address, "status": "ready",
-                "inputHash": input_hash, "model": MODEL,
-                "dataAsOf": asset.get("updatedAt"),
-            }
-            await s.put("insight", ident, record)
-            await s.put("insight-job", ident, {
-                "status": "success", "updatedAt": finished,
-                "lastSuccessAt": finished, "attempts": attempts,
-                "inputHash": input_hash,
-            })
+            else:
+                failure = ai_failure(key, lang) or {}
+                await s.put('insight-job', ident, {
+                    'status': 'invalid_output' if result else 'upstream_failed',
+                    'updatedAt': finished, 'attempts': attempts,
+                    'nextRetryAt': failure.get('retryAt') or finished + RETRY_MS,
+                    'errorReason': failure.get('reason') if not result else 'fact-validation',
+                    'inputHash': digest,
+                })

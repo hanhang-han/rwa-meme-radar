@@ -493,7 +493,7 @@ header { gap: 18px; }
 .header-status { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .header-status i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .header-status.is-live i { background: var(--up); }
-.header-status.is-paused i { background: var(--accent); }
+.header-status.is-paused i { background: var(--warning); }
 .header-status.is-stale i { background: var(--down); }
 .global-search { position: relative; width: clamp(200px, 25vw, 380px); }
 .global-search form { display: flex; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
@@ -694,3 +694,96 @@ input::placeholder { color: var(--muted); opacity: .8; }
 .header-api{font-size:13px;font-weight:600;color:var(--muted);padding:8px}
 button:disabled{cursor:wait;opacity:.6}
 .radar-workspace :is(.hint,.kpi-label,.kpi-note,.tag),.radar-workspace .tbl th{font-size:12px}
+
+/* One visual vocabulary across Home, Stocks, Meme, Watchlist, Account and asset pages. */
+:root {
+  --bg:#0b0e14;
+  --panel:#131822;
+  --surface-raised:#1a2030;
+  --border:#242c3d;
+  --text:#e6eaf2;
+  --muted:#8a93a6;
+  --up:#22c58b;
+  --down:#f0546b;
+  --warning:#f5b83d;
+  --accent:#5b8cff;
+  --accent-rgb:91,140,255;
+  --accent-soft:rgba(var(--accent-rgb),.1);
+}
+body {max-width:none;margin:0;padding:0;background:var(--bg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;}
+#app {max-width:1440px;margin:0 auto;padding:0 32px;}
+header {min-height:70px;padding:14px 0 16px;}
+.brand h1 {font-size:16px;letter-spacing:.02em;}
+.radar-workspace .workspace-nav {margin-bottom:24px;padding:3px 10px;background:var(--panel);border:1px solid var(--border);border-radius:12px;}
+.radar-workspace .workspace-nav>a {padding:11px 14px;}
+.radar-workspace .panel {padding:20px 22px;border-radius:12px;background:var(--panel);}
+.radar-workspace .panel-head {min-height:28px;margin-bottom:16px;}
+.radar-workspace .panel>h2,.radar-workspace .panel-head h2 {font-size:16px;line-height:1.4;}
+.radar-workspace .kpi,.theme-metrics>div,.asset-kpis {border-radius:12px;background:var(--panel);}
+.radar-workspace .kpi {padding:17px 18px;}
+.radar-workspace .kpi-value,.theme-metrics strong,.asset-kpis strong,.home-stock-card>span b {font-family:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;}
+.radar-workspace .tbl {font-size:13px;}
+.radar-workspace .tbl th {font-size:12px;font-weight:500;color:var(--muted);}
+.radar-workspace .tbl td {border-bottom-color:var(--border);}
+.radar-workspace .tbl tbody tr:hover td {background:rgba(var(--accent-rgb),.045);}
+.section-page-heading,.home-heading,.stock-index-heading,.meme-heading {display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:8px 16px;margin:8px 0 18px;}
+.section-page-heading h2,.home-heading h2,.stock-index-heading h2,.meme-heading h2 {font-size:24px;line-height:1.3;font-weight:650;letter-spacing:-.02em;}
+.section-page-heading span,.home-heading span,.stock-index-heading span {font-size:12px;color:var(--muted);}
+.account-page {max-width:none;margin:0;}
+.account-page>.panel {max-width:840px;}
+.watch-page {gap:0;}
+.watch-page>.section-page-heading {margin-bottom:18px;}
+.watch-page>.panel {margin-bottom:20px;}
+.home-stock-card,.meme-mobile-card,.stock-index-card,.theme-cluster,.theme-clue-card {border-radius:12px;background:var(--surface-raised);}
+.home-stock-card {min-height:112px;padding:16px;}
+.home-stock-card>strong {font-size:15px;}
+.home-stock-card:hover,.stock-index-card:hover,.meme-mobile-card:focus-within {border-color:var(--accent);}
+.meme-results {min-width:0;}
+.meme-toolbar {padding-bottom:14px;border-bottom:1px solid var(--border);}
+.meme-view-switch,.view-tabs,.theme-market-switch {border-radius:8px;background:var(--surface-raised);}
+.meme-view-switch button.active,.view-tabs button.active,.theme-market-switch button.active {color:var(--accent);background:var(--accent-soft);}
+.radar-workspace :is(select,input:not([type=checkbox])) {border-radius:8px;}
+.radar-workspace :is(.x-pager button,.account-form button,.account-actions button,.theme-follow,.asset-heading button,.asset-dex-action,.mobile-filter-toggle) {border-radius:8px;min-height:36px;}
+.radar-workspace .x-empty {border-radius:8px;background:var(--surface-raised);color:var(--muted);font-size:13px;}
+.radar-workspace .x-empty a {color:var(--accent);}
+.relation-badge {position:relative;padding:0;border:0;border-radius:6px;background:transparent;vertical-align:middle;}
+.relation-badge.is-A {background:var(--accent-soft);}
+.relation-badge>summary {display:inline-flex;align-items:center;justify-content:flex-start;width:auto;height:auto;padding:3px 7px;border:1px solid var(--border);border-radius:6px;list-style:none;cursor:help;font-size:11px;line-height:1.4;white-space:nowrap;}
+.relation-badge>summary::-webkit-details-marker {display:none;}
+.relation-badge.is-A>summary {border-color:rgba(var(--accent-rgb),.38);}
+.relation-badge>div {position:absolute;top:calc(100% + 6px);left:0;z-index:30;width:240px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-raised);box-shadow:0 12px 28px #0008;white-space:normal;font-size:12px;line-height:1.5;color:var(--text);}
+.risk-badge.is-unchecked summary {font-size:11px;}
+.site-footer {max-width:none;margin:24px auto 0;padding:18px 0 28px;font-size:12px;letter-spacing:0;}
+.radar-workspace .home-heading h2,.radar-workspace .stock-index-heading h2,.radar-workspace .meme-heading h2 {font-size:24px;line-height:1.3;}
+.radar-workspace .theme-metrics>div,.radar-workspace .asset-kpis {border-radius:12px;}
+.radar-workspace .theme-cluster,.radar-workspace .theme-clue-card {border-radius:12px;background:var(--surface-raised);}
+.radar-workspace .home-page .home-stock-grid {grid-template-columns:repeat(var(--hot-columns,4),minmax(0,1fr));}
+@media(max-width:1000px) {.radar-workspace .home-page .home-stock-grid {grid-template-columns:repeat(2,minmax(0,1fr));}}
+.radar-workspace :is(.home-page,.stock-index-page,.stock-theme-page,.meme-page,.watch-page,.account-page,.asset-page) {display:grid;gap:20px;align-content:start;min-width:0;}
+.radar-workspace :is(.home-page,.stock-index-page,.stock-theme-page,.meme-page,.watch-page,.account-page,.asset-page) .panel {margin-bottom:0;}
+.radar-workspace :is(.home-heading,.stock-index-heading,.meme-heading,.section-page-heading,.asset-heading,.theme-breadcrumb) {margin:4px 0 0;}
+.radar-workspace .home-page .kpis,.radar-workspace .stock-theme-page .theme-metrics {margin-bottom:0;}
+.radar-workspace .home-market-grid .panel,.radar-workspace .theme-analysis-grid .panel {margin:0;}
+.radar-workspace .developer-heading {padding:4px 0 0;align-items:center;}
+.radar-workspace .developer-heading h2 {font-size:24px;line-height:1.3;font-weight:650;}
+.radar-workspace .events-page {display:grid;gap:20px;align-content:start;}
+.radar-workspace .events-page .panel {margin-bottom:0;}
+@media(max-width:1000px) {#app{padding:0 20px;}}
+@media(max-width:760px) {
+  #app {padding:0 16px;}
+  header {padding:14px 0;}
+  .radar-workspace .workspace-nav {margin:0 0 20px;padding:2px 5px;border-radius:8px;}
+  .radar-workspace .panel {padding:16px;border-radius:12px;}
+  .section-page-heading,.home-heading,.stock-index-heading,.meme-heading {margin:8px 0 14px;}
+  .section-page-heading h2,.home-heading h2,.stock-index-heading h2,.meme-heading h2 {font-size:22px;}
+  .radar-workspace .home-page .home-stock-grid {grid-template-columns:repeat(2,minmax(0,1fr));}
+  .meme-mobile-card,.stock-index-card {padding:14px;border-radius:12px;}
+  .radar-workspace :is(.home-page,.stock-index-page,.stock-theme-page,.meme-page,.watch-page,.account-page,.asset-page) {gap:16px;}
+  .asset-tabs {overflow-x:auto;white-space:nowrap;}
+}
+@media(max-width:420px) {
+  .radar-workspace .home-page .home-stock-grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}
+  .home-stock-card {min-height:0;padding:12px;}
+  .home-stock-card>span {flex-wrap:wrap;}
+  .meme-toolbar .meme-view-switch {margin-left:auto;}
+}

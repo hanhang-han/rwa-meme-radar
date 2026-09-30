@@ -41,7 +41,18 @@ function openDetail(event) {
   if (event.target !== event.currentTarget && event.target.closest?.('a, button, input, select, textarea, summary')) return;
   router.push(detailLink(props.a));
 }
-const relOf=computed(()=>props.relations.filter(r=>relationMatchesAsset(r,props.a)).sort((a,b)=>({A:0,C:1,B:2}[relationLevel(a)]??3)-({A:0,C:1,B:2}[relationLevel(b)]??3) || Number(b.liquidityUsd??0)-Number(a.liquidityUsd??0)));
+const relOf=computed(()=>{
+  const ranked=props.relations.filter(r=>relationMatchesAsset(r,props.a)).sort((a,b)=>({A:0,C:1,B:2}[relationLevel(a)]??3)-({A:0,C:1,B:2}[relationLevel(b)]??3) || Number(b.liquidityUsd??0)-Number(a.liquidityUsd??0));
+  // A stock theme may have several pools for the same token. Show its strongest
+  // relationship once in the asset list; the detail page retains every pool.
+  const seen=new Set();
+  return ranked.filter(r=>{
+    const ticker=String(r.ticker??'').toUpperCase();
+    if(!ticker || seen.has(ticker)) return false;
+    seen.add(ticker);
+    return true;
+  });
+});
 const ratio=computed(()=>volumeLiquidityRatio(props.a));
 const observedAt=computed(()=>props.a.fieldTimes?.price ?? props.a.quoteAt ?? props.a.updatedAt);
 const isStale=computed(()=>!observedAt.value || Date.now()-Number(observedAt.value)>900000);

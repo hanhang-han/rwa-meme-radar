@@ -10,7 +10,7 @@
 
     <section v-if="hotStocks.length" class="panel">
       <div class="panel-head"><h2>{{ tr('热门股票主题','Trending stock themes') }}</h2><RouterLink :to="{path:'/stock',query:{chain:scope}}">{{ tr('全部股票','All stocks') }} →</RouterLink></div>
-      <div class="home-stock-grid">
+      <div class="home-stock-grid" :style="{'--hot-columns':Math.min(4,hotStocks.length)}">
         <RouterLink v-for="card in hotStocks" :key="card.ticker" class="home-stock-card" :to="{path:'/stock/'+card.ticker,query:{chain:scope}}">
           <strong>{{ card.ticker }} <small>{{ stockName(card.stock,card.ticker) }}</small></strong>
           <span><b :title="stockQuoteTitle(card.stock)">{{ price(card.stock?.price,card.stock?.priceCurrency) }}</b><b :class="Number(card.stock?.change24h)>0?'up':Number(card.stock?.change24h)<0?'down':''">{{ pct(card.stock?.change24h) }}</b></span>
@@ -42,8 +42,8 @@
     <section v-if="displayedTrades.length" class="panel home-trades">
       <div class="panel-head"><div><h2>{{ tr('链上成交','On-chain trades') }}</h2><span v-if="tradeDelay>30000" class="trade-delay">{{ tr('成交延迟','Trade delay') }} {{ Math.ceil(tradeDelay/1000) }}s</span></div><div class="home-feed-controls"><select v-model.number="minTrade" :aria-label="tr('最小成交额','Minimum trade amount')"><option :value="0">{{ tr('全部金额','All amounts') }}</option><option :value="100">≥ $100</option><option :value="1000">≥ $1K</option><option :value="10000">≥ $10K</option></select><select v-model="direction" :aria-label="tr('买卖方向','Trade direction')"><option value="all">{{ tr('全部方向','All directions') }}</option><option value="buy">{{ tr('买入','Buy') }}</option><option value="sell">{{ tr('卖出','Sell') }}</option></select></div></div>
       <div class="home-trade-list">
-        <div v-for="trade in displayedTrades.slice(0,10)" :key="trade.chainId+':'+trade.token+':'+trade.id" class="home-trade-row" :class="{'is-large':(tradeDisplayAmount(trade)?.value??0)>=10000}">
-          <time :title="date(trade.t)">{{ age(trade.t) }}</time><RouterLink :to="assetPath(trade)">{{ trade.symbol || short(trade.token) }}<small>{{ chainName(trade) }} · {{ tradeSource(trade) }}</small></RouterLink><span :class="trade.type==='buy'?'up':trade.type==='sell'?'down':''">{{ trade.type==='buy'?tr('买入','Buy'):trade.type==='sell'?tr('卖出','Sell'):tr('未能识别','Unknown') }}</span><strong>{{ money(tradeDisplayAmount(trade)?.value,tradeDisplayAmount(trade)?.currency) }}</strong><a v-if="trade.wallet" :href="explorer(trade.wallet,'address',String(trade.chainId))" target="_blank" rel="noopener" :title="trade.wallet">{{ short(trade.wallet) }} ↗</a><small v-else>{{ tr('钱包未能识别','Wallet unavailable') }}</small><a v-if="trade.hash" :href="explorer(trade.hash,'tx',String(trade.chainId))" target="_blank" rel="noopener" :aria-label="tr('查看交易','View transaction')">↗</a>
+        <div v-for="trade in displayedTrades.slice(0,10)" :key="trade.chainId+':'+trade.token+':'+trade.id" class="home-trade-row" :class="{'is-large':tradeDisplayAmount(trade)?.currency==='USD' && (tradeDisplayAmount(trade)?.value??0)>=10000}">
+          <time :title="date(trade.t)">{{ age(trade.t) }}</time><RouterLink :to="assetPath(trade)">{{ trade.symbol || short(trade.token) }}<small>{{ chainName(trade) }} · {{ tradeSource(trade) }}</small></RouterLink><span :class="trade.type==='buy'?'up':trade.type==='sell'?'down':''">{{ trade.type==='buy'?tr('买入','Buy'):trade.type==='sell'?tr('卖出','Sell'):tr('未能识别','Unknown') }}</span><strong><TradeAmount :trade="trade" /></strong><a v-if="trade.wallet" :href="explorer(trade.wallet,'address',String(trade.chainId))" target="_blank" rel="noopener" :title="trade.wallet">{{ short(trade.wallet) }} ↗</a><small v-else>{{ tr('钱包未能识别','Wallet unavailable') }}</small><a v-if="trade.hash" :href="explorer(trade.hash,'tx',String(trade.chainId))" target="_blank" rel="noopener" :aria-label="tr('查看交易','View transaction')">↗</a>
         </div>
       </div>
     </section>
@@ -60,13 +60,14 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import KpiCard from '../components/KpiCard.vue';
 import RiskBadge from '../components/RiskBadge.vue';
+import TradeAmount from '../components/TradeAmount.vue';
 import ThemeMarketMap from '../components/ThemeMarketMap.vue';
 import ImportantChanges from '../components/ImportantChanges.vue';
 import { useDashboardStore } from '../stores/dashboard';
 import { useFeedStore } from '../stores/feed';
 import { getBriefing } from '../api/client';
 import { tr, useI18n } from '../i18n';
-import { age, chainName, date, explorer, money, num, pct, price, short, usd } from '../utils/format';
+import { age, chainName, date, explorer, num, pct, price, short, usd } from '../utils/format';
 import { chainScope, inChainScope } from '../utils/chain-scope';
 import { homeStockCards, metricsForScope, onchainRecordedTrades, tradeDisplayAmount } from '../utils/home-model';
 import { useMinuteClock } from '../composables/useMinuteClock';

@@ -24,6 +24,7 @@ SHARED_FILES = ('data/market-enrichment.json', 'data/robinhood.json', 'data/bina
 _tick_lock = asyncio.Lock()
 _file_signatures = {}
 _committed_projection = None
+_committed_page_views = None
 _serialized_projection = None
 _parsed_tokens = None
 _committed_facts = None
@@ -110,6 +111,62 @@ def projection_delta(previous, current):
     for key in before.keys() - after.keys() - set(COLLECTIONS):
         meta[key] = None
     return {'schema': SCHEMA, 'upserts': upserts, 'removes': removes, 'meta': meta}
+
+
+def field_operations(before, after, path=()):
+    """Lossless compact field edits: [path,value] sets, [path] deletes.
+
+    Null is a value, never a deletion. Arrays of equal length are edited by
+    position (including rankings); a length change replaces that array. The
+    receiver checks baseRevision before applying any edits.
+    """
+    if before == after:
+        return []
+    if isinstance(before, dict) and isinstance(after, dict):
+        edits = [[[*path, key]] for key in before if key not in after]
+        for key, value in after.items():
+            edits.extend(field_operations(before[key], value, (*path, key))
+                         if key in before else [[[*path, key], value]])
+    elif isinstance(before, list) and isinstance(after, list) and len(before) == len(after):
+        edits = [edit for index, value in enumerate(after)
+                 for edit in field_operations(before[index], value, (*path, index))]
+    else:
+        return [[list(path), after]]
+    replacement = [[list(path), after]]
+    # Replacing a changed small object can be cheaper than several paths, but
+    # large stable evidence remains on the browser instead of crossing again.
+    return replacement if len(_dump(replacement)) < len(_dump(edits)) else edits
+
+
+def view_delta(previous, current, scope, base_revision, revision):
+    """Publish page edits in the SAME journal record as the legacy delta.
+
+    No HTTP handler rebuilds a page or invents a replay delta from today's
+    snapshot. Keyed rows preserve object identity; explicit order changes keep
+    additions/removals and rank changes identical to the corresponding HTTP DTO.
+    """
+    before, after = (previous or {}).get('unified', {}), current['unified']
+    out = {'schema': 2, 'scope': scope, 'baseRevision': base_revision,
+           'revision': revision, 'now': current['now'], 'upserts': {},
+           'patches': {}, 'removes': {}, 'orders': {}}
+    for name in COLLECTIONS:
+        old = {row.get('projectionKey') or projection_key(name, row): row for row in before.get(name, [])}
+        new = {row.get('projectionKey') or projection_key(name, row): row for row in after.get(name, [])}
+        added = [row for key, row in new.items() if key not in old]
+        patches = [[key, field_operations(old[key], row)] for key, row in new.items()
+                   if key in old and old[key] != row]
+        removed = [key for key in old if key not in new]
+        if added:
+            out['upserts'][name] = added
+        if patches:
+            out['patches'][name] = patches
+        if removed:
+            out['removes'][name] = removed
+        if list(old) != list(new):
+            out['orders'][name] = list(new)
+    out['metaOps'] = field_operations({k: v for k, v in before.items() if k not in COLLECTIONS},
+                                      {k: v for k, v in after.items() if k not in COLLECTIONS})
+    return out
 
 
 def _invalidations(changes, previous, current):
@@ -232,7 +289,7 @@ async def _projection_tick_once(force=False, expiry_ms=30_000):
     Events written during construction remain replayable after that cursor.
     A later publication id must never replace it and hide intervening trades.
     """
-    global _committed_projection, _committed_facts
+    global _committed_projection, _committed_facts, _committed_page_views
     import aiosqlite
     async with _tick_lock:
         await bridge_shared_sources()
@@ -274,6 +331,23 @@ async def _projection_tick_once(force=False, expiry_ms=30_000):
                     previous = json.loads(_decode_snapshot(body['body']))
                 else:
                     previous = None
+                if stamp and _committed_page_views and _committed_page_views[0] == stamp:
+                    previous_views = _committed_page_views[1]
+                else:
+                    previous_views = {}
+                    if old_row:
+                        named = await reader.execute_fetchall("SELECT name,revision,cursor,built_at,body FROM dashboard_projection WHERE name IN ('overview','market')")
+                        for row in named:
+                            if (row['revision'], row['cursor'], row['built_at']) == (old_row['revision'], old_row['cursor'], old_row['built_at']):
+                                previous_views[row['name']] = json.loads(_decode_snapshot(row['body']))
+                    # Rolling upgrade from full-only storage matches the HTTP
+                    # read fallback. Otherwise use the ACTUAL previous DTO,
+                    # even if a deployment has changed its formatting rules.
+                    if previous:
+                        if 'overview' not in previous_views:
+                            previous_views['overview'] = overview_dashboard(previous)
+                        if 'market' not in previous_views:
+                            previous_views['market'] = market_dashboard(previous)
                 fact_stamp = (scoped.path, id(scoped.db), old_input)
                 # Forced calibration reads every fact, including writes whose
                 # outbox evidence was removed outside normal publication.
@@ -303,10 +377,19 @@ async def _projection_tick_once(force=False, expiry_ms=30_000):
             payload['realtime'] = {'schema': SCHEMA, 'cursor': read_cursor, 'revision': revision}
             feed['now'] = payload['now']
             feed['realtime'] = payload['realtime']
+            overview, market = overview_dashboard(payload), market_dashboard(payload)
+            if changed:
+                base_revision = old_row['revision'] if old_row else 0
+                delta['views'] = {
+                    'overview': view_delta(previous_views.get('overview'),
+                                           overview, 'overview', base_revision, revision),
+                    'market': view_delta(previous_views.get('market'),
+                                         market, 'market', base_revision, revision),
+                }
             bodies = {
                 'full': _encode_snapshot(_dump(payload)),
-                'overview': _encode_snapshot(_dump(overview_dashboard(payload))),
-                'market': _encode_snapshot(_dump(market_dashboard(payload))),
+                'overview': _encode_snapshot(_dump(overview)),
+                'market': _encode_snapshot(_dump(market)),
                 'feed': _encode_snapshot(_dump(feed)),
             }
             affected = _derived_dependencies(previous, payload, changes)
@@ -338,6 +421,7 @@ async def _projection_tick_once(force=False, expiry_ms=30_000):
             await db.execute('DELETE FROM change_outbox WHERE id<=?', (high-1000,))
             await db.commit()
             _committed_projection = ((scoped.path, revision, read_cursor, now), payload)
+            _committed_page_views = ((scoped.path, revision, read_cursor, now), {'overview': overview, 'market': market})
             _committed_facts = ((scoped.path, id(scoped.db), high), facts)
         return {'changed': changed, 'revision': revision, 'cursor': read_cursor, 'eventCursor': sequence,
                 'inputCursor': high, 'durationMs': round((time.monotonic()-started)*1000, 1)}

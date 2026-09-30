@@ -69,6 +69,7 @@ async def run() -> None:
     from .collectors import binance as binance_collector
     from .collectors import binance_alpha, chain_stream
     from .collectors.factory_discovery import FactoryDiscovery
+    from .collectors.discovery_coverage import reconcile_bnb
     from .collectors.risk_enrichment import refresh_risk_enrichment
     from .collectors.live_quotes import refresh_live_quotes, refresh_base_candidates, refresh_base_stocks
     from .collectors.main_round import refresh_liquidity, refresh_main_round, refresh_discovery
@@ -150,6 +151,10 @@ async def run() -> None:
         'defer_when': lambda: live_stream_backlogged(chain_stream.stream_for),
         'max_deferral_s': 180,
     }
+    # External indexed-pool reconciliation is slow and deliberately runs
+    # outside the live/quote critical path, no more than once per day.
+    spawn_loop("discoveryCoverageBsc", 86_400, reconcile_bnb, 600,
+               resume_stagger_s=30, **background_gate)
     spawn_loop("mainRound", 300, refresh_main_round, 35,
                resume_stagger_s=0, **background_gate)
     spawn_loop("liquidityRefresh", 30, refresh_liquidity, 45,

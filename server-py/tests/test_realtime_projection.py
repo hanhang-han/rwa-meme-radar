@@ -123,11 +123,35 @@ class ProjectionTests(unittest.IsolatedAsyncioTestCase):
         delta = json.loads(row['body'])
         self.assertEqual(snapshot['realtime']['revision'], delta['revision'])
         self.assertEqual(snapshot['unified']['assets'], delta['upserts']['assets'])
+        for view in ('overview', 'market'):
+            self.assertEqual(delta['views'][view]['revision'], snapshot['realtime']['revision'])
+            self.assertEqual(delta['views'][view]['baseRevision'], 0)
+            self.assertEqual(delta['views'][view]['schema'], 2)
+            named = json.loads(await projection.read_projection_json(view))
+            self.assertEqual(named['unified']['assets'], delta['views'][view]['upserts'].get('assets', []))
         # Restart: a new connection can read the committed, cursor-bound state.
         with closing(sqlite3.connect(self.path)) as reader:
             stored = reader.execute('SELECT body FROM dashboard_projection').fetchone()[0]
             self.assertIsInstance(stored, bytes)
             self.assertEqual(json.loads(projection._decode_snapshot(stored)), snapshot)
+
+    async def test_page_delta_uses_actual_previous_http_dto_across_format_upgrade(self):
+        await self.put_asset()
+        await self.tick()
+        prior = json.loads(await projection.read_projection_json('overview'))
+        prior['unified']['formatBeforeDeployment'] = True
+        # A prior release published a field the current DTO formatter removed.
+        # Re-deriving the previous DTO from full would silently miss its delete.
+        await self.s.db.execute("UPDATE dashboard_projection SET body=? WHERE name='overview'",
+                                (projection._encode_snapshot(projection._dump(prior)),))
+        await self.s.db.commit()
+        await self.put_asset(price=2)
+        with patch.object(projection, '_committed_page_views', None), patch.object(projection, 'view_delta', wraps=projection.view_delta) as publish:
+            await self.tick()
+        old_overview = next(call.args[0] for call in publish.call_args_list if call.args[2] == 'overview')
+        self.assertTrue(old_overview['unified']['formatBeforeDeployment'])
+        event = json.loads((await self.s.fetchone("SELECT body FROM realtime_events WHERE event='projection.delta' ORDER BY id DESC LIMIT 1"))[0])
+        self.assertIn([['formatBeforeDeployment']], event['views']['overview']['metaOps'])
 
     async def test_projection_build_does_not_block_live_writes_or_skip_their_replay(self):
         await self.put_asset(price=1)

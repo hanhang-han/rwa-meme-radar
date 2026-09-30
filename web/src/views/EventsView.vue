@@ -1,7 +1,9 @@
 <template>
+  <div class="events-page">
+  <div class="section-page-heading"><h2>{{ tr('发现记录', 'Discovery log') }}</h2></div>
   <section class="panel">
     <div class="panel-head">
-      <h2>{{ tr('发现记录', 'Discovery log') }}</h2>
+      <h2>{{ tr('最新记录', 'Latest records') }}</h2>
       <button id="v2NewEvents" :disabled="busy" @click="loadFresh">{{ tr('刷新', 'Refresh') }}</button>
     </div>
     <p>{{ tr('按本站发现时间排序。', 'Ordered by discovery time on CliperX.') }}</p>
@@ -11,6 +13,7 @@
     <EventRow v-for="item in items" :key="eventKey(item)" :ev="item" />
     <button v-if="hasMore && items.length" :disabled="busy" id="v2MoreEvents" @click="loadMore">{{ tr('加载更早记录', 'Load older records') }}</button>
   </section>
+  </div>
 </template>
 
 <script setup>

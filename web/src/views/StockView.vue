@@ -1,7 +1,7 @@
 <template>
   <div class="stock-index-page">
+    <div class="stock-index-heading"><h2>{{ tr('股票','Stocks') }}</h2><span>{{ tr('显示','Showing') }} {{ cards.length }} / {{ tr('共','of') }} {{ allRows.length }} {{ tr('个主题','themes') }}</span></div>
     <section class="panel">
-      <div class="stock-index-heading"><h2>{{ tr('股票','Stocks') }}</h2><span>{{ tr('显示','Showing') }} {{ cards.length }} / {{ tr('共','of') }} {{ allRows.length }} {{ tr('个主题','themes') }}</span></div>
       <div class="stock-index-toolbar"><p v-if="search">{{ tr('搜索','Search') }}：{{ route.query.q }} <button @click="setQuery({q:undefined})">×</button></p><select :value="sort" :aria-label="tr('排序','Sort')" @change="setQuery({sort:$event.target.value})"><option value="related">{{ tr('关联 Meme 数','Related meme count') }}</option><option value="ticker">{{ tr('股票代码','Ticker') }}</option><option value="change24h">{{ tr('股票代币 24h 涨跌','Stock-token 24h change') }}</option></select></div>
       <div v-if="!cards.length && loading" role="status" :aria-label="tr('加载股票','Loading stocks')"><div v-for="n in 8" :key="n" class="skeleton-line"></div></div>
       <p v-else-if="!cards.length" class="x-empty">{{ tr('暂无匹配股票主题。','No matching stock themes.') }} <button v-if="search" @click="setQuery({q:undefined})">{{ tr('清除搜索','Clear search') }}</button></p>

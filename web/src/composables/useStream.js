@@ -14,6 +14,7 @@ import { useDetailStore } from '../stores/detail.js';
 import { useFeedStore } from '../stores/feed.js';
 import { useComparisonStore } from '../stores/comparisons.js';
 import { useCandleStore } from '../stores/candles.js';
+import { mergeEntity } from '../utils/realtime.js';
 
 let started = false;
 let streamGeneration = 0;
@@ -22,10 +23,12 @@ let reconnects = 0;
 let currentController = null;
 let stopped = false;
 let compatibilityRefreshAt = 0;
+let scopedCompatibilityRefreshAt = 0;
 let stopScopeWatch = null;
 let scopeTimer = null;
 let scopeChanged = false;
 let previousTradeScope = null;
+let previousProjectionKey = null;
 const emit = (name,detail) => { if(typeof window !== 'undefined' && typeof CustomEvent !== 'undefined')window.dispatchEvent(new CustomEvent(name,{detail})); };
 
 export function useStream() {
@@ -37,12 +40,16 @@ export function currentTradeScope() {
   return current ? `${current.chain}:${current.address.toLowerCase()}` : null;
 }
 
+export function currentProjectionScope() {
+  return currentTradeScope() ? 'asset' : useDashboardStore().requestedView==='market' ? 'market' : 'overview';
+}
+
 export function startStream() {
   if (started) return;
   started = true;
   stopped = false;
   const generation = ++streamGeneration;
-  stopScopeWatch=watch([()=>useCandleStore().subscriptionScope,currentTradeScope],()=>{
+  stopScopeWatch=watch([()=>useCandleStore().subscriptionScope,currentTradeScope,()=>useDashboardStore().requestedView],()=>{
     clearTimeout(scopeTimer);
     scopeTimer=setTimeout(()=>{scopeChanged=true;currentController?.abort();},200);
   });
@@ -55,6 +62,8 @@ export function stopStream() {
   streamGeneration += 1;
   stopScopeWatch?.();stopScopeWatch=null;clearTimeout(scopeTimer);scopeChanged=false;
   previousTradeScope = null;
+  previousProjectionKey = null;
+  scopedCompatibilityRefreshAt = 0;
   currentController?.abort();
   currentController = null;
 }
@@ -154,20 +163,34 @@ async function connectStream(generation) {
     let received = Date.now();
     const watchdog = setInterval(() => { if (Date.now() - received > 60000) controller.abort(); }, 10000);
     try {
+      const projectionScope=currentProjectionScope(),tradeScope=currentTradeScope();
+      const projectionKey=projectionScope==='asset'?`asset:${tradeScope}`:projectionScope;
+      const changedProjection=previousProjectionKey!==projectionKey;
+      if(changedProjection){dash.setProjectionScope(projectionScope);lastEventId=null;}
       if(lastEventId == null) {
         // The compact overview carries the same projection cursor as the
         // market catalogue. Start replay from it while the larger list loads.
-        const snapshot=dash.snapshot ?? await dash.poll({view:'overview'}) ?? await dash.poll();
+        const view=projectionScope;
+        // Asset replay starts at the SAME detail snapshot which initialized
+        // its cache. A later overview cursor could skip quotes committed
+        // between two parallel HTTP requests, or acknowledge an uncached row.
+        const selected=useDetailStore().current;
+        const snapshot=projectionScope==='asset'
+          ?await useDetailStore().fetch(selected.chain,selected.address,{force:true})
+          :(!changedProjection||previousProjectionKey===null)&&dash.snapshot?.unified?.snapshotScope===view
+            ?dash.snapshot:await dash.poll({view});
         if(stopped || generation !== streamGeneration) break;
         if(!snapshot)throw new Error('snapshot unavailable');
-        lastEventId=dash.cursor != null ? String(dash.cursor)
-          : snapshot.realtime?.cursor != null ? String(snapshot.realtime.cursor) : null;
+        lastEventId=snapshot.realtime?.cursor != null ? String(snapshot.realtime.cursor) : null;
       }
       if(stopped || generation !== streamGeneration) break;
+      // A route can change while its HTTP bootstrap is in flight. Never open
+      // a stream for that obsolete page or overwrite the next page's cursor.
+      if(projectionKey!==(currentProjectionScope()==='asset'?`asset:${currentTradeScope()}`:currentProjectionScope())){lastEventId=null;continue;}
+      previousProjectionKey=projectionKey;
       const headers = {};
       if (lastEventId != null) headers['Last-Event-ID'] = String(lastEventId);
-      const query=new URLSearchParams({snapshot:'false',protocol:'1',candles:useCandleStore().subscriptionScope});
-      const tradeScope=currentTradeScope();
+      const query=new URLSearchParams({snapshot:'false',protocol:'2',scope:projectionScope,candles:useCandleStore().subscriptionScope});
       query.set('trades',tradeScope || 'feed');
       // The home view loads its own scoped feed. Only reload global history
       // when leaving a detail page, whose stream intentionally excluded it.
@@ -189,7 +212,7 @@ async function connectStream(generation) {
             if(Date.now()-compatibilityRefreshAt>60000){compatibilityRefreshAt=Date.now();await dash.poll();}
             dash.setStreamStatus({compatibilityWarning:event});
           }
-          if (id) lastEventId = id;
+          if (id && event!=='reset' && !controller.signal.aborted) lastEventId = String(Math.max(Number(lastEventId??0),Number(id)));
         }
         retry = 0;
         dash.setStreamStatus({ connected: true, lastMessageAt: Date.now() });
@@ -231,11 +254,15 @@ export async function handleStreamEvent(event, raw) {
     const dash = useDashboardStore();
     const feed = useFeedStore();
     dash.setStreamStatus({ state: 'syncing' });
-    await Promise.all([feed.load(), dash.poll()]);
+    const page=currentProjectionScope();
+    const selected=useDetailStore().current;
+    const [,snapshot]=await Promise.all([feed.load(),page==='asset'
+      ?useDetailStore().fetch(selected.chain,selected.address,{force:true})
+      :dash.poll({view:page})]);
     useDetailStore().invalidate();
     emit('resource-change',{kind:'all'});
     if (dash.error || feed.error) throw new Error('stream recovery snapshot failed');
-    lastEventId = String(dash.cursor ?? d.cursor ?? 0);
+    lastEventId = String(snapshot?.realtime?.cursor ?? dash.cursor ?? d.cursor ?? 0);
     dash.setStreamStatus({ connected: true, state: 'live', lastAt: Date.now() });
     return true;
   }
@@ -248,17 +275,50 @@ export async function handleStreamEvent(event, raw) {
   const dash = useDashboardStore();
   const detail = useDetailStore();
   if(event==='projection.delta'){
+    if(dash.stream.scoped&&Number(d.schema??1)===1&&d.scope!=='asset'){
+      // Old API nodes silently ignore the new scope query. Keep the current
+      // page bounded and use its published HTTP view until this connection
+      // starts delivering scoped packets; never merge a global catalogue.
+      dash.setStreamStatus({projection:false,compatibilityWarning:'scoped-stream-unavailable'});
+      if(Date.now()-scopedCompatibilityRefreshAt>=10000){
+        scopedCompatibilityRefreshAt=Date.now();
+        const selected=detail.current;
+        const snapshot=selected?await detail.fetch(selected.chain,selected.address,{force:true})
+          :await dash.poll({view:currentProjectionScope()});
+        if(!snapshot)throw new Error('scoped-compatibility-snapshot-failed');
+      }
+      return true;
+    }
     // Reuse the received JSON for byte accounting; do not stringify a large
     // parsed projection again just to bound its replay history.
-    if(!dash.applyProjection(d,true,projectionByteLength(raw)))return false;
-    detail.syncProjection();
+    if(d.scope==='asset'){
+      if(d.asset!==currentTradeScope())return true;
+      if(!applyAssetProjection(d,detail)){
+        const selected=detail.current;
+        await detail.fetch(selected.chain,selected.address,{force:true});
+        if(d.asset!==currentTradeScope())return true;
+        if(!applyAssetProjection(d,detail))throw new Error('asset-snapshot-unavailable');
+      }
+    }else{
+      try{if(!dash.applyProjection(d,true,projectionByteLength(raw)))return false;}
+      catch(error){
+        // Ordered field patches require their exact predecessor. The current
+        // published HTTP snapshot plus journal replay is the recovery source.
+        if(!String(error?.message).startsWith('projection-')&&!String(error?.message).startsWith('invalid-projection-'))throw error;
+        const snapshot=await dash.poll({view:currentProjectionScope()==='market'?'market':'overview'});
+        if(!snapshot)throw error;
+        lastEventId=String(snapshot.realtime?.cursor??0);
+        currentController?.abort();return true;
+      }
+      detail.syncProjection();
+    }
     for(const resource of d.invalidations??[]){
       dash.invalidate(resource);
       if(resource.kind==='detail')detail.invalidate(resource);
       if(resource.kind==='feed')useFeedStore().load();
       emit('resource-change',resource);
     }
-    dash.setStreamStatus({state:'live',projection:true});
+    dash.setStreamStatus({state:'live',projection:true,compatibilityWarning:null});
     return true;
   }
   if(event==='trade-remove'&&Array.isArray(d.ids)){useFeedStore().removeTrades(d);detail.removeTrades(d);return true;}
@@ -295,7 +355,7 @@ export async function handleStreamEvent(event, raw) {
     dash.setStreamStatus({ state: 'live' });
     return true;
   } else if (event === 'discovery' && d.id && d.asset?.token && d.chainId && d.t) {
-    const projected = dash.upsertDiscovery(d);
+    const projected = dash.stream.scoped ? true : dash.upsertDiscovery(d);
     const feed = useFeedStore();
     const stored = feed.appendRelationship({ ...d, asset: d.asset.token, symbol: d.symbol ?? d.asset.symbol });
     if (!stored && !projected) return false;
@@ -304,12 +364,54 @@ export async function handleStreamEvent(event, raw) {
   } else if (event === 'relationship' && d.id && d.relation?.id && d.relation?.token) {
     const feed = useFeedStore();
     const stored = feed.appendRelationship(d);
-    const projected = dash.upsertRelation(d.relation);
-    detail.syncProjection();
+    const projected = dash.stream.scoped ? true : dash.upsertRelation(d.relation);
+    if(!dash.stream.scoped)detail.syncProjection();
     detail.invalidate({chainId:d.chainId,token:d.relation.token});
     if (!stored && !projected) return false;
     dash.setStreamStatus({ state: 'live' });
     return true;
   }
   return false;
+}
+
+const DETAIL_MARKET_FIELDS=new Set(['exchangeMarkets','poolMarkets','marketQuotes']);
+const FALLBACK_CANONICAL_FIELDS='price change24h volume24h volumeCurrency volumeScope marketCap buys24h sells24h txs24h holders stockPrice quoteAt quoteStatus quoteReason priceCurrency priceScope provider venue quoteType fieldTimes fieldSources fieldScopes fieldTimeKinds fieldStatus priceProvenance primaryQuote quoteAlternatives'.split(' ');
+
+function replaceDetailCanonical(current, incoming, revision, fields) {
+  const owned=new Set(fields??FALLBACK_CANONICAL_FIELDS);
+  const retained=Object.fromEntries(Object.entries(current??{}).filter(([key])=>!owned.has(key)||DETAIL_MARKET_FIELDS.has(key)));
+  return mergeEntity(current??{},{...retained,...incoming},revision,true);
+}
+
+export function applyAssetProjection(packet, detail=useDetailStore()) {
+  const hit=detail.cache.get(packet.asset);if(!hit)return false;
+  const data=hit.data,revision=Number(packet.revision)||0;
+  if(revision&&revision<=Number(data.revision??0))return true;
+  const stockRemoved=(packet.removes?.stockTokens??[]).includes(packet.asset);
+  if(stockRemoved)data.stock=null;
+  if((packet.removes?.assets??[]).includes(packet.asset)){
+    const [chainId,token]=packet.asset.split(':');
+    data.asset={chainId,token,price:null,quoteStatus:'missing',quoteReason:'asset-removed',_revision:revision};
+  }
+  for(const row of packet.upserts?.assets??[])data.asset=replaceDetailCanonical(data.asset,row,revision,packet.canonicalFields?.assets);
+  for(const row of packet.upserts?.stockTokens??[]){
+    data.stock=replaceDetailCanonical(data.stock,row,revision,packet.canonicalFields?.stockTokens);
+    if(data.asset?.kind!=='candidate'&&!(packet.upserts?.assets??[]).length)
+      data.asset=replaceDetailCanonical(data.asset,{...row,token:row.tokenContractAddress},revision,packet.canonicalFields?.stockTokens);
+  }
+  const removed=new Set(packet.removes?.relations??[]);
+  const relations=new Map((data.relations??[]).filter(row=>!removed.has(row.projectionKey??`${row.chainId??'196'}:${row.id}`)).map(row=>[row.projectionKey??`${row.chainId??'196'}:${row.id}`,row]));
+  for(const row of packet.upserts?.relations??[]){const key=row.projectionKey??`${row.chainId??'196'}:${row.id}`;relations.set(key,mergeEntity(relations.get(key),row,revision));}
+  data.relations=[...relations.values()];
+  // A truncated summary's relationCount remains server-owned until the full
+  // relations section has loaded; never turn a preview length into its total.
+  if(hit.sections?.relations)data.relationCount=data.relations.length;
+  data.revision=revision;data.realtime={...data.realtime,revision};
+  if(stockRemoved){
+    // Removing a stock mapping does not remove a coexisting candidate asset.
+    // Reconcile this identity's summary while retaining its canonical quote.
+    const [chainId,token]=packet.asset.split(':');
+    detail.invalidate({kind:'detail',chainId,token});
+  }
+  return true;
 }

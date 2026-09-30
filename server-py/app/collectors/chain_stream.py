@@ -910,12 +910,14 @@ class ChainPoolStream:
 
     async def _commit_trade_once(self, market, trade):
         from .market_streams import BAR_MS, trade_to_candle
+        from .trade_valuation import dated_usd_volume
         from ..realtime_schema import enqueue_events
         s = self.s
         # Direct unit-test collectors may not have run init(). Production uses
         # a dedicated connection so unrelated reads cannot queue inside this
         # global-write-lock transaction.
         db = self.trade_db or s.db
+        usd_fields = await dated_usd_volume(db, s, market, trade)
         # _guard_write rolls back s.db on failure. A dedicated transaction must
         # hold the same lock without touching an unrelated shared transaction.
         write_guard = s._write_lock if db is not s.db else s._guard_write()
@@ -929,7 +931,7 @@ class ChainPoolStream:
             market_frame = market.frame()
             body = {**market_frame, **trade, "provider": "Chain RPC", "source": "Chain RPC",
                     "receivedAt": received, "sourceEventAt": trade["t"], "persistedAt": stamp,
-                    "volume": trade["quoteQuantity"] if market.quote_currency == "USD" else None}
+                    "volume": None, **usd_fields}
             try:
                 begin_started = time.perf_counter()
                 await db.execute("BEGIN IMMEDIATE")

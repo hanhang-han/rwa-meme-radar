@@ -45,7 +45,7 @@
       <RouterView v-if="!waitingForSnapshot" :key="$route.path" />
     </div>
   </main>
-  <footer class="site-footer"><p v-if="isMarketPage && syncedAt">{{ tr('数据时间','Data as of') }} {{ statusTime }}<span v-if="clock-syncedAt>180000" class="warn"> · {{ tr('已过期','Stale') }}</span></p>{{ tr('池子配对与名称匹配仅用于市场研究，不代表发行方授权或投资建议。','Pool pairings and name matches are research information, not issuer endorsement or investment advice.') }}</footer>
+  <footer class="site-footer">{{ tr('Meme 为社区发行，与所标注的上市公司没有授权关系。数据来自公开市场，不构成投资建议。','Memes are community-issued and are not authorized by the named listed companies. Public market data is not investment advice.') }}</footer>
 </template>
 
 <script setup>

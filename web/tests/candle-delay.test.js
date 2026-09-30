@@ -7,7 +7,7 @@ const source = readFileSync(new URL('../src/components/CandleChart.vue', import.
 const { descriptor } = parse(source);
 // The component's ordinary script exports pure status formatters. Test the
 // actual functions without mounting the chart vendor or replacing time data.
-const { candleDelayMs, candleDelayLabel } = await import('data:text/javascript;base64,'+Buffer.from(descriptor.script.content).toString('base64'));
+const { candleDelayMs, candleDelayLabel, shouldOfferNativePool } = await import('data:text/javascript;base64,'+Buffer.from(descriptor.script.content).toString('base64'));
 const now = Date.UTC(2026,8,30,12);
 
 test('provider delay takes priority over collector timestamps and remains bilingual', () => {
@@ -39,6 +39,16 @@ test('missing, future, invalid, or zero timestamps never invent a numeric delay'
     assert.equal(candleDelayLabel(info,'5m',now,'en'),'Market data has not updated yet');
   }
   assert.equal(candleDelayMs({lastCandleAt:now-600_000},'unsupported-bar',now),null);
+});
+
+test('a delayed USD chart offers an explicit native-pool switch, never a silent unit change', () => {
+  const pool={poolId:'0x'+'a'.repeat(40),priceCurrency:'wNVDAx'};
+  const delayed={priceCurrency:'USD',lastCandleAt:now-16*60_000};
+  assert.equal(shouldOfferNativePool(delayed,'5m',now,'',pool),true);
+  assert.equal(shouldOfferNativePool({...delayed,lastCandleAt:now-14*60_000},'5m',now,'',pool),false);
+  assert.equal(shouldOfferNativePool({...delayed,priceCurrency:'wNVDAx'},'5m',now,'',pool),false);
+  assert.equal(shouldOfferNativePool(delayed,'5m',now,pool.poolId,pool),false);
+  assert.equal(shouldOfferNativePool(delayed,'5m',now,'',null),false);
 });
 
 test('the component compiles with shared pure delay helpers and preserves explicit source errors', () => {
