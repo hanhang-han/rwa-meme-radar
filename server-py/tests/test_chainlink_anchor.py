@@ -271,6 +271,7 @@ class ChainlinkAnchorTests(unittest.IsolatedAsyncioTestCase):
              patch.object(anchor.time, 'time', return_value=(self.now + 300_000) / 1000):
             result = await anchor.refresh_bnb_anchor()
         self.assertEqual(result['skipped'], 3)
+        self.assertEqual(result['deferredReason'], 'live-backlog')
         stream.rpc.assert_not_called()
         store.assert_awaited_once()
         self.assertEqual(sleep.await_count, anchor.BACKLOG_WAIT_STEPS)
@@ -306,6 +307,7 @@ class ChainlinkAnchorTests(unittest.IsolatedAsyncioTestCase):
              patch.object(anchor.time, 'time', side_effect=lambda: clock[0] / 1000):
             deferred = await anchor.refresh_bnb_anchor()
             self.assertEqual(deferred['skipped'], 3)
+            self.assertEqual(deferred['deferredReason'], 'live-backlog')
             self.assertEqual(calls, [])
             clock[0] = self.now + anchor.FORCE_SAMPLE_AGE_MS + 1000
             forced = await anchor.refresh_bnb_anchor()
@@ -313,6 +315,15 @@ class ChainlinkAnchorTests(unittest.IsolatedAsyncioTestCase):
                                   'failed': 0, 'unsupported': 0, 'skipped': 0})
         self.assertEqual(len(calls), 12)
         self.assertEqual(calls.count('eth_call'), 9)
+
+    async def test_missing_stream_reports_source_unavailable(self):
+        with patch('app.collectors.chain_stream.stream_for', return_value=None), \
+             patch.object(anchor, 'store', new_callable=AsyncMock) as store:
+            outcome = await anchor.refresh_bnb_anchor()
+        self.assertEqual(outcome, {'requested': 0, 'accepted': 0, 'updated': 0,
+                                   'failed': 0, 'unsupported': 0, 'skipped': 3,
+                                   'unavailableReason': 'stream-missing'})
+        store.assert_not_awaited()
 
     async def test_cancelled_backlog_wait_does_not_reset_restart_freshness(self):
         for token in anchor.FEEDS:

@@ -10,7 +10,7 @@ import os
 import re
 import time
 from collections import OrderedDict, deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from decimal import Decimal, localcontext
 
@@ -48,6 +48,11 @@ REPLAY_PAUSE_QUEUE_CAP = 32
 REPLAY_RESUME_QUEUE_CAP = 8
 WATCHED_POOL_BURST = 8
 LIVE_DIAGNOSTIC_WINDOW = 256
+LIVE_STAGE_NAMES = (
+    "rawLookup", "header", "decimals", "mutationLockWait", "rawInsert",
+    "usdEvidence", "tradeCommit", "assetQuote", "relationQuote",
+    "reserveValuation", "rawMarkProcessed",
+)
 _live_log_collector = ContextVar("chain_stream_live_log_collector", default=None)
 DEFAULTS = {
     "196": (["wss://ws.xlayer.tech", "wss://xlayerws.okx.com"], "https://xlayerrpc.okx.com"),
@@ -186,6 +191,9 @@ class ChainPoolStream:
         self.live_trade_lock_wait_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
         self.live_trade_begin_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
         self.live_trade_transaction_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
+        self.live_stage_durations_ms = {
+            stage: deque(maxlen=LIVE_DIAGNOSTIC_WINDOW) for stage in LIVE_STAGE_NAMES
+        }
         self.decimals = {}
         self.queue = asyncio.Queue(maxsize=4096)
         self.retry_event = None
@@ -567,6 +575,19 @@ class ChainPoolStream:
             except Exception as exc:
                 print(f'[chain-stream] status update failed for {self.chain}: {exc}', flush=True)
 
+    @contextmanager
+    def _measure_live_stage(self, stage):
+        """Time live work, including failed attempts, without sampling replay."""
+        if _live_log_collector.get() is not self:
+            yield
+            return
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.live_stage_durations_ms[stage].append(round(
+                max(0, time.perf_counter() - started) * 1000, 1))
+
     async def _write_status_fact(self, error=None, force=False):
         if not force and now_ms() - self.last_status < 10_000:
             return
@@ -586,6 +607,16 @@ class ChainPoolStream:
         trade_lock_waits = sorted(self.live_trade_lock_wait_ms)
         trade_begins = sorted(self.live_trade_begin_ms)
         trade_transactions = sorted(self.live_trade_transaction_ms)
+        stage_timings = {}
+        for stage, samples in self.live_stage_durations_ms.items():
+            if samples:
+                ordered = sorted(samples)
+                stage_timings[stage] = {
+                    "count": len(ordered),
+                    "p50": ordered[math.ceil(.5 * len(ordered)) - 1],
+                    "p95": ordered[math.ceil(.95 * len(ordered)) - 1],
+                    "max": ordered[-1],
+                }
         await telemetry.put("chain-stream", "pools", {
             "chainId": self.chain, "provider": "Chain RPC", "status": self.status,
             "poolCount": len(self.pools), "decodedEvents": self.processed,
@@ -608,6 +639,7 @@ class ChainPoolStream:
             "liveTradeTransactionP95Ms": (
                 trade_transactions[math.ceil(.95 * len(trade_transactions)) - 1]
                 if trade_transactions else None),
+            "liveStageTimingsRecentMs": stage_timings,
             "replayPausedForLive": self.replay_under_pressure(),
             "rateLimitedAt": self.rpc_rate_limited_at, "cooldownUntil": self.rpc_cooldown_wall,
             "rpcIntervalMs": round(self.rpc_interval * 1000),
@@ -748,13 +780,15 @@ class ChainPoolStream:
         if self.irrelevant_sync(log):
             return
         revision = self.removed_revisions.get(block_hash, 0)
-        existing = await (self.trade_store or self.s).fetchone(
-            "SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?", (self.chain, ident))
+        with self._measure_live_stage("rawLookup"):
+            existing = await (self.trade_store or self.s).fetchone(
+                "SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?", (self.chain, ident))
         if existing and existing[0]:
             return
         # Public-node metadata may take seconds. It must not monopolize the
         # per-chain mutation lock while live logs or a removal are waiting.
-        header = await self.log_header(log)
+        with self._measure_live_stage("header"):
+            header = await self.log_header(log)
         if header is None:
             return
         at, height = number(header["timestamp"]) * 1000, number(log["blockNumber"])
@@ -766,30 +800,38 @@ class ChainPoolStream:
                 return
         unsupported = False
         try:
-            d0, d1 = await asyncio.gather(self.token_decimals(pool["token0"]), self.token_decimals(pool["token1"]))
+            with self._measure_live_stage("decimals"):
+                d0, d1 = await asyncio.gather(self.token_decimals(pool["token0"]), self.token_decimals(pool["token1"]))
         except ValueError as error:
             if str(error) != "unsupported-token-decimals":
                 raise
             unsupported = True
+        lock_started = time.perf_counter() if _live_log_collector.get() is self else None
         async with self.lock:
+            if lock_started is not None:
+                self.live_stage_durations_ms["mutationLockWait"].append(round(
+                    max(0, time.perf_counter() - lock_started) * 1000, 1))
             # Another consumer may have committed or removed this event while
             # the metadata awaits ran. Never restore an in-flight orphan.
             if self.removed_revisions.get(block_hash, 0) != revision:
                 return
-            existing = await (self.trade_store or self.s).fetchone(
-                "SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?", (self.chain, ident))
+            with self._measure_live_stage("rawLookup"):
+                existing = await (self.trade_store or self.s).fetchone(
+                    "SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?", (self.chain, ident))
             if existing and existing[0]:
                 return
             if unsupported:
                 # A permanently unsupported ABI must not hold back every
                 # other pool on this chain. Transport errors remain retryable.
-                await self._write_stream_log("INSERT OR REPLACE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,1)",
-                    (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log)))
+                with self._measure_live_stage("rawInsert"):
+                    await self._write_stream_log("INSERT OR REPLACE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,1)",
+                        (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log)))
                 self.unsupported += 1
                 return
             # Store unprocessed input first; a crash is safely retried by the watermark.
-            await self._write_stream_log("INSERT OR IGNORE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,0)",
-                (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log)))
+            with self._measure_live_stage("rawInsert"):
+                await self._write_stream_log("INSERT OR IGNORE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,0)",
+                    (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log)))
             topic = str((log.get("topics") or [""])[0]).lower()
             reserves = words(log.get("data"), 2) if topic == SYNC_V2.lower() else None
             sqrt = None
@@ -800,41 +842,46 @@ class ChainPoolStream:
                     continue
                 market = self.market(pool, token)
                 sqrt = int(decoded["sqrtPriceX96"]) if decoded["sqrtPriceX96"] else None
-                await self.commit_trade(market, {
-                    **decoded, "quantity": decoded["size"], "quoteQuantity": decoded["quoteVolume"],
-                    "id": "chain:" + self.chain + ":" + ident, "t": at,
-                    "hash": log["transactionHash"], "blockHash": block_hash, "blockNumber": height,
-                    "transactionIndex": number(log.get("transactionIndex", "0x0")),
-                    "logIndex": number(log.get("logIndex", "0x0")), "pool": pool["pool"],
-                    "source": "Chain RPC", "finality": "provisional", "provider": "Chain RPC",
-                    "receivedAt": log.get('_receivedAt') or now_ms(),
-                })
-                await self.pool_asset_quote(pool, token, decoded, at, height, ident)
+                with self._measure_live_stage("tradeCommit"):
+                    await self.commit_trade(market, {
+                        **decoded, "quantity": decoded["size"], "quoteQuantity": decoded["quoteVolume"],
+                        "id": "chain:" + self.chain + ":" + ident, "t": at,
+                        "hash": log["transactionHash"], "blockHash": block_hash, "blockNumber": height,
+                        "transactionIndex": number(log.get("transactionIndex", "0x0")),
+                        "logIndex": number(log.get("logIndex", "0x0")), "pool": pool["pool"],
+                        "source": "Chain RPC", "finality": "provisional", "provider": "Chain RPC",
+                        "receivedAt": log.get('_receivedAt') or now_ms(),
+                    })
+                with self._measure_live_stage("assetQuote"):
+                    await self.pool_asset_quote(pool, token, decoded, at, height, ident)
                 accepted = True
             if reserves or sqrt:
                 for rel in self.relations.get(pool["pool"], []):
-                    ratio = pool_ratio(pool["token0"], rel["token"], d0, d1,
-                                       reserves=reserves, sqrt_price_x96=sqrt)
-                    old = await (self.trade_store or self.s).get("pool-quote", pool["pool"]) or {}
-                    order = [height, number(log.get("logIndex", "0x0"))]
-                    old_order = old.get("eventOrder") or [old.get("block") or 0, -1]
-                    if ratio and at >= (old.get("at") or 0) and order >= old_order:
-                        await (self.trade_store or self.s).put("pool-quote", pool["pool"], {
-                            "chainId": self.chain, "pool": pool["pool"], "token": rel["token"],
-                            "stockSide": rel.get("stockSide") or rel.get("stock"), "memePerStock": ratio,
-                            "at": at, "block": height, "blockHash": block_hash, "timeKind": "market",
-                            "method": "v2-sync-stream" if reserves else "v3-swap-stream",
-                            "decimals0": d0, "decimals1": d1, "finality": "provisional",
-                            "eventOrder": order,
-                        })
+                    with self._measure_live_stage("relationQuote"):
+                        ratio = pool_ratio(pool["token0"], rel["token"], d0, d1,
+                                           reserves=reserves, sqrt_price_x96=sqrt)
+                        old = await (self.trade_store or self.s).get("pool-quote", pool["pool"]) or {}
+                        order = [height, number(log.get("logIndex", "0x0"))]
+                        old_order = old.get("eventOrder") or [old.get("block") or 0, -1]
+                        if ratio and at >= (old.get("at") or 0) and order >= old_order:
+                            await (self.trade_store or self.s).put("pool-quote", pool["pool"], {
+                                "chainId": self.chain, "pool": pool["pool"], "token": rel["token"],
+                                "stockSide": rel.get("stockSide") or rel.get("stock"), "memePerStock": ratio,
+                                "at": at, "block": height, "blockHash": block_hash, "timeKind": "market",
+                                "method": "v2-sync-stream" if reserves else "v3-swap-stream",
+                                "decimals0": d0, "decimals1": d1, "finality": "provisional",
+                                "eventOrder": order,
+                            })
                 if reserves:
-                    await self.reserve_valuation(pool, reserves, d0, d1, at, height, block_hash,
-                                                 number(log.get("logIndex", "0x0")))
+                    with self._measure_live_stage("reserveValuation"):
+                        await self.reserve_valuation(pool, reserves, d0, d1, at, height, block_hash,
+                                                     number(log.get("logIndex", "0x0")))
                 accepted = True
             if not accepted:
                 self.unsupported += 1
-            await self._write_stream_log("UPDATE chain_stream_logs SET processed=1 WHERE chain=? AND id=?",
-                                         (self.chain, ident))
+            with self._measure_live_stage("rawMarkProcessed"):
+                await self._write_stream_log("UPDATE chain_stream_logs SET processed=1 WHERE chain=? AND id=?",
+                                             (self.chain, ident))
             self.processed += 1
             self.last_event = now_ms()
             self.last_source_event = max(self.last_source_event, at)
@@ -925,7 +972,8 @@ class ChainPoolStream:
         # a dedicated connection so unrelated reads cannot queue inside this
         # global-write-lock transaction.
         db = self.trade_db or s.db
-        usd_fields = await dated_usd_volume(db, s, market, trade)
+        with self._measure_live_stage("usdEvidence"):
+            usd_fields = await dated_usd_volume(db, s, market, trade)
         # _guard_write rolls back s.db on failure. A dedicated transaction must
         # hold the same lock without touching an unrelated shared transaction.
         write_guard = s._write_lock if db is not s.db else s._guard_write()

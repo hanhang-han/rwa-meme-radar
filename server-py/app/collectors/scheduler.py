@@ -38,6 +38,12 @@ def apply_result(status, outcome, finished_at):
                       lastSuccessAt=finished_at, lastDataAt=finished_at)
     elif outcome.get('quotaBlocked'):
         status.update(status='quota-blocked', outcome='no-data', error='Provider budget exhausted')
+    elif outcome.get('unavailableReason') == 'stream-missing':
+        status.update(status='error', outcome='source-unavailable',
+                      lastFailureAt=finished_at, error='BNB Chain live stream unavailable')
+    elif (outcome.get('deferredReason') == 'live-backlog'
+          and not failed and not unsupported):
+        status.update(status='deferred', outcome='live-backlog', error=None)
     elif outcome.get('noChange') and not failed:
         skipped = int(outcome.get('skipped') or 0)
         status.update(status='partial' if skipped else 'waiting', outcome='no-change',

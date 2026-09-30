@@ -214,6 +214,33 @@ class CollectorRepairTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status['status'], 'idle')
         self.assertEqual(status['lastSuccessAt'], 25)
 
+    def test_oracle_skip_reason_distinguishes_backlog_from_missing_stream(self):
+        from app.collectors.scheduler import apply_result
+        status = {'lastSuccessAt': 10, 'lastDataAt': 11, 'lastFailureAt': 5}
+        apply_result(status, result(skipped=3, deferredReason='live-backlog'), 20)
+        self.assertEqual((status['status'], status['outcome']), ('deferred', 'live-backlog'))
+        self.assertEqual((status['lastSuccessAt'], status['lastDataAt'], status['lastFailureAt']),
+                         (10, 11, 5))
+        self.assertIsNone(status['error'])
+
+        apply_result(status, result(skipped=3, unavailableReason='stream-missing'), 30)
+        self.assertEqual((status['status'], status['outcome']), ('error', 'source-unavailable'))
+        self.assertEqual(status['error'], 'BNB Chain live stream unavailable')
+        self.assertEqual((status['lastSuccessAt'], status['lastDataAt'], status['lastFailureAt']),
+                         (10, 11, 30))
+
+    def test_completed_unsupported_review_is_opt_in(self):
+        from app.collectors.scheduler import apply_result
+        generic = {'lastSuccessAt': 10, 'lastDataAt': 11}
+        apply_result(generic, result(requested=2, processed=2, unsupported=2), 20)
+        self.assertEqual((generic['status'], generic['outcome']), ('error', 'no-data'))
+        self.assertEqual((generic['lastSuccessAt'], generic['lastDataAt']), (10, 11))
+
+        reviewed = {'lastSuccessAt': 10, 'lastDataAt': 11}
+        apply_result(reviewed, result(requested=2, processed=2, unsupported=2, noChange=True), 20)
+        self.assertEqual((reviewed['status'], reviewed['outcome']), ('waiting', 'no-change'))
+        self.assertEqual((reviewed['lastSuccessAt'], reviewed['lastDataAt']), (20, 11))
+
     def test_basket_loses_qualification_without_resetting_baseline(self):
         from app.collectors.baskets import project_basket
         now = 2_000_000

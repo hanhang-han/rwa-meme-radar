@@ -134,9 +134,15 @@ class BinanceMarketFeed:
                 # Captured before opening WS so live writes cannot advance the
                 # replay lower bound while recovery is still running.
                 checkpoints={}
+                stores={chain:await store(chain) for chain in {m.chain_id for m in markets}}
+                registry={chain:dict(await s.all_kv('market-registry'))
+                          for chain,s in stores.items()}
                 for market in markets:
-                    s=await store(market.chain_id)
-                    await s.put('market-registry',market.storage,market.record())
+                    s=stores[market.chain_id]
+                    record=market.record()
+                    if registry[market.chain_id].get(market.storage)!=record:
+                        await s.put('market-registry',market.storage,record)
+                        registry[market.chain_id][market.storage]=record
                     gap=await s.get('market-gap',market.storage) or {}
                     recent=await s.recent_trades(market.storage,1)
                     checkpoints[market.storage]=(gap,recent[0] if recent else None)

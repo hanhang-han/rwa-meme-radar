@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.db import ResearchStore
-from app.collectors.chain_stream import ChainPoolStream, SWAP_V2, SWAP_V3, SYNC_V2, WATCHED_POOL_BURST, decode_swap, event_key
+from app.collectors.chain_stream import ChainPoolStream, LIVE_STAGE_NAMES, SWAP_V2, SWAP_V3, SYNC_V2, WATCHED_POOL_BURST, decode_swap, event_key
 from app.collectors.market_streams import Market
 
 TOKEN0 = "0x" + "1" * 40
@@ -1692,7 +1692,43 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(status['liveLogProcessingLastMs'], 0)
         self.assertGreaterEqual(status['liveLogProcessingP95Ms'],
                                 status['liveLogProcessingLastMs'])
+        stages = status['liveStageTimingsRecentMs']
+        self.assertTrue({'rawLookup', 'header', 'decimals', 'mutationLockWait',
+                         'rawInsert', 'usdEvidence', 'tradeCommit', 'assetQuote',
+                         'rawMarkProcessed'} <= stages.keys())
+        for stage, summary in stages.items():
+            with self.subTest(stage=stage):
+                self.assertIn(stage, LIVE_STAGE_NAMES)
+                self.assertEqual(set(summary), {'count', 'p50', 'p95', 'max'})
+                self.assertTrue(1 <= summary['count'] <= 256)
+                self.assertTrue(0 <= summary['p50'] <= summary['p95'] <= summary['max'])
         self.collector.rpc.assert_awaited_once_with('eth_getBlockByHash', ['0xabe', False])
+
+    async def test_live_stage_status_keeps_only_bounded_recent_samples(self):
+        await self.collector.process_log(await self.prepare_logs())  # Replay is unsampled.
+        self.assertTrue(all(not samples for samples in self.collector.live_stage_durations_ms.values()))
+        for samples in self.collector.live_stage_durations_ms.values():
+            samples.extend(float(value) for value in range(300))
+        await self.collector.status_fact(force=True)
+        stages = (await self.store.get('chain-stream', 'pools'))['liveStageTimingsRecentMs']
+        self.assertEqual(set(stages), set(LIVE_STAGE_NAMES))
+        self.assertEqual(stages['rawInsert'], {
+            'count': 256, 'p50': 171.0, 'p95': 287.0, 'max': 299.0})
+        self.assertTrue(all(summary['count'] == 256 for summary in stages.values()))
+        self.assertLess(len(json.dumps(stages)), 1024)
+
+    async def test_failed_live_raw_insert_is_timed_and_retained_for_retry(self):
+        log = await self.prepare_logs()
+        self.collector._write_stream_log = AsyncMock(
+            side_effect=sqlite3.OperationalError('database is locked'))
+        with self.assertRaisesRegex(sqlite3.OperationalError, 'database is locked'):
+            await self.collector.process_queued(log)
+        await self.collector.status_fact(force=True)
+        status = await self.store.get('chain-stream', 'pools')
+        self.assertEqual(status['liveStageTimingsRecentMs']['rawInsert']['count'], 1)
+        self.assertNotIn('rawMarkProcessed', status['liveStageTimingsRecentMs'])
+        self.assertIs(self.collector.retry_event, log)
+        self.assertEqual(status['liveLogProcessingSamplesRecent'], 1)
 
     async def test_live_diagnostic_window_is_bounded_and_excludes_replay_lookups(self):
         cached = {'number': '0xc8', 'hash': '0xabc', 'timestamp': hex(self.at // 1000)}

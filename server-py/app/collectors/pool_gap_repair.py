@@ -385,6 +385,8 @@ class PoolGapRepair:
                 })
                 result["failed"] += 1
                 result["processed"] += 1
-        if result["processed"] and not (result["accepted"] or result["failed"] or result["unsupported"]):
+        # Quarantining an unsupported pool completes its review, even though
+        # it cannot create an accepted market observation.
+        if result["processed"] and not (result["accepted"] or result["failed"]):
             result["noChange"] = True
         return result

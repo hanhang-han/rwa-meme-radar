@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from unittest.mock import AsyncMock, patch
 
 from app import db as storage
@@ -28,6 +29,92 @@ class FakeConnection:
 
 
 class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rollback_writer_releases_and_connect_enables_wal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = directory + '/research.sqlite'
+            with closing(sqlite3.connect(path)) as writer:
+                writer.execute('CREATE TABLE existing (value INTEGER)')
+                writer.commit()
+                writer.execute('BEGIN IMMEDIATE')
+                writer.execute('INSERT INTO existing VALUES (1)')
+                with closing(sqlite3.connect(path, timeout=0)) as probe:
+                    with self.assertRaises(sqlite3.OperationalError) as caught:
+                        probe.execute('PRAGMA journal_mode=WAL')
+                    self.assertEqual(caught.exception.sqlite_errorcode, sqlite3.SQLITE_BUSY)
+
+                scoped = storage.ResearchStore(path)
+                original_fetch = scoped.fetchone
+                changing_mode = asyncio.Event()
+
+                async def fetch(query, parameters=()):
+                    if query == 'PRAGMA journal_mode=WAL':
+                        changing_mode.set()
+                    return await original_fetch(query, parameters)
+
+                async def release_writer():
+                    await changing_mode.wait()
+                    await asyncio.sleep(0.1)
+                    writer.commit()
+
+                release = asyncio.create_task(release_writer())
+                try:
+                    with patch.object(scoped, 'fetchone', side_effect=fetch):
+                        self.assertIs(await asyncio.wait_for(scoped.connect(), 5), scoped)
+                    self.assertTrue(changing_mode.is_set())
+                    self.assertEqual((await scoped.fetchone('PRAGMA journal_mode'))[0], 'wal')
+                    self.assertEqual((await scoped.fetchone('SELECT value FROM existing'))[0], 1)
+                    await scoped.put('asset', 'ready', {'ok': True})
+                    self.assertEqual(await scoped.get('asset', 'ready'), {'ok': True})
+                finally:
+                    release.cancel()
+                    try:
+                        await release
+                    except asyncio.CancelledError:
+                        pass
+                    await scoped.close()
+                    if writer.in_transaction:
+                        writer.rollback()
+
+    async def test_existing_wal_connect_skips_journal_mode_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = directory + '/research.sqlite'
+            with closing(sqlite3.connect(path)) as writer:
+                self.assertEqual(writer.execute('PRAGMA journal_mode=WAL').fetchone()[0], 'wal')
+                writer.execute('CREATE TABLE existing (value INTEGER)')
+                writer.commit()
+                writer.execute('BEGIN IMMEDIATE')
+                writer.execute('INSERT INTO existing VALUES (2)')
+
+                scoped = storage.ResearchStore(path)
+                original_fetch = scoped.fetchone
+                queries = []
+
+                async def fetch(query, parameters=()):
+                    queries.append(query)
+                    return await original_fetch(query, parameters)
+
+                async def release_writer():
+                    await asyncio.sleep(0.1)
+                    writer.commit()
+
+                release = asyncio.create_task(release_writer())
+                try:
+                    with patch.object(scoped, 'fetchone', side_effect=fetch):
+                        self.assertIs(await asyncio.wait_for(scoped.connect(), 5), scoped)
+                    self.assertTrue(queries[0].startswith('PRAGMA busy_timeout='))
+                    self.assertEqual(queries[1], 'PRAGMA journal_mode')
+                    self.assertNotIn('PRAGMA journal_mode=WAL', queries)
+                    self.assertEqual((await scoped.fetchone('SELECT value FROM existing'))[0], 2)
+                finally:
+                    release.cancel()
+                    try:
+                        await release
+                    except asyncio.CancelledError:
+                        pass
+                    await scoped.close()
+                    if writer.in_transaction:
+                        writer.rollback()
+
     async def test_recovery_then_busy_reopens_and_preserves_idempotent_schema(self):
         with tempfile.TemporaryDirectory() as directory:
             scoped = storage.ResearchStore(directory+'/research.sqlite', busy_timeout_ms=2000)

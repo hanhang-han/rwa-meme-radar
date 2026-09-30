@@ -243,6 +243,21 @@ class GapRepairTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(state["status"], "quarantined")
                 self.assertIsNone(await self.chain.get("pool", pool))
 
+    async def test_all_unsupported_candidates_complete_the_review(self):
+        from app.collectors.factory_discovery import Factory
+        rpc = FakeProofRpc(factory=Factory("0x" + "9" * 40, "flapsh", "0x" + "1" * 64))
+        for index in range(2):
+            await queue_indexed_gap(self.system, gap(pool="0x" + f"{index + 100:040x}"),
+                                    seen_at=self.clock_ms[0])
+        outcome = await PoolGapRepair(self.chain, self.system, rpc,
+                                      clock=lambda: self.clock_ms[0]).run_once(limit=2)
+        self.assertEqual((outcome["requested"], outcome["processed"], outcome["unsupported"]),
+                         (2, 2, 2))
+        self.assertEqual((outcome["accepted"], outcome["failed"], outcome["noChange"]),
+                         (0, 0, True))
+        self.assertEqual([row["status"] for row in await self.system.all(KIND)],
+                         ["quarantined", "quarantined"])
+
     async def test_retry_resume_and_bounded_review(self):
         rpc = FakeProofRpc()
         rpc.fail_once = True

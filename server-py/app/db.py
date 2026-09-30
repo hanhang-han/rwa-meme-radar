@@ -256,7 +256,11 @@ class ResearchStore:
                 # DDL budget, then use the quote lane's short timeout for
                 # recurring observations after initialization completes.
                 await self.fetchone(f"PRAGMA busy_timeout={startup_timeout_ms}")
-                await self.fetchone("PRAGMA journal_mode=WAL")
+                # Reading the current mode does not request a journal-mode
+                # change. Most connections open an already-WAL database, so
+                # avoid the write-form pragma while another process writes.
+                if (await self.fetchone("PRAGMA journal_mode"))[0].lower() != 'wal':
+                    await self.fetchone("PRAGMA journal_mode=WAL")
                 if self.path != ':memory:':
                     # Cap the reusable WAL file after SQLite's normal reset;
                     # this does not force a checkpoint or interrupt readers.

@@ -205,6 +205,81 @@ class StreamPersistenceTests(unittest.IsolatedAsyncioTestCase):
             'market':'ALPHA_1088USDT','expiresAt':1,'bar':'1H'})
         self.assertNotIn('alpha_1088usdt@kline_1h',await feed._streams([MARKET]))
 
+    async def failed_connections(self,markets):
+        feed=BinanceMarketFeed('binance-alpha','unused',AsyncMock(return_value=markets))
+        attempts=0
+        async def status(**values):
+            nonlocal attempts
+            if values.get('status')=='reconnecting':
+                attempts+=1
+                if attempts==2:
+                    raise asyncio.CancelledError
+        with patch('app.collectors.exchange_stream.websockets.connect',side_effect=OSError('offline')) as connect, \
+             patch('app.collectors.exchange_stream.asyncio.sleep',new_callable=AsyncMock), \
+             patch.object(feed,'_status',side_effect=status), \
+             patch.object(self.store,'all_kv',wraps=self.store.all_kv) as all_kv, \
+             patch.object(self.store,'put',wraps=self.store.put) as put:
+            with self.assertRaises(asyncio.CancelledError):
+                await feed._connection(markets)
+        self.assertEqual(connect.call_count,2)
+        self.assertEqual([call.args[0] for call in all_kv.await_args_list],['market-registry']*2)
+        return [call for call in put.await_args_list if call.args[0]=='market-registry']
+
+    async def test_unchanged_registry_reconnect_does_not_write(self):
+        await self.store.put('market-registry',MARKET.storage,MARKET.record())
+        self.assertEqual(await self.failed_connections([MARKET]),[])
+        self.assertEqual(await self.store.get('market-registry',MARKET.storage),MARKET.record())
+
+    async def test_reconnect_writes_changed_and_new_market_definitions_once(self):
+        await self.store.put('market-registry',MARKET.storage,MARKET.record())
+        changed=Market('56',TOKEN,'binance-alpha','ALPHA_1088USDT','USDT','RENAMED')
+        added=Market('56','0x'+'a'*40,'binance-alpha','ALPHA_2000USDT','USDT','NEW')
+        writes=await self.failed_connections([changed,added])
+        self.assertEqual([(call.args[1],call.args[2]) for call in writes],
+                         [(changed.storage,changed.record()),(added.storage,added.record())])
+        self.assertEqual(await self.store.get('market-registry',changed.storage),changed.record())
+        self.assertEqual(await self.store.get('market-registry',added.storage),added.record())
+
+    async def test_reconnect_captures_replay_checkpoint_before_socket_opens(self):
+        await self.store.put('market-registry',MARKET.storage,MARKET.record())
+        old_gap={'status':'retrying','fromSourceId':100}
+        await self.store.put('market-gap',MARKET.storage,old_gap)
+        await self.store.put_trades(MARKET.storage,[{'id':'agg:100','sourceId':100,'t':100}])
+        feed=BinanceMarketFeed('binance-alpha','unused',AsyncMock(return_value=[MARKET]))
+        feed.live_ids[MARKET.storage]=999
+        recovered=asyncio.Event()
+        captured={}
+        async def open_socket():
+            # Live writes after opening the socket must not move the replay floor.
+            await self.store.put('market-gap',MARKET.storage,{'status':'recovering','fromSourceId':200})
+            await self.store.put_trades(MARKET.storage,[{'id':'agg:200','sourceId':200,'t':200}])
+            return socket
+        async def recover(markets,checkpoints):
+            captured.update(checkpoints)
+            recovered.set()
+        async def recv():
+            await recovered.wait()
+            raise OSError('socket closed')
+        async def status(**values):
+            if values.get('status')=='reconnecting':
+                raise asyncio.CancelledError
+        socket=AsyncMock()
+        socket.recv.side_effect=recv
+        context=MagicMock()
+        context.__aenter__=AsyncMock(side_effect=open_socket)
+        context.__aexit__=AsyncMock(return_value=None)
+        with patch('app.collectors.exchange_stream.websockets.connect',return_value=context), \
+             patch.object(feed,'_streams',AsyncMock(return_value=set())), \
+             patch.object(feed,'_control',AsyncMock()), \
+             patch.object(feed,'_status',side_effect=status), \
+             patch.object(feed,'_recover',side_effect=recover) as replay:
+            with self.assertRaises(asyncio.CancelledError):
+                await feed._connection([MARKET])
+        replay.assert_awaited_once()
+        self.assertEqual(captured[MARKET.storage][0],old_gap)
+        self.assertEqual(captured[MARKET.storage][1]['sourceId'],100)
+        self.assertNotIn(MARKET.storage,feed.live_ids)
+
     async def test_wire_payloads_accepted(self):
         feed=BinanceMarketFeed('binance-alpha','unused',AsyncMock(return_value=[MARKET]))
         for data in (TICK,TRADE,KLINE):

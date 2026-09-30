@@ -322,12 +322,14 @@ async def refresh_bnb_anchor():
               'failed': 0, 'unsupported': 0, 'skipped': 0}
     if stream is None:
         totals['skipped'] = len(FEEDS)
+        totals['unavailableReason'] = 'stream-missing'
         return totals
     clear, waited = await _wait_for_backlog(stream, BACKLOG_WAIT_STEPS)
     scoped = await store(CHAIN_ID)
     force = not clear and await _force_due(scoped, int(time.time() * 1000))
     if not clear and not force:
         totals['skipped'] = len(FEEDS)
+        totals['deferredReason'] = 'live-backlog'
         return totals
 
     calls = 0
@@ -349,6 +351,7 @@ async def refresh_bnb_anchor():
             force = await _force_due(scoped, int(time.time() * 1000))
             if not force:
                 totals['skipped'] += remaining
+                totals['deferredReason'] = 'live-backlog'
                 break
         try:
             async with asyncio.timeout(15):
@@ -358,6 +361,7 @@ async def refresh_bnb_anchor():
                 sample = await verified_sample(budgeted_rpc, quote_token=token)
         except OracleDeferred:
             totals['skipped'] += remaining
+            totals['deferredReason'] = 'live-backlog'
             break
         except Exception:
             totals['requested'] += 1
