@@ -8,6 +8,9 @@ import json
 import math
 from decimal import Decimal, InvalidOperation
 
+from .chainlink_anchor import (CHAIN_ID as BNB_CHAIN_ID, FEEDS as BNB_USD_FEEDS,
+                               PROVIDER as ORACLE_PROVIDER, dated_quote_rate)
+
 
 MAX_QUOTE_AGE_MS = 15 * 60_000
 SAMPLE_BUCKET_MS = 5 * 60_000
@@ -58,6 +61,26 @@ def _candidate(price, evidence, trade_at, *, origin, bucket=None, fact_at=None):
     return (quote_at, rate, provider, origin) if rate is not None else None
 
 
+def _usd_fields(scoped, quote_token, quantity, quote_at, rate, provider, origin, *, feed=None):
+    try:
+        usd = float(quantity * rate)
+        rate_float = float(rate)
+    except (OverflowError, ValueError):
+        return {}
+    if not math.isfinite(usd) or usd <= 0 or not math.isfinite(rate_float):
+        return {}
+    provenance = {
+        'method': 'native-quote-quantity-times-dated-usd-price',
+        'chainId': str(scoped.scope), 'quoteToken': quote_token,
+        'quotePriceUsd': rate_float, 'quoteAt': quote_at,
+        'timeKind': 'market', 'provider': provider, 'evidence': origin,
+    }
+    if feed is not None:
+        provenance['feedAddress'] = feed
+    return {'volume': usd, 'volumeCurrency': 'USD', 'quoteAt': quote_at,
+            'volumeProvenance': provenance}
+
+
 async def dated_usd_volume(db, scoped, market, trade):
     """Return USD fields for one pool trade, or an empty patch if unknown.
 
@@ -70,6 +93,17 @@ async def dated_usd_volume(db, scoped, market, trade):
     quantity = _positive(trade.get('quoteQuantity'))
     if not quote_token or trade_at is None or quantity is None or str(market.chain_id) != str(scoped.scope):
         return {}
+    # Three reviewed BNB Chain quote contracts have independent USD feeds.
+    # Never fall back to a token headline or inferred stablecoin peg when a
+    # feed is unavailable, stale, or mismatched.
+    if str(scoped.scope) == BNB_CHAIN_ID and quote_token in BNB_USD_FEEDS:
+        dated = await dated_quote_rate(db, scoped, quote_token, trade_at)
+        if dated is None:
+            return {}
+        quote_at, rate = dated
+        return _usd_fields(scoped, quote_token, quantity, quote_at, rate,
+                           ORACLE_PROVIDER, 'oracle-feed',
+                           feed=BNB_USD_FEEDS[quote_token]['feed'])
     asset_key = scoped.key(quote_token)
     fact_rows = await db.execute_fetchall(
         'SELECT body FROM facts WHERE kind=? AND id=?', (scoped.key('asset'), quote_token))
@@ -109,20 +143,4 @@ async def dated_usd_volume(db, scoped, market, trade):
     if not candidates:
         return {}
     quote_at, rate, provider, origin = max(candidates, key=lambda value: value[0])
-    volume = quantity * rate
-    try:
-        usd = float(volume)
-        rate_float = float(rate)
-    except (OverflowError, ValueError):
-        return {}
-    if not math.isfinite(usd) or usd <= 0 or not math.isfinite(rate_float):
-        return {}
-    return {
-        'volume': usd, 'volumeCurrency': 'USD', 'quoteAt': quote_at,
-        'volumeProvenance': {
-            'method': 'native-quote-quantity-times-dated-usd-price',
-            'chainId': str(scoped.scope), 'quoteToken': quote_token,
-            'quotePriceUsd': rate_float, 'quoteAt': quote_at,
-            'timeKind': 'market', 'provider': provider, 'evidence': origin,
-        },
-    }
+    return _usd_fields(scoped, quote_token, quantity, quote_at, rate, provider, origin)

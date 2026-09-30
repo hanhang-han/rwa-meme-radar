@@ -70,6 +70,8 @@ async def run() -> None:
     from .collectors import binance_alpha, chain_stream
     from .collectors.factory_discovery import FactoryDiscovery
     from .collectors.discovery_coverage import reconcile_bnb
+    from .collectors.pool_gap_repair import PoolGapRepair
+    from .collectors.chainlink_anchor import refresh_bnb_anchor
     from .collectors.risk_enrichment import refresh_risk_enrichment
     from .collectors.live_quotes import refresh_live_quotes, refresh_base_candidates, refresh_base_stocks
     from .collectors.main_round import refresh_liquidity, refresh_main_round, refresh_discovery
@@ -133,6 +135,7 @@ async def run() -> None:
             return await fn()
 
     spawn_loop("liveQuotes", 300, lambda: quote_round(refresh_live_quotes))
+    spawn_loop("bnbUsdOracle", 300, refresh_bnb_anchor, 20)
     # Baseline quotes start at +5s/+15s and can consume their brief budget
     # without racing a large catalogue recovery. New identities follow at +90s.
     spawn_loop("okxCatalogue", 300, sync_okx_catalogues, 90)
@@ -155,6 +158,17 @@ async def run() -> None:
     # outside the live/quote critical path, no more than once per day.
     spawn_loop("discoveryCoverageBsc", 86_400, reconcile_bnb, 600,
                resume_stagger_s=30, **background_gate)
+    bsc_stream = chain_stream.stream_for('56')
+    if bsc_stream and os.environ.get('BSC_POOL_GAP_REPAIR_ENABLED', 'true').lower() != 'false':
+        gap_repair = PoolGapRepair(await store('56'), await store('system'), bsc_stream.rpc)
+
+        async def repair_round():
+            if bsc_stream.http is None:
+                return {'requested': 0, 'accepted': 0, 'skipped': 1}
+            return await gap_repair.run_once(limit=2)
+
+        spawn_loop("poolGapRepairBsc", 30, repair_round, 660,
+                   resume_stagger_s=30, **background_gate)
     spawn_loop("mainRound", 300, refresh_main_round, 35,
                resume_stagger_s=0, **background_gate)
     spawn_loop("liquidityRefresh", 30, refresh_liquidity, 45,

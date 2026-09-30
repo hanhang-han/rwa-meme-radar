@@ -7,6 +7,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import time
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
@@ -25,6 +26,9 @@ SWAP_V2 = Web3.to_hex(Web3.keccak(text="Swap(address,uint256,uint256,uint256,uin
 SWAP_V3 = Web3.to_hex(Web3.keccak(text="Swap(address,address,int256,int256,uint160,uint128,int24)"))
 SYNC_V2 = Web3.to_hex(Web3.keccak(text="Sync(uint112,uint112)"))
 TOPICS = [SWAP_V2, SWAP_V3, SYNC_V2]
+TOPIC_SET = frozenset(topic.lower() for topic in TOPICS)
+HEX_HASH = re.compile(r"0x[0-9a-fA-F]{64}\Z")
+HEX_DATA = re.compile(r"0x(?:[0-9a-fA-F]{2})*\Z")
 FACT_UPSERT = "INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body"
 CANDLE_UPSERT = """INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(asset,bar,openTime) DO UPDATE SET open=excluded.open,high=excluded.high,
@@ -223,6 +227,7 @@ class ChainPoolStream:
         self.http_chain_verified = False
         self.http_fallback_until = 0.0
         self.pending_pools = set()
+        self.subscribed_pools = set()
         self.scan_page_metrics = {}
         self.last_closed = 0
         self.initialized = False
@@ -329,7 +334,9 @@ class ChainPoolStream:
         known = {}
         for row in rows:
             pool, t0, t1 = (address(row.get(k)) for k in ("pool", "token0", "token1"))
-            if not pool or not t0 or not t1 or t0 == t1:
+            if (not pool or not t0 or not t1 or t0 == t1
+                    or row.get("creationStatus") == "orphaned"
+                    or row.get("verificationStatus") == "reorged"):
                 continue
             # The pool record was populated by token0/token1 RPC verification.
             known[pool] = {**row, "pool": pool, "token0": t0, "token1": t1}
@@ -343,6 +350,7 @@ class ChainPoolStream:
                     self.decimals[pool["token" + str(side)]] = d
         changed = set(known) != set(self.pools)
         coverage = {key for key, _ in await self.s.all_kv("pool-stream-coverage")}
+        self.pending_pools.intersection_update(known)
         self.pending_pools.update(set(known) - coverage)
         self.pools = known
         self.last_catalogue = now_ms()
@@ -727,7 +735,7 @@ class ChainPoolStream:
 
     async def process_log(self, log):
         pool = self.pools.get(address(log.get("address")))
-        if not pool:
+        if not pool or pool.get("verificationStatus") == "reorged":
             return
         ident = event_key(log)
         block_hash = str(log.get("blockHash") or "").lower()
@@ -1260,6 +1268,144 @@ class ChainPoolStream:
             })
             return result
 
+    async def backfill_pending_pools(self, head, *, limit=2):
+        """Replay each repaired pool from its pre-proof block with a durable cursor.
+
+        Completion is recorded only after the WebSocket has subscribed to the
+        address and a canonical replay reaches the head. A restart resumes the
+        saved pool-specific block, never a global 32-block guess.
+        """
+        height = number(head["number"])
+        now = now_ms()
+        existing = {key: body for key, body in await self.s.all_kv("pool-stream-backfill")}
+        candidates = sorted((pool for pool in self.pending_pools
+                             if isinstance((self.pools.get(pool) or {}).get("streamBackfillFromBlock"), int)
+                             and (existing.get(pool, {}).get("nextRetryAt") or 0) <= now),
+                            key=lambda pool: ((existing.get(pool) or {}).get("updatedAt") or 0, pool))
+        result = {"requested": min(len(candidates), limit), "updated": 0, "failed": 0}
+        for pool in candidates[:limit]:
+            if self.replay_under_pressure():
+                break
+            pool_row = self.pools[pool]
+            floor = max(0, int(pool_row["streamBackfillFromBlock"]))
+            state = existing.get(pool) or {}
+            previous = state.get("block") if state.get("fromBlock") == floor else None
+            try:
+                verification_block = pool_row.get("verificationBlock")
+                verification_hash = str(pool_row.get("verificationBlockHash") or "").lower()
+                if isinstance(verification_block, int) and HEX_HASH.fullmatch(verification_hash):
+                    confirmed = await self.rpc("eth_getBlockByNumber", [hex(verification_block), False])
+                    if not confirmed:
+                        raise ValueError("pool-verification-anchor-unavailable")
+                    if str(confirmed.get("hash") or "").lower() != verification_hash:
+                        if pool_row.get("gapCandidateId"):
+                            system = await store("system")
+                            await system.patch_fact("discovery-pool-gap", pool_row["gapCandidateId"], {
+                                "status": "retry", "nextRetryAt": now_ms() + 60_000,
+                                "reason": "verification-block-reorg",
+                            })
+                        await self.s.patch_fact("pool", pool, {
+                            "verificationStatus": "reorged", "verificationReorgAt": now_ms()})
+                        pool_row["verificationStatus"] = "reorged"
+                        for relation in self.relations.get(pool, []):
+                            await self.s.patch_fact("relation", relation["id"], {
+                                "status": "invalid", "level": None,
+                                "evidenceStatus": "verification-block-reorg",
+                                "verificationStatus": "reorged", "liquidityUsd": None,
+                                "liquidityAt": None, "checkedAt": now_ms(),
+                            })
+                        self.pending_pools.discard(pool)
+                        result["failed"] += 1
+                        continue
+                if isinstance(previous, int) and previous >= floor:
+                    canonical = await self.rpc("eth_getBlockByNumber", [hex(previous), False])
+                    if not canonical or str(canonical.get("hash") or "").lower() != state.get("hash"):
+                        previous = None  # Recheck the entire bounded interval after a reorg.
+                start = previous + 1 if isinstance(previous, int) else floor
+                if start > height:
+                    if pool in self.subscribed_pools:
+                        await self.s.put("pool-stream-coverage", pool, {
+                            "pool": pool, "fromBlock": floor, "throughBlock": previous,
+                            "observedAt": now_ms(), "coverage": "since-verification"})
+                        self.pending_pools.discard(pool)
+                        result["updated"] += 1
+                    continue
+                end = min(height, start + (300 if self.chain == "56" else 100) - 1)
+                before = await self.rpc("eth_getBlockByNumber", [hex(end), False])
+                if not before or not before.get("hash"):
+                    raise ValueError("pool-backfill-anchor-unavailable")
+                await self.wait_for_live()
+                if self.replay_under_pressure():
+                    break
+                logs = await self.rpc("eth_getLogs", [{"fromBlock": hex(start), "toBlock": hex(end),
+                    "address": pool, "topics": [TOPICS]}])
+                if not isinstance(logs, list):
+                    raise ValueError("pool-backfill-invalid-range")
+                canonical_hashes = {}
+                for log in logs:
+                    if (not isinstance(log, dict) or address(log.get("address")) != pool
+                            or log.get("removed") or not HEX_HASH.fullmatch(str(log.get("blockHash") or ""))
+                            or not HEX_HASH.fullmatch(str(log.get("transactionHash") or ""))
+                            or not isinstance(log.get("topics"), list) or not log["topics"]
+                            or str(log["topics"][0]).lower() not in TOPIC_SET
+                            or not HEX_DATA.fullmatch(str(log.get("data") or ""))):
+                        raise ValueError("pool-backfill-malformed-log")
+                    topic = str(log["topics"][0]).lower()
+                    expected_topics = 1 if topic == SYNC_V2.lower() else 3
+                    expected_data_bytes = 64 if topic == SYNC_V2.lower() else 160 if topic == SWAP_V3.lower() else 128
+                    if (len(log["topics"]) != expected_topics
+                            or any(not HEX_HASH.fullmatch(str(item)) for item in log["topics"])
+                            or len(log["data"]) != 2 + 2 * expected_data_bytes):
+                        raise ValueError("pool-backfill-malformed-log")
+                    try:
+                        log_index = number(log["logIndex"])
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise ValueError("pool-backfill-malformed-log") from exc
+                    if log_index < 0:
+                        raise ValueError("pool-backfill-malformed-log")
+                    block = number(log["blockNumber"])
+                    block_hash = str(log["blockHash"]).lower()
+                    if not start <= block <= end or (block in canonical_hashes and canonical_hashes[block] != block_hash):
+                        raise ValueError("pool-backfill-noncanonical-log")
+                    canonical_hashes[block] = block_hash
+                for index, log in enumerate(sorted(logs, key=lambda item: (number(item["blockNumber"]),
+                        number(item.get("transactionIndex", "0x0")), number(item["logIndex"])))):
+                    if index % 8 == 0:
+                        await self.wait_for_live()
+                    else:
+                        await asyncio.sleep(0)
+                    if self.replay_under_pressure():
+                        return result
+                    await self.process_log({**log, "_receivedAt": now_ms()})
+                after = await self.rpc("eth_getBlockByNumber", [hex(end), False])
+                if not after or str(after.get("hash") or "").lower() != str(before["hash"]).lower():
+                    raise RuntimeError("pool-backfill-reorg-during-range")
+                # Query canonical headers for stored log blocks instead of
+                # trusting the getLogs response as its own reorg proof.
+                await self.retract_orphans(start, end)
+                await self.s.put("pool-stream-backfill", pool, {
+                    "pool": pool, "fromBlock": floor, "block": end,
+                    "hash": str(after["hash"]).lower(), "updatedAt": now_ms(),
+                    "status": "catching-up" if end < height or pool not in self.subscribed_pools else "complete",
+                    "nextRetryAt": 0, "failureCount": 0, "lastError": None})
+                result["updated"] += 1
+                if end == height and pool in self.subscribed_pools:
+                    await self.s.put("pool-stream-coverage", pool, {
+                        "pool": pool, "fromBlock": floor, "throughBlock": end,
+                        "observedAt": now_ms(), "coverage": "since-verification"})
+                    self.pending_pools.discard(pool)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures = min(8, int(state.get("failureCount") or 0) + 1)
+                await self.s.patch_fact("pool-stream-backfill", pool, {
+                    "pool": pool, "fromBlock": floor, "failureCount": failures,
+                    "nextRetryAt": now_ms() + min(3_600_000, 30_000 * 2 ** (failures - 1)),
+                    "lastError": type(exc).__name__, "lastErrorAt": now_ms(),
+                })
+                result["failed"] += 1
+        return result
+
     def _paused_replay_result(self, lane, head, processed_block):
         self.scan_page_metrics[lane]["pausedForLiveAt"] = now_ms()
         return {'caughtUp': False, 'head': head, 'processedBlock': processed_block}
@@ -1304,17 +1450,24 @@ class ChainPoolStream:
                 previous = rewind
                 anchors = [a for a in anchors if a["block"] <= rewind]
         start = int(previous) + 1 if previous is not None else max(0, height - initial_depth)
-        pending = set(self.pending_pools) if lane == "pools" else set()
+        pending = {pool for pool in self.pending_pools
+                   if not isinstance((self.pools.get(pool) or {}).get("streamBackfillFromBlock"), int)} if lane == "pools" else set()
         if pending:
-            # A newly discovered pool gets an explicit observed-history start.
-            # Re-scan a short overlap; existing market/log keys are idempotent.
+            # Older discovery sources lack a pre-proof block. Their overlap
+            # remains explicitly bounded and is never described as full history.
             start = min(start, max(0, height - 32))
+            if isinstance(previous, int) and start <= previous:
+                # The durable cursor is about to move back. Drop anchors from
+                # its former future so reorg recovery cannot jump over the
+                # unfinished pool-specific replay interval.
+                anchors = [anchor for anchor in anchors if anchor["block"] < start]
         lane_coverage_from = current.get("coverageFrom")
         if lane_coverage_from is None:
             lane_coverage_from = start
         if lane == "pools" and self.coverage_from is None:
             self.coverage_from = lane_coverage_from
-        addresses = sorted(self.pools)
+        addresses = sorted(pool for pool, row in self.pools.items()
+                           if row.get("verificationStatus") != "reorged")
         processed_block = current.get("block")
         if not addresses:
             return {'caughtUp': True, 'head': height, 'processedBlock': previous}
@@ -1494,6 +1647,7 @@ class ChainPoolStream:
                     'processedBlock': historical.get('block')}
         head = await self.rpc("eth_getBlockByNumber", ["latest", False])
         height = number(head["number"])
+        await self.backfill_pending_pools(head, limit=2)
         historical_block = historical.get("block")
         if self.replay_under_pressure():
             return {'caughtUp': False, 'head': height, 'processedBlock': historical_block}
@@ -1690,8 +1844,10 @@ class ChainPoolStream:
                         await self.recover_live_queue(reader)
                         await self.ws_call(ws, "eth_subscribe", ["newHeads"])
                         pools = sorted(self.pools)
+                        self.subscribed_pools = set()
                         for offset in range(0, len(pools), 64):
                             await self.ws_call(ws, "eth_subscribe", ["logs", {"address": pools[offset:offset + 64], "topics": [TOPICS]}])
+                            self.subscribed_pools.update(pools[offset:offset + 64])
                         self.status = "catching-up"
                         self.schedule_status_fact(force=True)
                         replay = asyncio.create_task(self.reconcile())
@@ -1718,6 +1874,7 @@ class ChainPoolStream:
                     self.reconnects += 1
                     self.schedule_status_fact(type(error).__name__+":"+str(error)[:180], force=True)
                 finally:
+                    self.subscribed_pools.clear()
                     if self.retry_event is not None or not self.queue.empty():
                         self.recovery_needed = True
                     self.ws = None

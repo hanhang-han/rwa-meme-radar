@@ -41,6 +41,9 @@ class DiscoveryCoverageTests(unittest.IsolatedAsyncioTestCase):
         result = compare_pairs(indexed, [{"pool": POOL, "token0": STOCK, "token1": OTHER,
                                           "creationStatus": "orphaned"}])
         self.assertEqual(result["missing"], 1)
+        result = compare_pairs(indexed, [{"pool": POOL, "token0": STOCK, "token1": OTHER,
+                                          "verificationStatus": "reorged"}])
+        self.assertEqual(result["missing"], 1)
         result = compare_pairs(indexed, [{"pool": POOL, "token0": OTHER, "token1": STOCK}])
         self.assertEqual(result["covered"], 1)
 

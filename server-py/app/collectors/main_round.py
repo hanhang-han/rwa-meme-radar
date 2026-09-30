@@ -178,6 +178,37 @@ def _f(v):
         return None
 
 
+def _pool_block_reason(pool: dict | None, relation: dict | None = None) -> str | None:
+    """A liquidity or identity rescan cannot repair revoked chain evidence."""
+    pool, relation = pool or {}, relation or {}
+    if (pool.get("verificationStatus") == "reorged"
+            or relation.get("verificationStatus") == "reorged"):
+        return "verification-block-reorg"
+    if (pool.get("creationStatus") == "orphaned"
+            or relation.get("confirmationStatus") == "orphaned"):
+        return "creation-orphaned"
+    return None
+
+
+async def _invalidate_blocked_relation(s, relation_id: str, pool: dict | None) -> bool:
+    """Keep a quarantined pool's relation invalid until chain replay repairs it."""
+    current = await s.get("relation", relation_id)
+    reason = _pool_block_reason(pool, current)
+    if not reason:
+        return False
+    if current:
+        patch = {"status": "invalid", "level": None,
+                 "pairLiquidityUsd": None, "validUntil": None,
+                 "liquidityUsd": None, "liquidityAt": None,
+                 "evidenceStatus": reason, "checkedAt": now_ms()}
+        if reason == "verification-block-reorg":
+            patch["verificationStatus"] = "reorged"
+        else:
+            patch["confirmationStatus"] = "orphaned"
+        await s.patch_fact("relation", relation_id, patch)
+    return True
+
+
 async def emit_relation_event(s, relation: dict, kind: str, label: str, symbol: str | None = None) -> str:
     """Persist and publish one relationship transition under the same ID."""
     at = int(relation.get("checkedAt") or now_ms())
@@ -216,6 +247,10 @@ async def emit_relation_event(s, relation: dict, kind: str, label: str, symbol: 
 
 async def emit_candidate_event(s, asset):
     """A durable pending marker bridges crashes between asset/event writes."""
+    if asset.get("historicalDiscovery"):
+        if asset.get("discoveryEventPending"):
+            await s.patch_fact("asset", asset["token"], {"discoveryEventPending": False})
+        return
     if asset.get("kind") != "candidate" or not asset.get("discoveryEventPending"):
         return
     at = int(asset.get("firstSeen") or now_ms())
@@ -278,8 +313,27 @@ async def scan_pools(s, address: str, stocks: list[dict], block_hex: str):
             })
             continue
         try:
+            prior_pool = await s.get("pool", pool_addr) or {}
+            if reason := _pool_block_reason(prior_pool):
+                scan["status"] = "partial"
+                scan["unsupportedPools"] += 1
+                await s.put("pool-error", pool_addr, {
+                    "pool": pool_addr, "queryToken": address, "checkedAt": now_ms(),
+                    "reason": reason, "classification": "quarantined",
+                })
+                continue
             checked = await verify_pool(pool_addr, stocks)
-            scan["verifiedPools"] += 1
+            # A replay can mark the anchor reorged while RPC verification is
+            # in flight. Re-read the durable verdict before any write.
+            prior_pool = await s.get("pool", pool_addr) or {}
+            if reason := _pool_block_reason(prior_pool):
+                scan["status"] = "partial"
+                scan["unsupportedPools"] += 1
+                await s.put("pool-error", pool_addr, {
+                    "pool": pool_addr, "queryToken": address, "checkedAt": now_ms(),
+                    "reason": reason, "classification": "quarantined",
+                })
+                continue
             pool_fact = {
                 "pool": pool_addr, "queryToken": address, "checkedAt": now_ms(), "block": block_int,
                 "token0": checked["token0"], "token1": checked["token1"],
@@ -289,16 +343,34 @@ async def scan_pools(s, address: str, stocks: list[dict], block_hex: str):
                 "amounts": pool_row.get("liquidityAmount") if isinstance(pool_row.get("liquidityAmount"), list) else [],
                 "name": str(pool_row.get("pool") or ""),
             }
-            # OKX liquidity polling updates the same fact as FactoryCreated
-            # discovery. Keep canonical creation evidence across a rescan;
-            # scan timestamps must never replace the on-chain creation time.
-            prior_pool = await s.get("pool", pool_addr) or {}
-            for field in ("poolCreatedAt", "discoveredAt", "creationTx", "creationBlock",
-                          "creationBlockHash", "creationLogIndex", "creationStatus",
-                          "factoryEventId", "factory"):
-                if field in prior_pool:
-                    pool_fact[field] = prior_pool[field]
-            await s.put("pool", pool_addr, pool_fact)
+            observed_liquidity = pool_fact["liquidityUsd"]
+            # A liquidity scan owns only its observation fields. Factory
+            # creation evidence and independently verified historical-pool
+            # metadata must survive routine OKX rescans and concurrent writes.
+            if prior_pool.get("protocol") and (prior_pool.get("verificationSource")
+                                               or prior_pool.get("factoryEventId")
+                                               or not pool_fact["protocol"]):
+                pool_fact["protocol"] = prior_pool["protocol"]
+            for field in ("liquidityUsd", "feePct"):
+                if pool_fact[field] is None:
+                    del pool_fact[field]
+            for field in ("amounts", "name"):
+                if not pool_fact[field]:
+                    del pool_fact[field]
+            pool_fact = await s.patch_fact("pool", pool_addr, pool_fact)
+            if reason := _pool_block_reason(pool_fact):
+                scan["status"] = "partial"
+                scan["unsupportedPools"] += 1
+                await s.put("pool-error", pool_addr, {
+                    "pool": pool_addr, "queryToken": address, "checkedAt": now_ms(),
+                    "reason": reason, "classification": "quarantined",
+                })
+                continue
+            scan["verifiedPools"] += 1
+            # A repair candidate must pass explicit Meme classification.
+            # Legacy scans without a classification retain their old route.
+            if pool_fact.get("classification") and pool_fact["classification"] != "stock-meme":
+                continue
             rel = checked.get("relation")
             if not rel:
                 continue
@@ -322,9 +394,7 @@ async def scan_pools(s, address: str, stocks: list[dict], block_hex: str):
                 continue
             relation_id = f"{CHAIN.get()}:{pool_addr}:{token}:{stock_addr}"
             previous = await s.get("relation", relation_id)
-            # An orphaned creation cannot be made current again by a delayed
-            # liquidity response. A new canonical factory event must repair it.
-            if (previous and previous.get("confirmationStatus") == "orphaned") or pool_fact.get("creationStatus") == "orphaned":
+            if await _invalidate_blocked_relation(s, relation_id, await s.get("pool", pool_addr)):
                 continue
             stock_balance = None
             try:
@@ -338,25 +408,35 @@ async def scan_pools(s, address: str, stocks: list[dict], block_hex: str):
                 "pool": pool_addr, "token0": checked["token0"].lower(), "token1": checked["token1"].lower(),
                 "wrapper": rel["wrapper"], "protocol": pool_fact["protocol"],
                 "firstSeen": (previous or {}).get("firstSeen") or now_ms(), "checkedAt": now_ms(),
-                "block": block_int, "liquidityUsd": pool_fact["liquidityUsd"],
-                "liquidityAt": pool_fact["checkedAt"], "stockBalance": stock_balance,
-                "feePct": pool_fact["feePct"], "amounts": pool_fact["amounts"],
+                "block": block_int, "stockBalance": stock_balance,
                 "status": "verified", "error": None,
             }
+            if observed_liquidity is not None:
+                relation.update({"liquidityUsd": observed_liquidity,
+                                 "liquidityAt": pool_fact["checkedAt"]})
+            for field in ("feePct", "amounts"):
+                if field in pool_fact:
+                    relation[field] = pool_fact[field]
+            if (previous or {}).get("historicalDiscovery") or (
+                    pool_fact.get("verificationSource") == "index-plus-factory-getter"
+                    and not pool_fact.get("factoryEventId")):
+                relation.update({"historicalDiscovery": True,
+                                 "creationAnnouncementPending": False})
             for field in ("poolCreatedAt", "discoveredAt", "creationTx", "creationBlock",
                           "creationBlockHash", "creationLogIndex", "confirmationStatus",
                           "factoryEventId"):
-                source = previous or pool_fact
-                if field in source:
-                    relation[field] = source[field]
-                elif field in pool_fact:
+                if field not in (previous or {}) and field in pool_fact:
                     relation[field] = pool_fact[field]
-            if "confirmationStatus" not in relation and pool_fact.get("creationStatus"):
+            if "confirmationStatus" not in (previous or {}) and pool_fact.get("creationStatus"):
                 relation["confirmationStatus"] = pool_fact["creationStatus"]
-            relation.update(assess_pool_relation(relation, relation["checkedAt"]))
-            await s.put("relation", relation_id, relation)
+            relation.update(assess_pool_relation({**(previous or {}), **relation}, relation["checkedAt"]))
+            if await _invalidate_blocked_relation(s, relation_id, await s.get("pool", pool_addr)):
+                continue
+            relation = await s.patch_fact("relation", relation_id, relation)
+            if await _invalidate_blocked_relation(s, relation_id, await s.get("pool", pool_addr)):
+                continue
             if (not previous or previous.get("status") == "invalid"
-                    or previous.get("level") != relation.get("level")):
+                    or previous.get("level") != relation.get("level")) and not relation.get("historicalDiscovery"):
                 qualified = relation.get("level") == "A"
                 await emit_relation_event(
                     s,
@@ -408,6 +488,10 @@ async def _block_hex() -> str:
 async def _pool_quote(s, rel, block_number, block_at):
     """Read actual pool state; a wrapper unit is never assumed to be one stock."""
     from ..pool_quotes import pool_ratio
+    current = await s.get("relation", rel["id"])
+    pool = await s.get("pool", rel["pool"])
+    if _pool_block_reason(pool, current or rel) or (current and current.get("status") != "verified"):
+        return
     d0, d1 = await asyncio.gather(cached_decimals(rel["token0"]), cached_decimals(rel["token1"]))
     if d0 is None or d1 is None:
         raise ValueError("token-decimals-unavailable")
@@ -472,6 +556,10 @@ async def _pool_quote(s, rel, block_number, block_at):
         "priceAt": price_at, "valuationAt": now, "liquidityAt": min(block_at, price_at),
         "liquidityMethod": valuation_method}
     valuation.update(assess_pool_relation({**rel, **valuation}, now))
+    current = await s.get("relation", rel["id"])
+    if (_pool_block_reason(await s.get("pool", rel["pool"]), current or rel)
+            or (current and current.get("status") != "verified")):
+        return
     await s.patch_fact("relation", rel["id"], valuation)
 
 
@@ -485,7 +573,10 @@ async def refresh_liquidity():
         for rel in await s.all("relation"):
             job = queue.get(rel.get("pool"), {})
             interval = 30_000 if rel.get("token") in watched or rel.get("stock") in watched else 240_000
-            if rel.get("status") == "verified" and due(job, now, interval):
+            if (rel.get("status") == "verified"
+                    and rel.get("verificationStatus") != "reorged"
+                    and rel.get("confirmationStatus") != "orphaned"
+                    and due(job, now, interval)):
                 work.append((job.get("lastAttemptAt") or 0, cid, rel))
     work.sort(key=lambda item: (item[0], item[1], item[2]["pool"]))
     blocks = {}
@@ -541,7 +632,15 @@ async def refresh_main_round():
             for rel in stale[:16]:
                 totals["requested"] += 1
                 try:
+                    if await _invalidate_blocked_relation(s, rel["id"], await s.get("pool", rel["pool"])):
+                        await checkpoint(s, "verify", rel["id"], success=True)
+                        totals["skipped"] += 1
+                        continue
                     checked = await verify_pool(rel["pool"], stocks)
+                    if await _invalidate_blocked_relation(s, rel["id"], await s.get("pool", rel["pool"])):
+                        await checkpoint(s, "verify", rel["id"], success=True)
+                        totals["skipped"] += 1
+                        continue
                     actual = checked.get("relation")
                     valid = bool(actual and actual["token"].lower() == rel["token"].lower()
                                  and actual["stock"]["tokenContractAddress"].lower() == rel["stock"].lower()
@@ -552,11 +651,19 @@ async def refresh_main_round():
                     patch = {"status": status, "error": None if valid else "pair token identity changed",
                              "checkedAt": now_ms(), "block": int(block, 16)}
                     patch.update(assess_pool_relation({**rel, **patch}, patch["checkedAt"]))
+                    if await _invalidate_blocked_relation(s, rel["id"], await s.get("pool", rel["pool"])):
+                        await checkpoint(s, "verify", rel["id"], success=True)
+                        totals["skipped"] += 1
+                        continue
                     updated = await s.patch_fact("relation", rel["id"], patch)
+                    if await _invalidate_blocked_relation(s, rel["id"], await s.get("pool", rel["pool"])):
+                        await checkpoint(s, "verify", rel["id"], success=True)
+                        totals["skipped"] += 1
+                        continue
                     await checkpoint(s, "verify", rel["id"], success=True)
                     totals["accepted"] += 1
                     totals["updated"] += 1
-                    if status != rel.get("status") or patch.get("level") != rel.get("level"):
+                    if (status != rel.get("status") or patch.get("level") != rel.get("level")) and not updated.get("historicalDiscovery"):
                         qualified = patch.get("level") == "A"
                         await emit_relation_event(s, updated, "verified" if qualified else "invalidated" if not valid else "pair-observed",
                                                   "官方股票配对池已核验" if qualified else "配对池证据或资格变化，标记待核验")

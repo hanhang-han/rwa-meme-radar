@@ -71,7 +71,9 @@ const nativePool=computed(()=>{
 function selectNativePool(poolId){choice.value=`pool:${poolId}`;}
 const trades=computed(()=>detailTrades(data.value,marketSelection.value));
 const tradeScopeLabel=computed(()=>selectedPoolId.value?tr('仅此池成交','Trades from this pool only'):marketSelection.value.kind==='exchange'?tr('仅此交易所市场成交','Trades from this exchange market only'):tr('全池最近成交；与图表市场可能不同','Recent trades across all pools; the chart may use another market'));
-const chartBaseLabel=computed(()=>`${asset.value.primaryQuote?.provider??asset.value.fieldSources?.price??asset.value.provider??tr('主行情','Primary quote')} · ${asset.value.priceCurrency??'—'}`);
+// The headline quote and the default chart can have different providers.
+// CandleChart shows the actual chart source and unit after data is loaded.
+const chartBaseLabel=computed(()=>tr('默认图表市场','Default chart market'));
 const holderSourceTitle=computed(()=>`${data.value?.holdersSummary?.distribution?.provider??'—'} · ${date(data.value?.holdersSummary?.distribution?.checkedAt)}`);
 function tradeSourceTitle(t){return `${t.source??t.provider??t.venue??'—'} · ${date(t.t)}`;}
 const tradeStatus=computed(()=>{now.value;const lag=Math.max(0,...trades.value.slice(0,1).map(t=>Number(t.delayMs??0)));return lag>30000?tr(`延迟约 ${Math.ceil(lag/1000)} 秒`,`Delayed ~${Math.ceil(lag/1000)}s`):dash.hasProjectionStream?tr('实时推送已连接','Live stream connected'):tr('定时更新','Periodic updates');});
