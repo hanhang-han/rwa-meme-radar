@@ -41,6 +41,7 @@ class ScopedDetailReads(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p['pool'] for p in await token_pools(self.s, MEME)], [POOL])
 
         with patch.object(token_api, 'store', AsyncMock(return_value=self.s)), \
+             patch.object(token_api, 'read_token_projection', AsyncMock(return_value={'asset': {'token': MEME, 'chainId': '196', 'kind': 'candidate'}, 'stock': None, 'relations': [relation]})), \
              patch.object(misc, 'store', AsyncMock(return_value=self.s)), \
              patch.object(state, 'reload_if_stale', AsyncMock(side_effect=AssertionError('full reload'))) as reload, \
              patch.object(self.s, 'all', AsyncMock(side_effect=AssertionError('all facts'))), \

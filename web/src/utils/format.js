@@ -73,7 +73,7 @@ export const short = (a) => (a ? String(a).length > 12 ? String(a).slice(0, 6) +
 
 export const fresh = (at, ageMs = 900000) => !!at && Date.now() - at < ageMs;
 
-export const CHAIN_NAMES = { 196: 'X Layer', 56: 'BNB Smart Chain', 4663: 'Robinhood Chain' };
+export const CHAIN_NAMES = { 196: 'X Layer', 56: 'BNB Chain', 4663: 'Robinhood Chain', 5042:'Arc' };
 export const chainName = (a) => CHAIN_NAMES[a?.chainId ?? a?.chain ?? '196'] ?? '—';
 
 export const chain = (a) => String(a?.chainId ?? a?.chain ?? '196');
@@ -88,7 +88,7 @@ export const explorer = (a, type = 'address', cid = '196') =>
 // Router paths (usable with RouterLink :to and router.push). For plain
 // <a href> anchors use hashLink below.
 export const detailLink = (a) =>
-  `/detail/${encodeURIComponent(chain(a))}/${encodeURIComponent(a.token)}`;
+  `/asset/${encodeURIComponent(chain(a))}/${encodeURIComponent(a.token)}`;
 
 export const pairLink = (r) =>
   `/pair/${encodeURIComponent(chain(r))}/${encodeURIComponent(r.stock)}?pool=${encodeURIComponent(r.pool)}`;

@@ -11,7 +11,7 @@ import os
 import signal
 from pathlib import Path
 
-from .config import load_env
+from .config import bounded_env_int, load_env
 
 LIVE_BACKLOG_QUEUE_DEPTH = 32
 
@@ -69,6 +69,7 @@ async def run() -> None:
     from .collectors import binance as binance_collector
     from .collectors import binance_alpha, chain_stream
     from .collectors.factory_discovery import FactoryDiscovery
+    from .collectors.risk_enrichment import refresh_risk_enrichment
     from .collectors.live_quotes import refresh_live_quotes, refresh_base_candidates, refresh_base_stocks
     from .collectors.main_round import refresh_liquidity, refresh_main_round, refresh_discovery
     from .collectors.okx_catalogue import sync_okx_catalogues
@@ -99,17 +100,21 @@ async def run() -> None:
     binance_collector.start_stream()
     binance_alpha.start_stream()
     chain_stream.start_streams()
-    # Factory events use the same conservative X Layer RPC gate as the pool
+    # Factory events share each chain's conservative RPC gate with its pool
     # stream. They are distinct from OKX's five-minute, quota-limited scans.
-    xlayer_stream = chain_stream.stream_for('196')
-    if xlayer_stream and os.environ.get('XLAYER_FACTORY_DISCOVERY_ENABLED', 'true').lower() != 'false':
+    for factory_chain, prefix, task_name in (('196', 'XLAYER', 'factoryDiscovery'),
+                                             ('56', 'BSC', 'factoryDiscoveryBsc')):
+        factory_stream = chain_stream.stream_for(factory_chain)
+        if not factory_stream or os.environ.get(prefix + '_FACTORY_DISCOVERY_ENABLED', 'true').lower() == 'false':
+            continue
         # Bootstrap just behind the tip so fresh pools are not held behind a
         # long historical catch-up; the durable cursor still fills every gap
         # after this point across later restarts and provider outages.
-        factory = FactoryDiscovery(await store('196'), xlayer_stream.rpc, initial_lookback_blocks=160)
+        factory = FactoryDiscovery(await store(factory_chain), factory_stream.rpc, initial_lookback_blocks=160,
+            confirmations=bounded_env_int(prefix + '_FACTORY_CONFIRMATIONS', 6, 1, 100))
 
-        async def factory_round():
-            if xlayer_stream.http is None:
+        async def factory_round(factory=factory, factory_stream=factory_stream):
+            if factory_stream.http is None:
                 return {'requested': 0, 'accepted': 0, 'skipped': 1}
             scan = await factory.run_once(max_ranges=2)
             processed = await factory.process_confirmed(limit=4)
@@ -120,7 +125,7 @@ async def run() -> None:
                 'failed': processed['failed'], 'skipped': processed['waitingCatalogue'],
             }
 
-        spawn_loop('factoryDiscovery', 10, factory_round, 15)
+        spawn_loop(task_name, 10, factory_round, 15 if factory_chain == '196' else 75)
     # CPU-heavy projections run in app.projection_worker, on another event loop.
     async def quote_round(fn):
         with quote_store_scope():
@@ -152,6 +157,15 @@ async def run() -> None:
     spawn_loop("discovery", 300, refresh_discovery, 50,
                resume_stagger_s=10, **background_gate)
     spawn_loop("hotTrades", 300, refresh_hot_trades, 60)
+    if os.environ.get('GOPLUS_ENABLED', 'true').lower() != 'false':
+        spawn_loop("riskEnrichment", 300, refresh_risk_enrichment, 80,
+                   resume_stagger_s=15, **background_gate)
+
+    # Alert delivery is independent of ingestion and remains absent without
+    # both bot settings; account binding still requires a private /start code.
+    from . import telegram_alerts
+    if telegram_alerts.configured():
+        spawn_loop('telegramAlerts', 5, telegram_alerts.tick, 5)
 
     async def maintenance():
         import shutil

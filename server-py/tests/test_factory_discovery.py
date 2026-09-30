@@ -9,7 +9,7 @@ from app.db import ResearchStore
 from app.collectors.factory_discovery import (
     FACTORIES, FACTORY_SELECTOR, GET_PAIR_SELECTOR, V2_FACTORY,
     V2_PROOF_POOL, V3_FACTORY, V3_PROOF_POOL, FactoryDiscovery,
-    decode_factory_log,
+    BSC_FACTORIES, BSC_PROOF_TOKENS, GET_POOL_SELECTOR, decode_factory_log,
 )
 
 
@@ -107,6 +107,91 @@ class DecodeFactoryTests(unittest.TestCase):
                 decode_factory_log(factory, {**log, "address": TOKEN0}, header, 14, 6, 1234)
             with self.assertRaises(ValueError):
                 decode_factory_log(factory, {**log, "blockHash": "0x" + "f" * 64}, header, 14, 6, 1234)
+
+    def test_wrong_chain_factory_cannot_be_accepted(self):
+        fake = FakeXLayer()
+        log = fake.log(BSC_FACTORIES[0], 14, POOL_V3)
+        header = {"block": 14, "hash": fake.hashes[14], "timestamp": 1_790_000_028}
+        with self.assertRaisesRegex(ValueError, 'factory-not-registered-for-chain'):
+            decode_factory_log(BSC_FACTORIES[0], log, header, 14, 6, 1234)
+        row = decode_factory_log(BSC_FACTORIES[0], log, header, 14, 6, 1234, '56')
+        self.assertEqual(row['chainId'], '56')
+        self.assertTrue(row['id'].startswith('56:'))
+
+
+class FakeBsc(FakeXLayer):
+    def __init__(self):
+        super().__init__()
+        self.bad_token = False
+
+    async def __call__(self, method, params):
+        if method == 'eth_chainId':
+            return '0x38'
+        if method == 'eth_call':
+            call = params[0]
+            for factory in BSC_FACTORIES:
+                if call['to'] == factory.proof_pool:
+                    if call['data'] == FACTORY_SELECTOR:
+                        return word(factory.address)
+                    if call['data'] in ('0x0dfe1681', '0xd21220a7'):
+                        return word(TOKEN0 if self.bad_token else BSC_PROOF_TOKENS[call['data'] == '0xd21220a7'])
+                if call['to'] == factory.address and call['data'].startswith((GET_PAIR_SELECTOR, GET_POOL_SELECTOR)):
+                    return word(factory.proof_pool)
+        return await super().__call__(method, params)
+
+
+class BscFactoryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(self.tmp.name, 'research.sqlite')
+        self.bsc = await ResearchStore(path, '56').connect()
+        self.xlayer = await ResearchStore(path, '196').connect()
+
+    async def asyncTearDown(self):
+        await self.bsc.close()
+        await self.xlayer.close()
+        self.tmp.cleanup()
+
+    async def test_independent_cursors_confirmation_and_reorg(self):
+        bsc, xlayer = FakeBsc(), FakeXLayer()
+        bsc.logs = [bsc.log(BSC_FACTORIES[1], 12, POOL_V2)]
+        xlayer.logs = [xlayer.log(FACTORIES[1], 12, POOL_V2)]
+        b = FactoryDiscovery(self.bsc, bsc, start_block=10, batch_blocks=3, confirmations=2)
+        x = FactoryDiscovery(self.xlayer, xlayer, start_block=10, batch_blocks=3, confirmations=2)
+        await b.run_once(max_ranges=2)
+        await x.run_once(max_ranges=2)
+        self.assertEqual((await b.recent())[0]['chainId'], '56')
+        self.assertEqual((await x.recent())[0]['chainId'], '196')
+        self.assertNotEqual((await b.recent())[0]['id'], (await x.recent())[0]['id'])
+        bsc.hashes[14] = '0x' + 'f' * 64
+        await b.run_once(max_ranges=2)
+        self.assertEqual((await x._cursor())['hash'], xlayer.hashes[14])
+        self.assertEqual((await b._cursor())['hash'], bsc.hashes[14])
+
+    async def test_bsc_identity_mismatch_stops_before_any_log_scan(self):
+        rpc = FakeBsc()
+        rpc.bad_token = True
+        watcher = FactoryDiscovery(self.bsc, rpc, start_block=10)
+        with self.assertRaisesRegex(RuntimeError, 'factory-proof-token-mismatch'):
+            await watcher.run_once()
+        self.assertFalse(watcher.verified)
+        self.assertFalse(any(method == 'eth_getLogs' for method, _ in rpc.calls))
+        self.assertIsNone(await watcher._cursor())
+
+    async def test_bsc_match_keeps_chain_and_pancake_protocol(self):
+        rpc = FakeBsc()
+        rpc.logs = [rpc.log(BSC_FACTORIES[1], 12, POOL_V2, token1=OFFICIAL_STOCK)]
+        await self.bsc.put('stock', OFFICIAL_STOCK, {
+            'tokenContractAddress': OFFICIAL_STOCK, 'stockCode': 'AAFL'})
+        watcher = FactoryDiscovery(self.bsc, rpc, start_block=10, batch_blocks=3, confirmations=2)
+        await watcher.run_once(max_ranges=2)
+        result = await watcher.process_confirmed()
+        self.assertEqual(result['accepted'], 1)
+        rows = await self.bsc.all('relation')
+        self.assertEqual(rows[0]['chainId'], '56')
+        self.assertEqual(rows[0]['protocol'], 'PancakeSwap V2')
+        self.assertIsNone(rows[0]['level'])  # Liquidity still needs an observation.
+        self.assertEqual(await self.xlayer.all('relation'), [])
 
 
 class DurableFactoryTests(unittest.IsolatedAsyncioTestCase):

@@ -15,6 +15,7 @@ from .db import retry_busy_write, store, transaction_view
 from .dashboard_projection import compact_dashboard, market_dashboard, overview_dashboard, projection_key
 from .realtime_schema import enqueue_event
 from .source_snapshots import bind_snapshots
+from .market_quotes import bind_previous_quotes
 from .projection_facts import ProjectionFacts
 
 SCHEMA = 1
@@ -24,6 +25,7 @@ _tick_lock = asyncio.Lock()
 _file_signatures = {}
 _committed_projection = None
 _serialized_projection = None
+_parsed_tokens = None
 _committed_facts = None
 _building_facts = ContextVar('building_projection_facts', default=None)
 _SNAPSHOT_MAGIC = b'CRP1\x00'
@@ -210,7 +212,10 @@ def _feed_snapshot(data):
         if chain in counts and counts[chain] < 30:
             signals.append(signal)
             counts[chain] += 1
-    return {'assets': assets, 'signals': signals}
+    tracked = [{'chainId': str(a.get('chainId') or '196'), 'token': a['token'], 'symbol': a.get('symbol')}
+               for a in data.assets if a.get('token') and a.get('kind') == 'candidate'
+               and str(a.get('symbol') or '').upper() not in BASE_QUOTE_SYMBOLS]
+    return {'assets': assets, 'trackedAssets': tracked, 'signals': signals}
 
 
 async def projection_tick(force=False, expiry_ms=30_000):
@@ -277,7 +282,8 @@ async def _projection_tick_once(force=False, expiry_ms=30_000):
                 facts = await ProjectionFacts.capture(reader, prior_facts, changes)
                 binding = _building_facts.set(facts)
                 try:
-                    payload, feed = await _build_payload(reader)
+                    with bind_previous_quotes(previous):
+                        payload, feed = await _build_payload(reader)
                 finally:
                     _building_facts.reset(binding)
         # JSON comparison/encoding and full catalogue traversal never hold the
@@ -360,9 +366,13 @@ async def read_projection_json(view='full'):
                 'SELECT revision,cursor,input_cursor,built_at FROM dashboard_projection WHERE name=?',
                 (view,))).fetchone()
             current = selected is not None and tuple(selected) == tuple(full)
-            stamp = (scoped.path, id(scoped.db), view, *full, *(tuple(selected) if selected else ()))
-            if _serialized_projection and _serialized_projection[0] == stamp:
-                return _serialized_projection[1]
+            # Tape-only commits advance input_cursor without changing the
+            # published body. They must not invalidate every large JSON cache.
+            stamp = (scoped.path, id(scoped.db), view, full[0], full[1], full[3],
+                     *((selected[0], selected[1], selected[3]) if selected else ()))
+            cache = _serialized_projection if isinstance(_serialized_projection, dict) else {}
+            if view in cache and cache[view][0] == stamp:
+                return cache[view][1]
             if view == 'feed' and not current:
                 return None
             source = view if current else 'full'
@@ -373,22 +383,41 @@ async def read_projection_json(view='full'):
             full_payload = json.loads(body)
             body = _dump(overview_dashboard(full_payload) if view == 'overview'
                          else market_dashboard(full_payload))
-        _serialized_projection = (stamp, body)
+        if not isinstance(_serialized_projection, dict):
+            _serialized_projection = {}
+        _serialized_projection[view] = (stamp, body)
         return body
 
     body = await read()
     if body is None:
-        # A concurrent (older) publisher can win the optimistic commit check.
-        # Retry a bounded number of times before reporting an unavailable feed;
-        # never substitute the dashboard's globally truncated signal list.
-        for _ in range(3):
-            await projection_tick(force=True)
-            body = await read()
-            if body is not None:
-                break
-    if body is None:
-        raise RuntimeError(f'projection view unavailable: {view}')
+        # Only the projection worker may build. Concurrent first visitors must
+        # never turn a missing snapshot into N full catalogue reconstructions.
+        raise ProjectionUnavailable(f'projection view unavailable: {view}')
     return body
+
+
+class ProjectionUnavailable(RuntimeError):
+    pass
+
+
+async def read_token_projection(chain, token):
+    """Reuse one decoded/indexed canonical revision across all token pages."""
+    global _parsed_tokens
+    body = await read_projection_json('full')
+    if not _parsed_tokens or _parsed_tokens[0] is not body:
+        payload = json.loads(body)
+        unified = payload.get('unified') or {}
+        assets = {(str(r.get('chainId')), str(r.get('token') or '').lower()): r for r in unified.get('assets', [])}
+        stocks = {(str(r.get('chainId')), str(r.get('tokenContractAddress') or '').lower()): r for r in unified.get('stockTokens', [])}
+        relations = {}
+        for row in unified.get('relations', []):
+            for address in {row.get('token'), row.get('stock')} - {None}:
+                relations.setdefault((str(row.get('chainId')), str(address).lower()), []).append(row)
+        _parsed_tokens = (body, payload.get('now'), payload.get('realtime'), assets, stocks, relations)
+    _, at, realtime, assets, stocks, relations = _parsed_tokens
+    identity = (str(chain), token.lower())
+    return {'asset': assets.get(identity), 'stock': stocks.get(identity), 'relations': relations.get(identity, []),
+            'snapshotAt': at, 'realtime': realtime}
 
 
 async def read_projection():

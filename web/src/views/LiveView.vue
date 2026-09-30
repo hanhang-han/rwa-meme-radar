@@ -1,104 +1,57 @@
 <template>
-  <div>
-    <div class="hero x-hero">
-      <div class="v2-hero-copy">
-        <h2>{{ tr('市场概览', 'Market overview') }}</h2>
-        <p>{{ tr('股票主题、关联 Meme 与链上成交', 'Stock themes, related memes and onchain trades') }}</p>
-      </div>
-    </div>
-
+  <div class="home-page">
+    <div class="home-heading"><h2>{{ tr('市场概览','Market overview') }}</h2><span>{{ tr('股票主题与链上 Meme','Stock themes and on-chain memes') }}</span></div>
     <div class="kpis">
-      <KpiCard kpi-key="actionableAssets" :title="tr('活跃 Meme', 'Active memes')" :value="num(scopeMetrics.active)" :note="activeNote" href="#/meme" />
-      <KpiCard kpi-key="verifiedPools" :title="tr('股票配对池', 'Stock pairs')" :value="num(scopeMetrics.pools)" :note="deltaNote('pools') || tr('已核验配对池', 'Verified pair pools')" href="#/pair" />
-      <KpiCard kpi-key="pairedLiquidityUsd" :title="tr('配对池总流动性', 'Pair liquidity')" :value="usd(scopeMetrics.liquidity)" :note="deltaNote('liquidity') || tr('仅统计股票配对池', 'Stock pair pools only')" href="#/pair" />
-      <KpiCard kpi-key="newRelations24h" :title="tr('24h 新增配对', 'New pairs (24h)')" :value="num(scopeMetrics.newPairs)" :note="scopeMetrics.newPairs == null ? tr('创建时间未知','Creation time unknown') : deltaNote('newPairs')" href="#/events" />
+      <KpiCard kpi-key="actionableAssets" :title="tr('活跃 Meme','Active memes')" :value="num(scopeMetrics.active)" :note="tr('价格 15 分钟内 · 总流动性 ≥ $1K','Price within 15m · Total liquidity ≥ $1K')" :href="kpiHref({qualified:'1',rel:'all'})" />
+      <KpiCard kpi-key="verifiedPools" :title="tr('池子配对','Pool pairs')" :value="num(scopeMetrics.pools)" :note="tr('池估值 15 分钟内 · 流动性 ≥ $1K','Pool quote within 15m · Liquidity ≥ $1K')" :href="kpiHref({view:'pool',qualified:'1'})" />
+      <KpiCard kpi-key="pairedLiquidityUsd" :title="tr('配对池总流动性','Pair liquidity')" :value="usd(scopeMetrics.liquidity)" :note="tr('股票配对池合计','Total across stock pair pools')" :href="kpiHref({view:'pool',qualified:'1'})" />
+      <KpiCard kpi-key="newAssets24h" :title="tr('近 24h 新发现','Discovered in 24h')" :value="num(scopeMetrics.newAssets)" :note="tr('按首次收录时间统计','Counted by first indexing time')" :href="kpiHref({new:'24h',sort:'firstSeen',rel:'all',fresh:'0',showMissing:'1'})" />
     </div>
 
-    <ThemeMarketMap :theme-map="themeMap" :name-clues="nameClues" :name-clues-loading="!fullSnapshotReady" :stock-tokens="store.stockTokens" :scope="scope" :loading="!themeMapReady" />
-    <ImportantChanges :changes="importantChanges" :observations="feed.relationships" :unified="store.snapshot?.unified" :assets="store.assets" :scope="scope" :loading="!importantChangesReady" />
-
-    <section class="panel x-ai">
-      <div class="panel-head"><h2>{{ tr('今日异动', 'Today') }}</h2><time class="hint">{{ briefing?.at ? clockTime(briefing.at) : '—' }}</time></div>
-      <div v-if="briefingItems.length" class="briefing-list">
-        <article v-for="item in briefingItems" :key="item.id" class="briefing-item">
-          <RouterLink v-if="item.asset?.address && item.asset?.chainId" :to="{path:`/detail/${item.asset.chainId}/${item.asset.address}`,query:{chain:scope}}" class="briefing-asset">{{ item.asset.name || item.asset.symbol || short(item.asset.address) }} <small>{{ chainName(item.asset) }}</small></RouterLink>
-          <strong v-else>{{ item.asset?.name ?? tr('市场异动', 'Market activity') }}</strong>
-          <span>{{ briefingMessageFor(item) }}</span>
-        </article>
-      </div>
-      <div v-else-if="briefing?.items?.length" class="v2-ai-text">{{ tr('当前范围暂无符合条件的异动。', 'No qualifying changes in this scope.') }}</div>
-      <div v-else-if="briefing?.text && scope === 'all'" class="v2-ai-text">{{ briefing.text }}</div>
-      <div v-else class="v2-ai-text" role="status">{{ briefingMessage }}</div>
-      <p v-if="briefing && (briefing.stale || briefingError)" class="hint">{{ tr('上次简报 · 更新暂不可用', 'Previous briefing · update unavailable') }}</p>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head"><h2>{{ tr('热门股票', 'Trending stocks') }}</h2><RouterLink to="/stock">{{ tr('全部', 'All') }} →</RouterLink></div>
-      <div v-if="hotStocks.length" class="home-stock-grid">
-        <RouterLink v-for="card in hotStocks" :key="card.ticker" class="home-stock-card" :to="{path:'/stock',query:{chain:scope,q:card.ticker}}">
-          <strong>{{ card.ticker }} <small>{{ stockName(card.stock) }}</small></strong>
-          <span><b>{{ price(card.stock?.price,card.stock?.priceCurrency) }}</b><b :class="Number(card.stock?.change24h)>0?'up':Number(card.stock?.change24h)<0?'down':''">{{ pct(card.stock?.change24h) }}</b></span>
-          <small>{{ num(card.memes.size) }} Meme · {{ tr('关联 Meme 成交', 'Related meme volume') }} {{ usd(card.volume) }} · {{ chainName(card.stock) }} {{ card.stock?.fieldSources?.price ?? card.stock?.provider ?? tr('来源待核验', 'Source unverified') }}</small>
-          <QuoteStatus :row="card.stock" />
+    <section v-if="hotStocks.length" class="panel">
+      <div class="panel-head"><h2>{{ tr('热门股票主题','Trending stock themes') }}</h2><RouterLink :to="{path:'/stock',query:{chain:scope}}">{{ tr('全部股票','All stocks') }} →</RouterLink></div>
+      <div class="home-stock-grid">
+        <RouterLink v-for="card in hotStocks" :key="card.ticker" class="home-stock-card" :to="{path:'/stock/'+card.ticker,query:{chain:scope}}">
+          <strong>{{ card.ticker }} <small>{{ stockName(card.stock,card.ticker) }}</small></strong>
+          <span><b :title="stockQuoteTitle(card.stock)">{{ price(card.stock?.price,card.stock?.priceCurrency) }}</b><b :class="Number(card.stock?.change24h)>0?'up':Number(card.stock?.change24h)<0?'down':''">{{ pct(card.stock?.change24h) }}</b></span>
+          <small :title="tr('按币统计 24h 成交，含其他池；并非股票配对池成交。','24h token volume includes other pools; it is not stock-pair pool volume.')">{{ num(card.assetCount) }} Meme · {{ tr('关联 Meme 总成交 · 24h','Related meme total volume · 24h') }} {{ usd(card.volume) }}</small>
+          <small>{{ tr('成交覆盖','Volume coverage') }} {{ card.volumeKnown }} / {{ card.volumeTotal }}</small>
         </RouterLink>
       </div>
-      <div v-else class="x-empty">{{ tr('当前范围暂无关联股票。', 'No related stocks in this scope.') }}</div>
     </section>
 
-    <div class="x-grid v21-feed-grid">
-      <section class="panel x-feed">
-        <div class="panel-head">
-          <h2>{{ tr('实时成交', 'Live trades') }}</h2>
-          <div class="home-feed-controls">
-            <select v-model.number="minTrade" :aria-label="tr('最小成交额', 'Minimum trade amount')"><option :value="100">≥ 100 USD/USDT</option><option :value="1000">≥ 1K USD/USDT</option><option :value="10000">≥ 10K USD/USDT</option></select>
-            <select v-model="direction" :aria-label="tr('买卖方向', 'Trade direction')"><option value="all">{{ tr('全部方向', 'All directions') }}</option><option value="buy">{{ tr('买入', 'Buy') }}</option><option value="sell">{{ tr('卖出', 'Sell') }}</option></select>
-          </div>
-        </div>
-        <div class="scroll v2-feed-scroll" ref="feedScroll" @scroll="onFeedScroll" @mouseenter="feed.setPaused(true)" @mouseleave="feed.setPaused(false)">
-          <button v-if="feed.hasNew" class="v2-new-pill" @click="jumpToNew">{{ feed.newCount }} {{ tr('条新成交', 'new trades') }} ↑</button>
-          <div v-for="t in displayedTrades" :key="t.chainId + ':' + t.token + ':' + t.id" class="home-trade-row" :class="{ 'is-large': (tradeDisplayAmount(t)?.value ?? 0) >= 10000 }">
-            <time :title="date(t.t)">{{ age(t.t) }}</time>
-            <RouterLink :to="{path:'/detail/' + t.chainId + '/' + t.token,query:{chain:scope}}">{{ t.symbol || short(t.token) }}<small>{{ scope === 'all' ? chainName(t) + ' · ' : '' }}{{ tradeSource(t) }}</small></RouterLink>
-            <span :class="t.type === 'buy' ? 'up' : 'down'">{{ t.type === 'buy' ? tr('买入', 'Buy') : tr('卖出', 'Sell') }}</span>
-            <strong>{{ money(tradeDisplayAmount(t)?.value,tradeDisplayAmount(t)?.currency) }}</strong>
-            <small :title="tradeWalletTitle(t)">{{ tradeWalletLabel(t) }}</small>
-            <a v-if="t.hash" :href="explorer(t.hash,'tx',String(t.chainId))" target="_blank" rel="noopener" :aria-label="tr('查看交易', 'View transaction')">↗</a>
-          </div>
-          <div v-if="!displayedTrades.length" class="x-empty">{{ tr('当前条件下暂无成交。', 'No trades match these filters.') }}</div>
+    <ThemeMarketMap v-if="themeMap?.bubbles?.length || !themeMapReady" :theme-map="themeMap" :name-clues="nameClues" :name-clues-loading="!fullSnapshotReady" :stock-tokens="store.stockTokens" :scope="scope" :loading="!themeMapReady" @load-clues="loadMarket" />
+
+    <div class="home-market-grid" :class="{'single-column':!related.length}">
+      <section v-if="related.length" class="panel home-leaders">
+        <div class="panel-head"><h2>{{ tr('Meme 24h 成交榜','Meme 24h volume') }}</h2><RouterLink :to="{path:'/meme',query:{chain:scope,rel:'all',sort:'volume24h',rank:'volume24h',category:'meme',fresh:'0',showMissing:'1'}}">{{ tr('全部','All') }} →</RouterLink></div>
+        <p class="home-subline">{{ tr('显示','Showing') }} {{ related.length }} / {{ tr('共','of') }} {{ leaderTotal }} · USD</p>
+        <div class="home-rank-head"><span>#</span><span>Meme</span><span>{{ tr('股票','Stock') }}</span><span>{{ tr('风险','Risk') }}</span><span>{{ tr('24h 成交','24h volume') }}</span></div>
+        <div v-for="(asset,index) in related" :key="asset.chainId+':'+asset.token" class="home-leader-row">
+          <span class="rank-position">{{ index+1 }}</span><RouterLink :to="assetPath(asset)"><strong>{{ asset.name || asset.symbol || short(asset.token) }}</strong><small>{{ chainName(asset) }}</small></RouterLink><span class="rank-tickers">{{ asset.tickers?.join(' · ') || relatedTickers(asset) }}</span><span class="rank-risk"><RiskBadge :asset="asset" /></span><strong class="rank-amount" :title="assetVolumeTitle(asset)">{{ usd(asset.volume24h) }}</strong>
         </div>
       </section>
-      <section class="panel">
-        <div class="panel-head"><h2>{{ tr('新收录关联', 'Recent discoveries') }}</h2><RouterLink to="/events">{{ tr('全部', 'All') }} →</RouterLink></div>
-        <p class="hint">{{ tr('按首次收录时间排列', 'Ordered by first indexing time') }}</p>
-        <div v-if="discoveries.length">
-          <RouterLink v-for="row in discoveries" :key="row.id" class="home-new-row" :to="{path:'/detail/' + row.chainId + '/' + row.token,query:{chain:scope}}">
-            <strong>{{ row.name }}</strong><small>{{ row.label }} · {{ chainName(row) }}</small><time :title="date(row.at)">{{ row.timeKind === 'created' ? tr('创建于','Created') : tr('收录于','Indexed') }} {{ age(row.at) }}</time>
-          </RouterLink>
-        </div>
-        <div v-else class="x-empty">{{ tr('当前范围暂无新关联。', 'No new relations in this scope.') }}</div>
-      </section>
+      <ImportantChanges v-if="importantChanges?.items?.length || feed.relationships.length" :changes="importantChanges" :observations="feed.relationships" :unified="store.snapshot?.unified" :assets="store.assets" :scope="scope" :loading="!importantChangesReady" />
     </div>
-    <section class="panel">
-      <div class="panel-head"><h2>{{ tr('Meme 24h 成交榜', 'Top memes by 24h volume') }}</h2><RouterLink to="/meme">{{ tr('全部', 'All') }} →</RouterLink></div>
-      <div v-if="related.length" class="home-rank-list">
-        <RouterLink v-for="(asset,index) in related" :key="asset.chainId + ':' + asset.token" class="home-rank-row" :to="{path:'/detail/' + asset.chainId + '/' + asset.token,query:{chain:scope}}">
-          <b>{{ index + 1 }}</b><strong>{{ asset.name || asset.symbol || short(asset.token) }} <small v-if="scope === 'all'">{{ chainName(asset) }}</small></strong>
-          <span>{{ relatedTickers(asset) }}</span><span v-if="asset.riskFlags?.length" class="risk-mark">!</span><b :title="assetVolumeTitle(asset)">{{ money(asset.volume24h,asset.volumeCurrency ?? asset.priceCurrency) }}<small v-if="asset.volume24h != null && assetVolumeState(asset) !== 'current'"> · {{ assetVolumeState(asset) === 'historical' ? tr('历史值', 'Historical') : tr('时间待核实', 'Time unverified') }}</small></b>
-        </RouterLink>
+
+    <section v-if="briefingItems.length" class="panel home-activity-summary">
+      <div class="panel-head"><h2>{{ tr('需留意','Worth checking') }}</h2><time class="home-subline">{{ briefing?.at ? clockTime(briefing.at) : '—' }}</time></div>
+      <div class="briefing-list"><article v-for="item in briefingItems" :key="item.id" class="briefing-item"><span class="activity-warning" aria-hidden="true">!</span><RouterLink v-if="item.asset?.address && item.asset?.chainId" :to="assetPath({chainId:item.asset.chainId,token:item.asset.address})" class="briefing-asset">{{ item.asset.name || item.asset.symbol || short(item.asset.address) }}</RouterLink><strong v-else>{{ item.asset?.name ?? tr('市场动态','Market activity') }}</strong><span>{{ briefingMessageFor(item) }}</span></article></div>
+    </section>
+
+    <section v-if="displayedTrades.length" class="panel home-trades">
+      <div class="panel-head"><div><h2>{{ tr('链上成交','On-chain trades') }}</h2><span v-if="tradeDelay>30000" class="trade-delay">{{ tr('成交延迟','Trade delay') }} {{ Math.ceil(tradeDelay/1000) }}s</span></div><div class="home-feed-controls"><select v-model.number="minTrade" :aria-label="tr('最小成交额','Minimum trade amount')"><option :value="0">{{ tr('全部金额','All amounts') }}</option><option :value="100">≥ $100</option><option :value="1000">≥ $1K</option><option :value="10000">≥ $10K</option></select><select v-model="direction" :aria-label="tr('买卖方向','Trade direction')"><option value="all">{{ tr('全部方向','All directions') }}</option><option value="buy">{{ tr('买入','Buy') }}</option><option value="sell">{{ tr('卖出','Sell') }}</option></select></div></div>
+      <div class="home-trade-list">
+        <div v-for="trade in displayedTrades.slice(0,10)" :key="trade.chainId+':'+trade.token+':'+trade.id" class="home-trade-row" :class="{'is-large':(tradeDisplayAmount(trade)?.value??0)>=10000}">
+          <time :title="date(trade.t)">{{ age(trade.t) }}</time><RouterLink :to="assetPath(trade)">{{ trade.symbol || short(trade.token) }}<small>{{ chainName(trade) }} · {{ tradeSource(trade) }}</small></RouterLink><span :class="trade.type==='buy'?'up':trade.type==='sell'?'down':''">{{ trade.type==='buy'?tr('买入','Buy'):trade.type==='sell'?tr('卖出','Sell'):tr('未能识别','Unknown') }}</span><strong>{{ money(tradeDisplayAmount(trade)?.value,tradeDisplayAmount(trade)?.currency) }}</strong><a v-if="trade.wallet" :href="explorer(trade.wallet,'address',String(trade.chainId))" target="_blank" rel="noopener" :title="trade.wallet">{{ short(trade.wallet) }} ↗</a><small v-else>{{ tr('钱包未能识别','Wallet unavailable') }}</small><a v-if="trade.hash" :href="explorer(trade.hash,'tx',String(trade.chainId))" target="_blank" rel="noopener" :aria-label="tr('查看交易','View transaction')">↗</a>
+        </div>
       </div>
-      <div v-else class="x-empty">{{ tr('当前暂无合格关联资产。', 'No qualifying related memes.') }}</div>
     </section>
 
-    <section v-if="scope === 'all'" class="panel">
-      <h2>{{ tr('链上分布', 'Chain distribution') }}</h2>
-      <RouterLink v-for="d in distribution" :key="d.chainId" class="v2-distribution" :to="{ path: '/meme', query: { chain: d.chainId } }">
-        <strong>{{ d.name }}</strong>
-        <span>{{ num(d.assets) }} {{ tr('个 Meme', 'memes') }}<span class="chain-share" aria-hidden="true"><i :style="{width: distributionMax ? (Number(d.assets || 0) / distributionMax * 100) + '%' : '0%'}"></i></span></span>
-        <span>{{ tr('24h 成交', '24h volume') }} {{ usd(d.volume?.value) }}<small> · {{ tr('近期数据', 'Current data') }} {{ num(d.volume?.known) }}/{{ num(d.volume?.total) }}</small></span>
-        <span>{{ tr('池流动性', 'Pool liquidity') }} {{ usd(d.liquidity?.value) }}<small> · {{ tr('数据覆盖', 'Coverage') }} {{ num(d.liquidity?.known) }}/{{ num(d.liquidity?.total) }}</small></span>
-      </RouterLink>
+    <section v-if="scope==='all' && distribution.length" class="panel">
+      <div class="panel-head"><h2>{{ tr('链上分布','Chain distribution') }}</h2></div>
+      <RouterLink v-for="item in distribution" :key="item.chainId" class="v2-distribution" :to="{path:'/meme',query:{chain:item.chainId,rel:'all'}}"><strong>{{ chainName(item) }}</strong><span>{{ num(item.assets) }} Meme<span class="chain-share" aria-hidden="true"><i :style="{width:distributionMax?(Number(item.assets||0)/distributionMax*100)+'%':'0%'}"></i></span></span><span>{{ tr('24h 成交','24h volume') }} {{ usd(item.volume?.value) }}<small> · {{ tr('覆盖','Coverage') }} {{ num(item.volume?.known) }}/{{ num(item.volume?.total) }}</small></span><span>{{ tr('池流动性','Pool liquidity') }} {{ usd(item.liquidity?.value) }}</span></RouterLink>
     </section>
-
   </div>
 </template>
 
@@ -106,7 +59,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import KpiCard from '../components/KpiCard.vue';
-import QuoteStatus from '../components/QuoteStatus.vue';
+import RiskBadge from '../components/RiskBadge.vue';
 import ThemeMarketMap from '../components/ThemeMarketMap.vue';
 import ImportantChanges from '../components/ImportantChanges.vue';
 import { useDashboardStore } from '../stores/dashboard';
@@ -115,9 +68,10 @@ import { getBriefing } from '../api/client';
 import { tr, useI18n } from '../i18n';
 import { age, chainName, date, explorer, money, num, pct, price, short, usd } from '../utils/format';
 import { chainScope, inChainScope } from '../utils/chain-scope';
-import { discoveryTime, filteredTrades, metricsForScope, topStockCards, tradeDisplayAmount } from '../utils/home-model';
+import { homeStockCards, metricsForScope, onchainRecordedTrades, tradeDisplayAmount } from '../utils/home-model';
+import { useMinuteClock } from '../composables/useMinuteClock';
 import { relationMatchesAsset } from '../utils/relations';
-import { normalizeEventAddress } from '../utils/event-records';
+import { comparableVolume, stockThemeName } from '../utils/stock-theme-model';
 import { buildNameClues, fallbackRelationEvents, fallbackThemeMap } from '../utils/theme-map-model';
 
 const route = useRoute();
@@ -125,6 +79,7 @@ const store = useDashboardStore();
 const feed = useFeedStore();
 const { lang } = useI18n();
 const scope = computed(() => chainScope(route.query));
+const now=useMinuteClock();
 const fullSnapshotReady = computed(() => !!store.snapshot?.unified && store.snapshot.unified.snapshotScope !== 'overview');
 const themeMapReady = computed(() => !!store.snapshot?.unified?.themeMap || fullSnapshotReady.value);
 const importantChangesReady = computed(() => !!store.snapshot?.unified?.importantChanges || fullSnapshotReady.value);
@@ -139,31 +94,23 @@ const importantChanges = computed(() => {
   if (!unified) return null;
   return unified.importantChanges ?? fallbackRelationEvents(feed.relationships, unified);
 });
-const scopeMetrics = computed(() => metricsForScope(store.snapshot?.unified, scope.value));
-const activeNote = computed(() => scopeMetrics.value.active === 0
-  ? tr('暂无同时满足报价与流动性条件的资产', 'No assets meet both quote and liquidity criteria')
-  : deltaNote('active') || tr('报价与总流动性达标', 'Meets quote and total liquidity criteria'));
-const hotStocks = computed(() => topStockCards(store.stockTokens, store.relations, store.assets, scope.value));
-const minTrade = ref(100);
+const scopeMetrics = computed(() => metricsForScope(store.snapshot?.unified, scope.value, now.value));
+const hotStocks = computed(() => homeStockCards(store.snapshot?.unified,scope.value,now.value));
+const minTrade = ref(0);
 const direction = ref('all');
-const displayedTrades = computed(() => filteredTrades(feed.trades, scope.value, minTrade.value, direction.value));
-const feedScroll = ref(null);
-const distribution = computed(() => store.snapshot?.unified?.distribution ?? []);
+const displayedTrades = computed(() => onchainRecordedTrades(feed.trades,null,scope.value,minTrade.value,direction.value));
+const tradeDelay=computed(()=>{const trade=displayedTrades.value[0];return trade?.delayMs??(trade?.t&&trade.receivedAt?Math.max(0,Number(trade.receivedAt)-Number(trade.t)):0);});
+const distribution = computed(() => [...(store.snapshot?.unified?.distribution ?? [])].sort((a,b)=>(b.volume?.value??-1)-(a.volume?.value??-1)));
 const distributionMax = computed(() => Math.max(0, ...distribution.value.map(row => Number(row.assets) || 0)));
 const eligibleRelations = computed(() => store.relations.filter(r => r.level === 'A'));
-const related = computed(() => store.assets.filter(a => a.kind === 'candidate' && inChainScope(a,scope.value) && eligibleRelations.value.some(r => relationMatchesAsset(r,a)))
-  .sort((a,b) => Number(assetVolumeState(b)==='current')-Number(assetVolumeState(a)==='current') || Number(b.volume24h ?? -1) - Number(a.volume24h ?? -1)).slice(0,10));
-const discoveries = computed(() => (feed.relationships ?? []).filter(r => inChainScope(r,scope.value)).map(r => {
-  const relation = r.relation ?? r;
-  const ticker = relation.ticker ?? r.ticker;
-  const chainId = String(r.chainId ?? relation.chainId ?? '');
-  const token = normalizeEventAddress(relation.token ?? r.asset,chainId);
-  if (!ticker || !token || !chainId) return null;
-  const time = discoveryTime(r);
-  return { id:r.id ?? relation.id, chainId, token, name:r.symbol || relation.tokenSymbol || short(token),
-    label:(relation.level === 'A' ? tr('池配对', 'Paired') : relation.level === 'B' ? tr('名称相关', 'Name match') : tr('关系待核验', 'Relation unverified')) + ' · ' + ticker,
-    at:time.at, timeKind:time.kind };
-}).filter(Boolean).sort((a,b)=>Number(b.at??0)-Number(a.at??0)).slice(0,8));
+const publishedLeaders=computed(()=>scope.value==='all'?store.snapshot?.unified?.memeLeaders:store.snapshot?.unified?.memeLeadersByChain?.[scope.value]);
+const eligibleLeaders=computed(()=>fullSnapshotReady.value ? store.assets.filter(asset=>asset.kind==='candidate' && asset.assetCategory!=='derivative' && inChainScope(asset,scope.value) && comparableVolume(asset,now.value)!=null).sort((a,b)=>Number(b.volume24h)-Number(a.volume24h)) : []);
+const related=computed(()=>publishedLeaders.value?.items ?? eligibleLeaders.value.slice(0,10));
+const leaderTotal=computed(()=>publishedLeaders.value?.total ?? eligibleLeaders.value.length);
+function kpiHref(query){return '#/meme?'+new URLSearchParams({chain:scope.value,...query}).toString();}
+function assetPath(asset){return {path:`/asset/${asset.chainId}/${asset.token}`,query:{chain:scope.value,from:'live'}};}
+function stockQuoteTitle(stock){return `${stock?.fieldSources?.price??stock?.provider??'—'} · ${date(stock?.fieldTimes?.price??stock?.quoteAt)}`;}
+function loadMarket(){return store.poll();}
 
 const briefing = ref(null);
 const briefingLoading = ref(true);
@@ -172,17 +119,10 @@ const briefingStatus = ref('scheduled');
 const briefingCache = new Map();
 let briefingRequest = 0;
 const briefingItems = computed(() => (briefing.value?.items ?? []).filter(item => scope.value === 'all' || String(item.asset?.chainId) === scope.value).slice(0,3));
-const briefingMessage = computed(() => {
-  if (briefingLoading.value) return tr('正在读取简报…', 'Loading briefing…');
-  if (briefingError.value) return tr('简报读取失败，稍后自动重试。', 'Could not load the briefing. Retrying shortly.');
-  if (briefingStatus.value === 'disabled') return tr('简报暂不可用。', 'Briefing unavailable.');
-  if (briefingStatus.value === 'upstream_failed') return tr('简报暂不可用。', 'Briefing unavailable.');
-  return tr('暂无简报。', 'No briefing yet.');
-});
 function briefingMessageFor(item) {
   const f = item.fields ?? {};
   const observedLiquidity = f.totalLiquidityUsd == null
-    ? tr('总流动性待核验', 'total liquidity unverified')
+    ? tr('暂无总流动性数据', 'total liquidity unavailable')
     : tr('总流动性 ' + usd(f.totalLiquidityUsd), 'total liquidity ' + usd(f.totalLiquidityUsd));
   if (item.type === 'wash_suspect') {
     if (f.volumeLiquidityRatio != null) return tr('24h 成交 / 已观测流动性：' + Math.round(f.volumeLiquidityRatio) + ' 倍',
@@ -200,41 +140,15 @@ function tradeSource(trade) {
   if (venue === 'binance-alpha') return 'Binance Alpha';
   if (venue === 'binance') return 'Binance';
   if (venue === 'dex') return tr('链上', 'Onchain');
-  return String(trade.provider ?? trade.source ?? trade.venue ?? tr('来源待核验', 'Source unverified'));
-}
-function tradeWalletLabel(trade) {
-  if (trade.wallet) return short(trade.wallet);
-  return ['binance', 'binance-alpha'].includes(String(trade.venue ?? '').toLowerCase())
-    ? tr('无链上钱包', 'No on-chain wallet') : tr('钱包未提供', 'Wallet unavailable');
-}
-function tradeWalletTitle(trade) {
-  if (trade.wallet) return String(trade.wallet);
-  return ['binance', 'binance-alpha'].includes(String(trade.venue ?? '').toLowerCase())
-    ? tr('交易所成交不提供链上交易钱包', 'Exchange trades do not provide an on-chain trade wallet')
-    : tr('此来源未提供交易钱包', 'This source did not provide a trade wallet');
-}
-function assetVolumeState(asset) {
-  if (asset.volume24h == null) return 'missing';
-  const at = Number(asset.fieldTimes?.volume24h ?? asset.volumeAt);
-  if (!Number.isFinite(at) || at <= 0 || at > Date.now()+1000) return 'unknown';
-  return Date.now() - at <= 900000 ? 'current' : 'historical';
+  return String(trade.provider ?? trade.source ?? trade.venue ?? tr('来源未能识别', 'Unknown source'));
 }
 function assetVolumeTitle(asset) {
   const at = asset.fieldTimes?.volume24h ?? asset.volumeAt;
-  return `${asset.fieldSources?.volume24h ?? asset.provider ?? tr('来源待核验', 'Source unverified')} · ${date(at)}`;
+  return `${asset.fieldSources?.volume24h ?? asset.provider ?? tr('来源未能识别', 'Unknown source')} · ${date(at)}`;
 }
-function deltaNote(key) {
-  const d = scopeMetrics.value.deltas?.[key];
-  return d == null ? '' : (d >= 0 ? '+' : '') + d + ' ' + tr('较 24h 前', 'vs 24h ago');
-}
-function stockName(stock) {
-  return lang.lang === 'en' ? stock?.stockIdentity?.nameEn ?? stock?.stockIdentity?.nameZh ?? ''
-    : stock?.stockIdentity?.nameZh ?? stock?.stockIdentity?.nameEn ?? '';
-}
+function stockName(stock,ticker) { return stockThemeName(stock,ticker,lang.lang); }
 function relatedTickers(asset) { return [...new Set(eligibleRelations.value.filter(r => relationMatchesAsset(r,asset)).map(r => r.ticker).filter(Boolean))].slice(0,3).join(' · '); }
 function clockTime(value) { return value ? new Date(value).toLocaleTimeString(lang.lang === 'en' ? 'en-US' : 'zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}) : '—'; }
-function onFeedScroll() { feed.setPaused((feedScroll.value?.scrollTop ?? 0) > 60); }
-function jumpToNew() { feed.setPaused(false); feedScroll.value?.scrollTo({top:0,behavior:'smooth'}); }
 async function loadBriefing() {
   const request = ++briefingRequest, language = lang.lang;
   briefingLoading.value = !briefing.value;
@@ -265,7 +179,36 @@ watch(scope,loadFeed);
 </script>
 
 <style scoped>
-.radar-workspace .x-hero { padding: 10px 0 18px; }
+.home-heading { display:flex; align-items:baseline; flex-wrap:wrap; gap:8px 16px; margin:12px 0 18px; }
+.home-heading h2 { font-size:24px; }
+.home-heading span,.home-subline { font-size:12px; color:var(--muted); }
+.home-page .panel-head h2 { font-size:17px; letter-spacing:0; }
+.home-stock-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.home-stock-card { min-width:0; }
+.home-stock-card > strong small { font-size:12px; }
+.home-stock-card small { font-size:12px; }
+.home-market-grid { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:14px; align-items:stretch; }
+.home-market-grid.single-column { grid-template-columns:1fr; }
+.home-market-grid > * { min-width:0; }
+.home-rank-head,.home-leader-row { display:grid; grid-template-columns:22px minmax(90px,1fr) 66px 46px 105px; align-items:center; gap:10px; }
+.home-rank-head { font-size:12px; color:var(--muted); border-bottom:1px solid var(--border); padding:13px 0 8px; }
+.home-leader-row { padding:14px 0; border-bottom:1px solid var(--border); font-size:13px; }
+.home-leader-row:last-child { border-bottom:0; }
+.home-leader-row a { color:var(--text); overflow:hidden; }
+.home-leader-row strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.home-leader-row small { display:block; color:var(--muted); font-size:12px; margin-top:3px; }
+.rank-position,.rank-tickers { color:var(--muted); font-size:12px; }
+.rank-risk { width:46px; }
+.rank-amount,.home-rank-head > span:last-child { text-align:right; font-family:ui-monospace,monospace; font-variant-numeric:tabular-nums; }
+.activity-warning { color:var(--warning); border:1px solid var(--warning); border-radius:50%; width:17px; height:17px; line-height:15px; text-align:center; font-size:12px; flex:none; }
+.home-activity-summary .briefing-asset { color:var(--text); }
+.home-trade-list { overflow:visible; }
+.home-trade-row { grid-template-columns:110px minmax(130px,1fr) 60px 110px 125px 20px; }
+.home-trade-row a { color:var(--text); }
+.home-trade-row time,.home-trade-row small { font-size:12px; }
+.trade-delay { color:var(--warning); font-size:12px; }
 .chain-share { display:block;height:4px;margin-top:9px;background:var(--surface-raised);border-radius:2px;overflow:hidden; }
 .chain-share i { display:block;height:100%;background:var(--accent);opacity:.7; }
+@media(max-width:1100px) { .home-market-grid { grid-template-columns:1fr; } }
+@media(max-width:720px) { .home-stock-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .home-rank-head,.home-leader-row { grid-template-columns:18px minmax(75px,1fr) 44px 32px 90px; gap:7px; } .rank-risk { width:32px; } .home-trade-row { grid-template-columns:70px minmax(90px,1fr) 44px 85px; } .home-trade-row > :nth-child(n+5) { display:none; } .home-trades .panel-head { flex-wrap:wrap; gap:12px; } }
 </style>

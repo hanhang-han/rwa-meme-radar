@@ -1,4 +1,4 @@
-"""Durable, read-only X Layer factory-log discovery.
+"""Durable, read-only factory-log discovery for pinned X Layer / BNB factories.
 
 The registry is deliberately small. The Uniswap V3 address is published at
 https://developers.uniswap.org/docs/protocols/v3/deployments/v3-xlayer-deployments
@@ -36,6 +36,7 @@ V2_PROOF_TOKEN0 = "0x21d6359cab338ea54705e7d04efbaadd9020eeee"
 V2_PROOF_TOKEN1 = "0xa8ddb5cd96b5222afe198316e9a57caa642850d5"
 FACTORY_SELECTOR = "0xc45a0155"
 GET_PAIR_SELECTOR = "0xe6a43905"
+GET_POOL_SELECTOR = "0x1698ee82"
 PAIR_CREATED = Web3.to_hex(Web3.keccak(text="PairCreated(address,address,address,uint256)"))
 POOL_CREATED = Web3.to_hex(Web3.keccak(text="PoolCreated(address,address,uint24,int24,address)"))
 HEX_32 = re.compile(r"^0x[0-9a-fA-F]{64}$")
@@ -52,12 +53,32 @@ class Factory:
     address: str
     kind: str
     topic: str
+    proof_pool: str | None = None
+    proof_tokens: tuple[str, str] | None = None
+    proof_fee: int | None = None
+    label: str | None = None
+    source_url: str | None = None
 
 
 FACTORIES = (
-    Factory(V3_FACTORY, "uniswap_v3", POOL_CREATED),
-    Factory(V2_FACTORY, "uniswap_v2", PAIR_CREATED),
+    Factory(V3_FACTORY, "uniswap_v3", POOL_CREATED, V3_PROOF_POOL),
+    Factory(V2_FACTORY, "uniswap_v2", PAIR_CREATED, V2_PROOF_POOL,
+            (V2_PROOF_TOKEN0, V2_PROOF_TOKEN1)),
 )
+# Published addresses, independently verified with eth_chainId, getCode,
+# factory.getPair/getPool, pool.factory and both pool token calls on 2026-09-30.
+# Every worker repeats the proof before its first range; a mismatch fails closed.
+BSC_PROOF_TOKENS = ("0x55d398326f99059ff775485246999027b3197955",
+                    "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c")
+BSC_FACTORIES = (
+    Factory("0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865", "uniswap_v3", POOL_CREATED,
+            "0x172fcd41e0913e95784454622d1c3724f546f849", BSC_PROOF_TOKENS, 100,
+            "PancakeSwap V3", "https://developer.pancakeswap.finance/contracts/v3/addresses"),
+    Factory("0xca143ce32fe78f1f7019d7d551a6402fc5350c73", "uniswap_v2", PAIR_CREATED,
+            "0x16b9a82891338f9ba80e2d6970fdda79d1eb0dae", BSC_PROOF_TOKENS, None,
+            "PancakeSwap V2", "https://developer.pancakeswap.finance/contracts/v2/addresses"),
+)
+FACTORIES_BY_CHAIN = {"196": FACTORIES, "56": BSC_FACTORIES}
 
 
 def _number(value):
@@ -113,7 +134,8 @@ def _abi_text(value):
     return text[:128] or None
 
 
-def decode_factory_log(factory: Factory, raw: dict, header: dict, head: int, confirmations: int, discovered_at: int):
+def decode_factory_log(factory: Factory, raw: dict, header: dict, head: int, confirmations: int, discovered_at: int,
+                       chain_id: str = CHAIN_ID):
     """Decode only canonical, standard V2/V3 factory events with full provenance."""
     if not isinstance(raw, dict) or str(raw.get("address") or "").lower() != factory.address:
         raise ValueError("wrong-factory")
@@ -151,9 +173,11 @@ def decode_factory_log(factory: Factory, raw: dict, header: dict, head: int, con
     log_index = _number(raw.get("logIndex"))
     if block != header["block"] or block_hash != header["hash"] or not HEX_32.fullmatch(tx_hash) or log_index < 0:
         raise ValueError("creation-log-not-canonical")
-    event_id = ":".join((CHAIN_ID, factory.address, block_hash, tx_hash, str(log_index)))
+    if chain_id not in FACTORIES_BY_CHAIN or factory not in FACTORIES_BY_CHAIN[chain_id]:
+        raise ValueError("factory-not-registered-for-chain")
+    event_id = ":".join((chain_id, factory.address, block_hash, tx_hash, str(log_index)))
     return {
-        "id": event_id, "chainId": CHAIN_ID, "factory": factory.address,
+        "id": event_id, "chainId": chain_id, "factory": factory.address,
         "dex": factory.kind, "pool": pool, "token0": token0, "token1": token1,
         "fee": fee, "tickSpacing": tick_spacing,
         "creationBlock": block, "creationBlockHash": block_hash,
@@ -169,8 +193,10 @@ class FactoryDiscovery:
 
     def __init__(self, store, rpc: Rpc, *, start_block=None, initial_lookback_blocks=2048,
                  batch_blocks=DEFAULT_BATCH_BLOCKS, confirmations=6, enabled=True):
-        if store.scope != CHAIN_ID:
-            raise ValueError("factory-discovery-is-xlayer-only")
+        self.chain = str(store.scope)
+        self.factories = FACTORIES_BY_CHAIN.get(self.chain)
+        if not self.factories:
+            raise ValueError("factory-discovery-chain-unconfigured")
         if batch_blocks < 1 or batch_blocks > 100 or confirmations < 1:
             raise ValueError("invalid-factory-scan-limits")
         self.store = store
@@ -227,23 +253,32 @@ class FactoryDiscovery:
     async def _verify_factories(self):
         if self.verified:
             return
-        if _number(await self.rpc("eth_chainId", [])) != 196:
-            raise RuntimeError("xlayer-chain-id-mismatch")
-        for factory in FACTORIES:
+        if _number(await self.rpc("eth_chainId", [])) != int(self.chain):
+            raise RuntimeError("factory-chain-id-mismatch")
+        for factory in self.factories:
             code = await self.rpc("eth_getCode", [factory.address, "latest"])
             if not isinstance(code, str) or not re.fullmatch(r"0x[0-9a-fA-F]{32,}", code):
                 raise RuntimeError("factory-code-unavailable:" + factory.address)
-        v3 = await self.rpc("eth_call", [{"to": V3_PROOF_POOL, "data": FACTORY_SELECTOR}, "latest"])
-        v2_pool_factory = await self.rpc("eth_call", [{"to": V2_PROOF_POOL, "data": FACTORY_SELECTOR}, "latest"])
-        v2 = await self.rpc("eth_call", [{"to": V2_FACTORY, "data": GET_PAIR_SELECTOR
-                                       + _address_word(V2_PROOF_TOKEN0) + _address_word(V2_PROOF_TOKEN1)}, "latest"])
-        if (_word_address(v3) != V3_FACTORY or _word_address(v2_pool_factory) != V2_FACTORY
-                or _word_address(v2) != V2_PROOF_POOL):
-            raise RuntimeError("factory-onchain-proof-mismatch")
+            actual = await self.rpc("eth_call", [{"to": factory.proof_pool, "data": FACTORY_SELECTOR}, "latest"])
+            if _word_address(actual) != factory.address:
+                raise RuntimeError("factory-onchain-proof-mismatch")
+            if factory.proof_tokens:
+                selector = GET_POOL_SELECTOR if factory.kind == "uniswap_v3" else GET_PAIR_SELECTOR
+                calldata = selector + "".join(_address_word(token) for token in factory.proof_tokens)
+                if factory.kind == "uniswap_v3":
+                    calldata += f"{factory.proof_fee:064x}"
+                actual = await self.rpc("eth_call", [{"to": factory.address, "data": calldata}, "latest"])
+                if _word_address(actual) != factory.proof_pool:
+                    raise RuntimeError("factory-onchain-proof-mismatch")
+                if self.chain == "56":
+                    for token_selector, expected in zip(("0x0dfe1681", "0xd21220a7"), factory.proof_tokens):
+                        actual = await self.rpc("eth_call", [{"to": factory.proof_pool, "data": token_selector}, "latest"])
+                        if _word_address(actual) != expected:
+                            raise RuntimeError("factory-proof-token-mismatch")
         self.verified = True
 
     async def _cursor(self):
-        row = await self.store.fetchone("SELECT block,hash,coverage_from,anchors,batch_blocks FROM factory_discovery_cursors WHERE chain=?", (CHAIN_ID,))
+        row = await self.store.fetchone("SELECT block,hash,coverage_from,anchors,batch_blocks FROM factory_discovery_cursors WHERE chain=?", (self.chain,))
         if row is None:
             return None
         return {"block": row[0], "hash": row[1], "coverageFrom": row[2],
@@ -263,7 +298,7 @@ class FactoryDiscovery:
         anchors = [{"block": previous, "hash": anchor["hash"]}] if anchor else []
         async with self.store._guard_write():
             await self.store.db.execute("INSERT OR IGNORE INTO factory_discovery_cursors VALUES (?,?,?,?,?,?,?)",
-                (CHAIN_ID, previous, anchor["hash"] if anchor else None, coverage,
+                (self.chain, previous, anchor["hash"] if anchor else None, coverage,
                  json.dumps(anchors), self.batch_blocks, now))
             await self.store.db.commit()
         return await self._cursor()
@@ -296,9 +331,9 @@ class FactoryDiscovery:
             await self.store.db.execute("BEGIN IMMEDIATE")
             try:
                 await self.store.db.execute("UPDATE factory_discovery_events SET status='orphaned',body=json_set(body,'$.confirmationStatus','orphaned') WHERE chain=? AND block>?",
-                                            (CHAIN_ID, ancestor["block"]))
+                                            (self.chain, ancestor["block"]))
                 await self.store.db.execute("UPDATE factory_discovery_cursors SET block=?,hash=?,anchors=?,updated_at=? WHERE chain=?",
-                    (ancestor["block"], ancestor["hash"], json.dumps(anchors), int(time.time() * 1000), CHAIN_ID))
+                    (ancestor["block"], ancestor["hash"], json.dumps(anchors), int(time.time() * 1000), self.chain))
                 await self.store.db.commit()
             except BaseException:
                 await self.store.db.rollback()
@@ -308,7 +343,7 @@ class FactoryDiscovery:
     async def _fetch_range(self, start, end, head, cursor):
         before = await self._canonical(end)
         raw = []
-        for factory in FACTORIES:
+        for factory in self.factories:
             logs = await self.rpc("eth_getLogs", [{"fromBlock": hex(start), "toBlock": hex(end),
                 "address": factory.address, "topics": [factory.topic]}])
             if not isinstance(logs, list):
@@ -322,7 +357,7 @@ class FactoryDiscovery:
             if block not in headers:
                 headers[block] = await self._canonical(block)
         found = [decode_factory_log(factory, log, headers[_number(log["blockNumber"])],
-                                    head["block"], self.confirmations, int(time.time() * 1000))
+                                    head["block"], self.confirmations, int(time.time() * 1000), self.chain)
                  for factory, log in raw]
         ids = [item["id"] for item in found]
         if len(set(ids)) != len(ids):
@@ -367,7 +402,7 @@ class FactoryDiscovery:
                                     THEN NULL ELSE factory_discovery_events.relation_id END,
                                 retracted_at=CASE WHEN factory_discovery_events.status='orphaned'
                                     THEN NULL ELSE factory_discovery_events.retracted_at END""",
-                            (item["id"], CHAIN_ID, item["factory"], item["pool"], item["creationBlock"],
+                            (item["id"], self.chain, item["factory"], item["pool"], item["creationBlock"],
                              item["creationBlockHash"], item["creationTx"], item["creationLogIndex"],
                              item["poolCreatedAt"], item["discoveredAt"], item["confirmationStatus"],
                              json.dumps(item, separators=(",", ":"))))
@@ -376,10 +411,10 @@ class FactoryDiscovery:
                     # anchored block remains canonical through the latest head.
                     await db.execute("""UPDATE factory_discovery_events
                         SET status='confirmed',body=json_set(body,'$.confirmationStatus','confirmed')
-                        WHERE chain=? AND status='provisional' AND block<=?""", (CHAIN_ID, cutoff))
+                        WHERE chain=? AND status='provisional' AND block<=?""", (self.chain, cutoff))
                     await db.execute("""UPDATE factory_discovery_cursors
                         SET block=?,hash=?,anchors=?,batch_blocks=?,updated_at=? WHERE chain=?""",
-                        (end_header["block"], end_header["hash"], json.dumps(anchors), batch_blocks, now, CHAIN_ID))
+                        (end_header["block"], end_header["hash"], json.dumps(anchors), batch_blocks, now, self.chain))
                     await db.commit()
                 except BaseException:
                     await db.rollback()
@@ -391,7 +426,7 @@ class FactoryDiscovery:
         async with self.store._guard_write():
             await self.store.db.execute("""UPDATE factory_discovery_events
                 SET status='confirmed',body=json_set(body,'$.confirmationStatus','confirmed')
-                WHERE chain=? AND status='provisional' AND block<=?""", (CHAIN_ID, cutoff))
+                WHERE chain=? AND status='provisional' AND block<=?""", (self.chain, cutoff))
             await self.store.db.commit()
 
     async def run_once(self, *, max_ranges=3):
@@ -436,7 +471,7 @@ class FactoryDiscovery:
         return {"status": "ok", "head": head["block"], "cursor": cursor["block"],
                 "coverageFrom": cursor["coverageFrom"], "scannedRanges": scanned,
                 "caughtUp": cursor["block"] >= head["block"], "newEvents": new_events,
-                "confirmationBlocks": self.confirmations, "factories": [f.address for f in FACTORIES]}
+                "confirmationBlocks": self.confirmations, "factories": [f.address for f in self.factories]}
 
     async def recent(self, *, limit=100, status=None):
         """Canonical pool-creation evidence for integration with pool verification."""
@@ -445,10 +480,10 @@ class FactoryDiscovery:
         await self._init()
         if status is None:
             rows = await self.store.fetchall("""SELECT body FROM factory_discovery_events
-                WHERE chain=? AND status!='orphaned' ORDER BY block DESC,log_index DESC LIMIT ?""", (CHAIN_ID, limit))
+                WHERE chain=? AND status!='orphaned' ORDER BY block DESC,log_index DESC LIMIT ?""", (self.chain, limit))
         else:
             rows = await self.store.fetchall("""SELECT body FROM factory_discovery_events
-                WHERE chain=? AND status=? ORDER BY block DESC,log_index DESC LIMIT ?""", (CHAIN_ID, status, limit))
+                WHERE chain=? AND status=? ORDER BY block DESC,log_index DESC LIMIT ?""", (self.chain, status, limit))
         return [json.loads(row[0]) for row in rows]
 
     async def _mark_processing(self, event_id, status, reason=None, *, relation_id=None, retry_ms=0):
@@ -469,7 +504,7 @@ class FactoryDiscovery:
 
         rows = await self.store.fetchall("""SELECT id,pool,relation_id FROM factory_discovery_events
             WHERE chain=? AND status='orphaned' AND relation_id IS NOT NULL AND retracted_at IS NULL
-            ORDER BY block LIMIT 100""", (CHAIN_ID,))
+            ORDER BY block LIMIT 100""", (self.chain,))
         count = 0
         for event_id, pool, relation_id in rows:
             relation = await self.store.get("relation", relation_id)
@@ -521,7 +556,7 @@ class FactoryDiscovery:
         result = {}
         for stock in await self.store.all("stock"):
             address = str(stock.get("tokenContractAddress") or "").lower()
-            identity = token_identity(CHAIN_ID, address, stock.get("stockCode"))
+            identity = token_identity(self.chain, address, stock.get("stockCode"))
             if identity["eligibleForPair"]:
                 result.setdefault(identity["underlyingId"], []).append(stock)
         return result
@@ -535,7 +570,7 @@ class FactoryDiscovery:
             "discoveredAt": min(int(asset.get("discoveredAt") or item["discoveredAt"]), item["discoveredAt"]) if asset else item["discoveredAt"],
         }
         if not asset:
-            asset_patch.update({"token": meme, "chain": CHAIN_ID, "chainId": CHAIN_ID,
+            asset_patch.update({"token": meme, "chain": self.chain, "chainId": self.chain,
                                 "kind": "candidate", "firstSeen": item["discoveredAt"],
                                 "discoveryEventPending": False})
         if metadata.get("symbol") and not (asset or {}).get("symbol"):
@@ -545,7 +580,9 @@ class FactoryDiscovery:
         await self.store.patch_fact("asset", meme, asset_patch)
         pool_patch = {
             "pool": item["pool"], "token0": item["token0"], "token1": item["token1"],
-            "queryToken": meme, "protocol": "Uniswap V3" if item["dex"] == "uniswap_v3" else "Uniswap V2",
+            "queryToken": meme, "protocol": next((factory.label for factory in self.factories
+                if factory.address == item["factory"] and factory.label),
+                "Uniswap V3" if item["dex"] == "uniswap_v3" else "Uniswap V2"),
             "poolCreatedAt": item["poolCreatedAt"], "discoveredAt": item["discoveredAt"],
             "creationTx": item["creationTx"], "creationBlock": item["creationBlock"],
             "creationBlockHash": item["creationBlockHash"], "creationLogIndex": item["creationLogIndex"],
@@ -554,8 +591,8 @@ class FactoryDiscovery:
         }
         await self.store.patch_fact("pool", item["pool"], pool_patch)
         stock_address = str(stock["tokenContractAddress"]).lower()
-        relation_id = f"{CHAIN_ID}:{item['pool']}:{meme}:{stock_address}"
-        stock_identity = token_identity(CHAIN_ID, stock_address, stock.get("stockCode"))
+        relation_id = f"{self.chain}:{item['pool']}:{meme}:{stock_address}"
+        stock_identity = token_identity(self.chain, stock_address, stock.get("stockCode"))
         async with self.store._guard_write():
             await self.store.db.execute("BEGIN IMMEDIATE")
             try:
@@ -565,7 +602,7 @@ class FactoryDiscovery:
                 checked_at = (previous or {}).get("checkedAt") if (previous or {}).get("factoryEventId") == item["id"] else None
                 checked_at = int(checked_at or now)
                 relation = {**(previous or {}),
-                    "id": relation_id, "chainId": CHAIN_ID, "token": meme,
+                    "id": relation_id, "chainId": self.chain, "token": meme,
                     "stock": stock_address, "stockSide": stock_side,
                     "ticker": stock_identity.get("ticker") or stock.get("stockCode"),
                     "pool": item["pool"], "token0": item["token0"], "token1": item["token1"],
@@ -604,7 +641,7 @@ class FactoryDiscovery:
         now = int(time.time() * 1000)
         rows = await self.store.fetchall("""SELECT body FROM factory_discovery_events
             WHERE chain=? AND status='confirmed' AND processing_status IN ('pending','retry')
-              AND next_attempt_at<=? ORDER BY block DESC,log_index DESC LIMIT ?""", (CHAIN_ID, now, limit))
+              AND next_attempt_at<=? ORDER BY block DESC,log_index DESC LIMIT ?""", (self.chain, now, limit))
         catalogue = await self._stock_catalogue() if rows else {}
         result = {"requested": len(rows), "accepted": 0, "updated": retracted,
                   "failed": 0, "unsupported": 0, "waitingCatalogue": 0}
@@ -615,7 +652,7 @@ class FactoryDiscovery:
                     await self._mark_processing(item["id"], "retry", "official-manifest-unavailable", retry_ms=60_000)
                     result["failed"] += 1
                     continue
-                sides = [(token, token_identity(CHAIN_ID, token)) for token in (item["token0"], item["token1"])]
+                sides = [(token, token_identity(self.chain, token)) for token in (item["token0"], item["token1"])]
                 official = [(token, identity) for token, identity in sides if identity["eligibleForPair"]]
                 if len(official) != 1:
                     await self._mark_processing(item["id"], "irrelevant", "no-single-official-stock-side")
@@ -630,7 +667,7 @@ class FactoryDiscovery:
                     continue
                 stock = next((row for row in candidates if str(row.get("tokenContractAddress") or "").lower() == stock_side), None)
                 if not stock:
-                    stock = next((row for row in candidates if token_identity(CHAIN_ID, row.get("tokenContractAddress")).get("tokenKind") == "native"), candidates[0])
+                    stock = next((row for row in candidates if token_identity(self.chain, row.get("tokenContractAddress")).get("tokenKind") == "native"), candidates[0])
                 await self._verify_created_pool(item)
                 metadata = await self._metadata(meme)
                 if str(metadata.get("symbol") or "").upper() in QUOTE_SYMBOLS:

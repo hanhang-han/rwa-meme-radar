@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .. import developer_access as access
+from .. import user_features
 
 
 router = APIRouter(prefix="/developer", tags=["developer-beta"])
@@ -74,7 +75,7 @@ def _check_origin(request: Request) -> None:
 
 
 def _response(user: dict, token: str, csrf: str) -> JSONResponse:
-    response = JSONResponse({"user": user, "csrfToken": csrf,
+    response = JSONResponse({"user": user, "csrfToken": csrf, "operator": user_features.is_operator(user),
                              "limits": {"perMinute": access.PER_MINUTE, "perDay": access.PER_DAY}},
                             headers={"Cache-Control": "no-store"})
     response.set_cookie(COOKIE_NAME, token, max_age=access.SESSION_SECONDS,
@@ -126,7 +127,7 @@ async def login(body: LoginBody, request: Request):
 @router.get("/me")
 async def me(request: Request):
     user, csrf = await _session(request)
-    return JSONResponse({"user": user, "csrfToken": csrf,
+    return JSONResponse({"user": user, "csrfToken": csrf, "operator": user_features.is_operator(user),
                          "limits": {"perMinute": access.PER_MINUTE, "perDay": access.PER_DAY}},
                         headers={"Cache-Control": "no-store"})
 
@@ -170,3 +171,49 @@ async def usage(request: Request):
     user, _ = await _session(request)
     return JSONResponse(await asyncio.to_thread(access.usage, user["id"]),
                         headers={"Cache-Control": "no-store"})
+
+
+class WatchChanges(BaseModel):
+    add: list[str] = Field(default_factory=list, max_length=200)
+    remove: list[str] = Field(default_factory=list, max_length=200)
+
+
+class AlertPreferences(BaseModel):
+    newPool: bool = True
+    largeTrade: bool = False
+    riskChange: bool = True
+    tradeUsd: float = Field(default=10000, ge=100, le=1e9)
+
+
+@router.get('/watches')
+async def watches(request: Request):
+    user, _ = await _session(request)
+    return JSONResponse({'items': await asyncio.to_thread(user_features.list_watches, user['id']), 'userId': user['id']},
+                        headers={'Cache-Control': 'no-store'})
+
+
+@router.patch('/watches')
+async def update_watches(body: WatchChanges, request: Request):
+    user, _ = await _write_session(request)
+    try:
+        items = await asyncio.to_thread(user_features.change_watches, user['id'], body.add, body.remove)
+    except access.AccessError as exc:
+        _raise(exc)
+    return JSONResponse({'items': items, 'userId': user['id']}, headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/alerts')
+async def alerts(request: Request):
+    user, _ = await _session(request)
+    return JSONResponse(await asyncio.to_thread(user_features.alert_preferences, user['id']),
+                        headers={'Cache-Control': 'no-store'})
+
+
+@router.put('/alerts')
+async def update_alerts(body: AlertPreferences, request: Request):
+    user, _ = await _write_session(request)
+    try:
+        preferences = await asyncio.to_thread(user_features.save_alert_preferences, user['id'], body.model_dump())
+    except access.AccessError as exc:
+        _raise(exc)
+    return JSONResponse(preferences, headers={'Cache-Control': 'no-store'})

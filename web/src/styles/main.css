@@ -688,3 +688,9 @@ input::placeholder { color: var(--muted); opacity: .8; }
 .lang-btn.active { background: var(--accent-soft); }
 .v3-pool-bar, .v3-coverage-track { border-radius: 2px; }
 .v3-pool-bar i, .v3-coverage-track i { opacity: .9; }
+
+/* Shared layout for the product iteration. */
+.site-footer{max-width:1440px;margin:26px auto;padding:16px 24px;color:var(--muted);font-size:12px;line-height:1.7;border-top:1px solid var(--border)}
+.header-api{font-size:13px;font-weight:600;color:var(--muted);padding:8px}
+button:disabled{cursor:wait;opacity:.6}
+.radar-workspace :is(.hint,.kpi-label,.kpi-note,.tag),.radar-workspace .tbl th{font-size:12px}

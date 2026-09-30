@@ -4,6 +4,9 @@ events and activity aggregates, matching the Node response shape.
 Opening a detail page only writes a short-lived watch lease. The collector
 worker batches those leases and remains the sole owner of upstream calls."""
 import time
+import copy
+import json
+import math
 
 from fastapi import APIRouter, HTTPException
 
@@ -14,6 +17,8 @@ from ..scoped_reads import candidate_relations, stock_view, token_pools
 from .. import stock_quotes
 from ..market_quotes import enrich_asset
 from ..market_history import attach_market_detail
+from ..realtime_projection import read_token_projection, ProjectionUnavailable
+from ..dashboard_projection import asset_summary, stock_summary, relation_summary, ASSET_FIELDS, TIME_FIELDS
 from ..stock_identity import match_name, token_identity
 
 router = APIRouter()
@@ -78,13 +83,128 @@ def sample_metadata(samples, asset):
             'scope':scope,'currency':currency,'status':'verified' if samples and known==len(samples) else 'partial' if known else 'unknown'}
 
 
+SECTION_NAMES = {'summary', 'trades', 'holders', 'relations', 'markets'}
+CANONICAL_FIELDS = ASSET_FIELDS | {'fieldTimes', 'fieldSources', 'fieldScopes', 'fieldStatus',
+    'fieldTimeKinds', 'priceProvenance', 'dataQuality', 'riskAssessment', 'primaryQuote', 'quoteAlternatives'}
+
+
+def _canonical_asset(snapshot, chain, address):
+    row = copy.deepcopy(snapshot.get('asset'))
+    stock = snapshot.get('stock')
+    if row is None and stock:
+        row = {**copy.deepcopy(stock), 'token': address, 'chainId': chain, 'kind': 'stock',
+               'symbol': stock.get('tokenSymbol'), 'name': stock.get('tokenName')}
+    return row
+
+
+def _stamp(snapshot):
+    return {'snapshotAt': snapshot.get('snapshotAt'), 'realtime': snapshot.get('realtime'),
+            'revision': (snapshot.get('realtime') or {}).get('revision')}
+
+
+def _canonical_overlay(body, snapshot, chain, address):
+    canonical = _canonical_asset(snapshot, chain, address)
+    if canonical is not None:
+        row = body['asset']
+        for field in CANONICAL_FIELDS:
+            if field in canonical:
+                row[field] = copy.deepcopy(canonical[field])
+            elif field in row and field not in {'token', 'chainId', 'symbol', 'name', 'kind', 'firstSeen'}:
+                row.pop(field, None)
+        if snapshot.get('stock'):
+            body['stock'] = copy.deepcopy(snapshot['stock'])
+    body.update(_stamp(snapshot))
+    return body
+
+
+async def _token_section(section, s, snapshot, chain, address, limit, offset):
+    asset = _canonical_asset(snapshot, chain, address)
+    if asset is None:
+        raise HTTPException(status_code=404, detail='token-not-in-published-snapshot')
+    base = _stamp(snapshot)
+    relations = snapshot.get('relations') or []
+    if section == 'summary':
+        verified = [r for r in relations if r.get('level') == 'A']
+        result = {**base, 'asset': asset_summary(asset),
+                  'stock': stock_summary(snapshot['stock']) if snapshot.get('stock') else None,
+                  'relations': [relation_summary(r) for r in relations[:8]], 'relationCount': len(relations),
+                  'analysis': _analysis(asset.get('kind'), verified, None)}
+        result['asset'].pop('marketQuotes', None)
+        result['asset'].pop('exchangeMarkets', None)
+        if result['stock']:
+            result['stock'].pop('marketQuotes', None)
+        # Detailed comparative evidence is loaded in the relations section.
+        for relation in result['relations']:
+            for field in ('priceComparison', 'amounts', 'stockIdentity', 'sideIdentity'):
+                relation.pop(field, None)
+        while len(json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode()) > 25_000 and result['relations']:
+            result['relations'].pop()
+        return result
+    if section == 'holders':
+        persisted = await s.get('asset', address) or {}
+        raw_risk = persisted.get('risk') or {}
+        observation = persisted.get('securityObservation') or {}
+        goplus_holders = observation.get('holders') or {}
+        candidates = [
+            {'top10Percent': raw_risk.get('top10'), 'checkedAt': raw_risk.get('checkedAt'), 'provider': raw_risk.get('provider')},
+            {'top10Percent': goplus_holders.get('top10RawPercent'), 'checkedAt': observation.get('checkedAt'), 'provider': observation.get('provider')},
+        ]
+        valid = [r for r in candidates if isinstance(r['top10Percent'], (int, float))
+                 and not isinstance(r['top10Percent'], bool) and math.isfinite(r['top10Percent']) and 0 <= r['top10Percent'] <= 100]
+        distribution = max(valid, key=lambda r: r.get('checkedAt') or 0) if valid else {'top10Percent': None}
+        distribution.update(exclusionsApplied=False, scope='raw-top10-including-pools')
+        return {**base, 'asset': {k: asset.get(k) for k in ('token', 'chainId', 'holders', 'fieldTimes', 'fieldSources', 'riskFlags', 'riskStatus', 'riskAssessment')},
+                'holdersSummary': {'count': asset.get('holders'), 'observedAt': (asset.get('fieldTimes') or {}).get('holders'),
+                    'provider': (asset.get('fieldSources') or {}).get('holders'),
+                    'distribution': distribution, 'securityObservation': persisted.get('securityObservation')}}
+    if section == 'trades':
+        rows = await s.fetchall('SELECT body FROM trades WHERE asset=? ORDER BY t DESC,id DESC LIMIT ? OFFSET ?',
+                                (s.key(address), limit+1, offset))
+        trades = [json.loads(row[0]) for row in rows]
+        for trade in trades:
+            trade.setdefault('wallet', trade.get('user'))
+            trade.setdefault('venue', 'dex')
+            trade.setdefault('sourceEventAt', trade.get('t'))
+        activity = await s.activity(address, time.time()*1000-86_400_000)
+        activity.update(scope='dex', status='observed')
+        return {**base, 'trades': trades[:limit], 'tradesScope': 'dex', 'activity': activity,
+                'next': offset+limit if len(trades)>limit else None}
+    if section == 'relations':
+        rows = relations[offset:offset+limit+1]
+        return {**base, 'relations': copy.deepcopy(rows[:limit]), 'pools': (await token_pools(s, address))[:limit],
+                'scan': await s.get('scan', address), 'next': offset+limit if len(rows)>limit else None}
+    market = await attach_market_detail({'asset': asset, 'stock': copy.deepcopy(snapshot.get('stock')),
+                                         'relations': relations}, s, canonical=True, limit=limit+1, offset=offset)
+    trades = market.get('marketTrades') or []
+    return {**base, 'asset': {key: market['asset'].get(key) for key in ('token', 'chainId', 'exchangeMarkets', 'poolMarkets', 'primaryQuote', 'quoteAlternatives')},
+            'poolMarkets': market.get('poolMarkets', []), 'marketTrades': trades[:limit],
+            'markets': [*(market['asset'].get('exchangeMarkets') or []), *(market.get('poolMarkets') or [])],
+            'next': offset+limit if len(trades)>limit else None}
+
+
 @router.get("/token/{chain}/{address}")
-async def get_token(chain: str, address: str):
+async def get_token(chain: str, address: str, section: str | None = None, limit: int = 50, offset: int = 0):
     address = address.lower()
     if chain not in ("196", "56", "4663") or not (address.startswith("0x") and len(address) == 42):
         raise HTTPException(status_code=400, detail="unsupported token")
+    if section is not None and section not in SECTION_NAMES:
+        raise HTTPException(status_code=400, detail='unsupported token section')
+    if not 1 <= limit <= 100 or not 0 <= offset <= 10000:
+        raise HTTPException(status_code=400, detail='invalid pagination')
     s = await store(chain)
+    try:
+        snapshot = await read_token_projection(chain, address)
+    except ProjectionUnavailable as exc:
+        raise HTTPException(status_code=503, detail='snapshot-not-ready', headers={'Retry-After': '3'}) from exc
+    if section:
+        from ..demand_leases import publish_lease
+        if section == 'summary' and (snapshot.get('asset') or snapshot.get('stock')):
+            publish_lease(s, 'watch', address, {'chainId': chain, 'token': address,
+                          'expiresAt': int(time.time()*1000)+90_000})
+        return await _token_section(section, s, snapshot, chain, address, limit, offset)
     asset = await s.get("asset", address)
+    if not snapshot.get('asset') and not snapshot.get('stock') and asset:
+        raise HTTPException(status_code=503, detail='token-snapshot-pending', headers={'Retry-After': '3'})
     if asset:
         # Query processes only publish a short-lived demand lease.  The sole
         # worker batches these leases and owns every upstream request.
@@ -102,7 +222,7 @@ async def get_token(chain: str, address: str):
             if token:
                 t = _stock_view(token, chain)
                 now = token.get("quoteAt") or time.time() * 1000
-                return await attach_market_detail({
+                body = await attach_market_detail({
                     "asset": {
                         "token": address, "chainId": chain, "chainName": "BNB Smart Chain",
                         "symbol": token.get("tokenSymbol"), "name": token.get("tokenName"),
@@ -119,12 +239,13 @@ async def get_token(chain: str, address: str):
                     "pools": [], "scan": None, "activity": _empty_activity(),
                     "analysis": _analysis("stock", [], None),
                 }, s)
+                return _canonical_overlay(body, snapshot, chain, address)
         if chain == "4663":
             token = stock_quotes.robinhood_token(address)
             if token:
                 t = _stock_view(token, chain)
                 now = token.get("quoteAt") or time.time() * 1000
-                return await attach_market_detail({
+                body = await attach_market_detail({
                     "asset": {
                         "token": address, "chainId": chain, "chainName": "Robinhood Chain",
                         "symbol": token.get("tokenSymbol"), "name": token.get("tokenName"),
@@ -141,6 +262,7 @@ async def get_token(chain: str, address: str):
                     "pools": [], "scan": None, "activity": _empty_activity(),
                     "analysis": _analysis("stock", [], None),
                 }, s)
+                return _canonical_overlay(body, snapshot, chain, address)
         raise HTTPException(status_code=404, detail="该地址尚未进入追踪索引")
 
     now = time.time() * 1000
@@ -193,7 +315,7 @@ async def get_token(chain: str, address: str):
             asset_view['fieldTimes']={**asset_view.get('fieldTimes',{}),'txs24h':stock_row.get('quoteAt') if stock_row.get('exchangeTrades24h') is not None else None,'buys24h':None,'sells24h':None}
     asset_view['dataQuality']=evaluate_asset(asset_view,verified,now)
 
-    return await attach_market_detail({
+    body = await attach_market_detail({
         "asset": asset_view,
         "stock": stock_row,
         "relations": relations,
@@ -209,3 +331,4 @@ async def get_token(chain: str, address: str):
         "tradeBuckets": trade_buckets,
         "analysis": _analysis(asset.get("kind"), verified, None),
     }, s)
+    return _canonical_overlay(body, snapshot, chain, address)

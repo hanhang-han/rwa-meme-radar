@@ -21,11 +21,38 @@
       · {{ tr('最后一根开盘时间', 'Last candle opened') }}：{{ lastCandleAt ? chartDateTime(lastCandleAt / 1000) : '—' }}
       <span v-if="candleInfo.lastTradeAt"> · {{ tr('最后成交', 'Last trade') }}：{{ chartDateTime(candleInfo.lastTradeAt / 1000) }}</span>
       <span v-if="candleInfo.nextRefreshAt > now && candleInfo.status !== 'current'"> · {{ tr('预计下次采集', 'Next collection due') }}：{{ chartDateTime(candleInfo.nextRefreshAt / 1000) }}</span>
-      <span v-if="candleInfo.delayMs || candleInfo.providerDelayMs"> · {{ tr('源延迟', 'Source delay') }} {{ Math.ceil((candleInfo.delayMs || candleInfo.providerDelayMs) / 60000) }} {{ tr('分钟', 'min') }}</span>
       <span v-if="candleInfo.error === 'quota-exhausted'"> · {{ tr('OKX 当日额度已用尽', 'OKX daily budget exhausted') }}</span>
     </p>
   </div>
 </template>
+
+<script>
+const CANDLE_PERIOD_MS = {'1m':60_000,'5m':300_000,'15m':900_000,'1H':3_600_000,'4H':14_400_000,'1D':86_400_000,'1W':604_800_000};
+const metricNumber = value => (typeof value === 'number' || typeof value === 'string' && value.trim() !== '') && Number.isFinite(Number(value)) ? Number(value) : null;
+
+export function candleDelayMs(info, bar, nowMs = Date.now()) {
+  if (!Number.isFinite(nowMs) || !info) return null;
+  for (const key of ['providerDelayMs','delayMs']) {
+    const delay = metricNumber(info[key]);
+    if (delay != null && delay >= 0) return delay;
+  }
+  // A successful HTTP request can return old history. Its completion time
+  // must never make an old candle look newer than its market timestamp.
+  const tail = [info.lastCandleAt,info.rows?.at(-1)?.t].map(metricNumber).find(value => value > 0 && value <= nowMs);
+  const interval = CANDLE_PERIOD_MS[bar];
+  // A daily/weekly candle naturally opened hours/days ago. Only time beyond
+  // its full interval can indicate a delayed tail, never its opening age.
+  return tail > 0 && tail <= nowMs && interval ? Math.max(0, nowMs - tail - interval) : null;
+}
+
+export function candleDelayLabel(info, bar, nowMs = Date.now(), language = 'zh') {
+  const delay = candleDelayMs(info,bar,nowMs);
+  if (!(delay > 0)) return language === 'en' ? 'Market data has not updated yet' : '行情暂未更新';
+  if (delay < 60_000) return language === 'en' ? 'Market data delayed less than 1 min' : '行情延迟不足 1 分钟';
+  const minutes = Math.floor(delay / 60_000);
+  return language === 'en' ? `Market data delayed ${minutes} min` : `行情延迟 ${minutes} 分钟`;
+}
+</script>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
@@ -63,17 +90,21 @@ const candleStatusLabel = computed(() => {
   if(info?.coverageStatus==='backfilling' && info.marketStatus==='live' && !info.stale)return tr('实时成交 · 历史记录补充中', 'Live trades · loading earlier history');
   if(info?.marketStatus==='quiet' && !info.stale && now.value-Number(info.scanAt||0)<=20000)return tr('观测范围内暂无新成交', 'No new trades in the observed range');
   const declared = info?.status;
-  const state = declared === 'current' && candleTail.value === 'quiet' ? 'quiet' : declared ?? candleTail.value;
+  const state = info?.stale ? 'stale' : declared === 'current' && candleTail.value === 'quiet' ? 'quiet' : declared ?? candleTail.value;
+  const delayLabel = () => candleDelayLabel(info,bar.value,now.value,lang.lang);
+  const sourceDelay = [info?.providerDelayMs,info?.delayMs].map(metricNumber).find(value => value != null && value >= 0);
+  if (state === 'current' && sourceDelay > 0) return delayLabel();
   return ({
     collecting: tr('暂无行情，等待更新', 'Waiting for market data'),
     partial: tr('历史记录不完整，正在补充', 'Incomplete history; more data is loading'),
-    stale: tr('更新受阻，当前为历史 K 线', 'Update unavailable; historical candles shown'),
-    quiet: tr('当前仅有历史 K 线，最新成交未知', 'Historical candles only; latest trade unknown'),
+    stale: delayLabel(),
+    delayed: delayLabel(),
+    quiet: delayLabel(),
     missing: tr('此市场暂无可用 K 线', 'No candles are available for this market'),
     unsupported: tr('行情源暂不支持此市场 K 线', 'The source does not support candles for this market'),
     current: tr('行情已更新', 'Market data updated'),
     unavailable: tr('此市场 K 线暂不可用', 'Candles temporarily unavailable for this market'),
-  })[state] ?? tr('行情采集状态待核实', 'Market collection status unknown');
+  })[state] ?? tr('行情状态未知', 'Market status unknown');
 });
 const lastCandleAt = computed(() => candleInfo.value?.rows?.at(-1)?.t);
 const lastBar = computed(() => candleInfo.value?.rows?.at(-1) ?? null);
@@ -273,7 +304,7 @@ async function paint(reset = false, force = false) {
       lastCandleTime = barsData.at(-1).time;
       return;
     }
-    hint.value = !props.pool && props.samples.length >= 2 ? tr('暂无 K 线返回，显示 5 分钟采样线。', 'No candles returned yet; showing the 5-minute sample line.') : tr('尚无可用历史。已提交采集需求；是否返回取决于上游市场覆盖与额度。', 'No usable history yet. Collection has been requested; availability depends on source coverage and budget.');
+    hint.value = !props.pool && props.samples.length >= 2 ? tr('暂无 K 线返回，显示 5 分钟采样线。', 'No candles returned yet; showing the 5-minute sample line.') : tr('暂无历史行情，可切换市场查看。', 'No history available. Try another market.');
   } else {
     hint.value = tr('分时 · 已保存的价格观测', 'Intraday · saved price observations');
   }

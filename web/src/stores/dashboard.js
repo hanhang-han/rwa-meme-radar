@@ -1,6 +1,7 @@
 // Canonical list entities retain identity across snapshots and delta batches.
 // The stream is authoritative; compact market snapshots bootstrap and reconcile it.
 import { defineStore } from 'pinia';
+import { markRaw, toRaw } from 'vue';
 import { getDashboard } from '../api/client.js';
 import { applyQuote, assetKey, mergeEntity, normalizeAddress, quoteKey } from '../utils/realtime.js';
 const pollTasks = new Map();
@@ -11,11 +12,16 @@ const rowKey = (group, row) => row.projectionKey ?? (group === 'assets' ? assetK
   : String(row.id ?? row.symbol ?? row.key));
 const GROUPS = ['assets','stockTokens','relations','sectors'];
 export const projectionRevision = data => Number(data?.revision ?? data?.realtime?.revision ?? data?.realtime?.cursor) || 0;
+export const MAX_REPLAY_BYTES = 8 * 1024 * 1024;
+export const MAX_REPLAY_FRAMES = 120;
+const encoder = new TextEncoder();
+export const projectionByteLength = raw => encoder.encode(typeof raw === 'string' ? raw : JSON.stringify(raw)).byteLength;
 
 export const useDashboardStore = defineStore('dashboard', {
-  state: () => ({snapshot:null, updatedAt:0, lastSnapshotAt:0, error:null, revision:0, cursor:null, recentDeltas:[],bufferFloorRevision:0,
+  state: () => ({snapshot:null, updatedAt:0, lastSnapshotAt:0, error:null, revision:0, cursor:null,
+    recentDeltas:markRaw([]),recentDeltaSizes:markRaw([]),recentDeltaBytes:0,bufferFloorRevision:0,
     lastCellVals:new Map(), lastKpiVals:new Map(), lastSse:new Map(), discoveries:new Map(), liveRelations:new Map(),
-    resources:new Map(), stream:{connected:false,state:'connecting',lastAt:0,lastMessageAt:0,reconnects:0,projection:false},_timer:null}),
+    resources:new Map(), stream:{connected:false,state:'connecting',lastAt:0,lastMessageAt:0,reconnects:0,projection:false},_timer:null,requestedView:'overview'}),
   getters: {
     feed:s=>s.snapshot?.unified ?? {}, assets:s=>s.snapshot?.unified?.assets ?? [],
     relations:s=>s.snapshot?.unified?.relations ?? [], stockTokens:s=>s.snapshot?.unified?.stockTokens ?? [],
@@ -41,17 +47,27 @@ export const useDashboardStore = defineStore('dashboard', {
       this.updatedAt=Date.now(); this.lastSnapshotAt=Date.now(); this.error=null; this._restoreSse();
     },
     async poll(options={}) {
-      const view=options.view ?? 'market';
+      const view=options.view ?? this.requestedView;
       if (pollTasks.has(view)) return pollTasks.get(view);
       const task=(async()=>{
-        try { const data=await getDashboard(view); this.acceptSnapshot(data,view); return data; }
+        try {
+          // A slow response can fall behind the bounded replay buffer. Retry
+          // once from the current publication instead of showing a snapshot
+          // for which we no longer have every intervening projection.
+          for(let attempt=0;attempt<2;attempt++){
+            const data=await getDashboard(view);
+            try { this.acceptSnapshot(data,view); return data; }
+            catch(error){if(error?.message!=='snapshot-behind-replay-window'||attempt>0)throw error;}
+          }
+        }
         catch(e){this.error=String(e?.message ?? e);return null;}
         finally{pollTasks.delete(view);}
       })(); pollTasks.set(view,task);return task;
     },
-    start() {
-      if(this._timer)return;
-      this.poll({view:'overview'}).finally(()=>this.poll());
+    start(view='overview') {
+      this.requestedView=view;
+      if(this._timer){if(view==='market'&&this.snapshot?.unified?.snapshotScope!=='market')this.poll();return;}
+      if(view==='market')this.poll();else this.poll({view:'overview'});
       this._timer=setInterval(()=>{
         if(typeof document!=='undefined'&&document.hidden)return;
         // Legacy/failed streams retain the fallback. A healthy delta stream
@@ -60,10 +76,24 @@ export const useDashboardStore = defineStore('dashboard', {
       },20000);
     },
     stop(){clearInterval(this._timer);this._timer=null;},
-    applyProjection(delta, remember=true) {
+    applyProjection(delta, remember=true, serializedBytes) {
       if(Number(delta?.schema ?? 1)!==1)return false;
       const revision=projectionRevision(delta);
-      if(remember){this.recentDeltas.push(delta);if(this.recentDeltas.length>120){const removed=this.recentDeltas.splice(0,this.recentDeltas.length-120);this.bufferFloorRevision=Math.max(this.bufferFloorRevision,...removed.map(projectionRevision));}}
+      if(remember){
+        // Replay history is not rendered. Keep raw immutable packets instead
+        // of retaining an ever-growing graph of reactive proxies. Count bytes
+        // as well as frames: 120 multi-MB deltas can exhaust a browser tab.
+        const raw=markRaw(toRaw(delta));
+        const bytes=Number.isFinite(serializedBytes)&&serializedBytes>=0?serializedBytes:projectionByteLength(raw);
+        this.recentDeltas.push(raw);this.recentDeltaSizes.push(bytes);this.recentDeltaBytes+=bytes;
+        while(this.recentDeltas.length>MAX_REPLAY_FRAMES||this.recentDeltaBytes>MAX_REPLAY_BYTES){
+          const removed=this.recentDeltas.shift();
+          this.recentDeltaBytes-=this.recentDeltaSizes.shift();
+          this.bufferFloorRevision=Math.max(this.bufferFloorRevision,projectionRevision(removed));
+        }
+        // An oversized frame is still applied below, but cannot be replayed.
+        // Any older HTTP snapshot must be rejected using the advanced floor.
+      }
       if(!this.snapshot?.unified)return true;
       if(revision&&revision<=this.revision)return true;
       const unified=this.snapshot.unified;
@@ -86,6 +116,7 @@ export const useDashboardStore = defineStore('dashboard', {
         }
       }
       for(const [key,value] of Object.entries(delta.meta??{}))if(!GROUPS.includes(key))unified[key]=value;
+      if(Number(delta.now)>0)this.snapshot.now=Number(delta.now);
       this.revision=Math.max(this.revision,revision); this.cursor=delta.cursor??this.cursor;
       this.stream.projection=true;this.error=null;this.updatedAt=Date.now();
       return true;

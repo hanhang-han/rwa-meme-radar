@@ -152,17 +152,18 @@ test('exchange trade is isolated from DEX metrics, and reorg tombstone survives 
 });
 
 
-test('default native pool requires real trades, prefers liquidity and never mutates asset quote',()=>{
+test('default chart preserves aggregate quote and explicit native pool preserves its currency',()=>{
  const base={price:5,priceCurrency:'USD',priceScope:'dex'};
  const pools=[{poolId:'empty',liquidityUsd:999,lastTradeAt:null},{poolId:'small',liquidityUsd:10,lastTradeAt:200},{poolId:'large',liquidityUsd:20,lastTradeAt:100,priceCurrency:'WETH'}];
- const selected=selectDetailMarket(base,[],pools);assert.equal(selected.id,'pool:large');assert.equal(selected.pool.priceCurrency,'WETH');assert.equal(base.price,5);assert.equal(base.priceCurrency,'USD');
+ const selected=selectDetailMarket(base,[],pools);assert.equal(selected.id,'dex');assert.equal(selectDetailMarket(base,[],pools,'pool:large').pool.priceCurrency,'WETH');assert.equal(base.price,5);assert.equal(base.priceCurrency,'USD');
  assert.equal(selectDetailMarket(base,[],pools,'dex').kind,'base');assert.equal(selectDetailMarket(base,[],pools,'pool:small').id,'pool:small');
  assert.equal(selectDetailMarket(base,[],[pools[0]]).kind,'base');
 });
 
-test('Alpha market and existing exchange base keep default priority over native pools',()=>{
+test('new Alpha markets do not change the default; explicit choices remain selectable',()=>{
  const pools=[{poolId:'p',lastTradeAt:100,liquidityUsd:1}],exchanges=[{venue:'binance-alpha',marketId:'ALPHA_1U'}];
- assert.equal(selectDetailMarket({priceScope:'dex'},exchanges,pools).id,'binance-alpha:ALPHA_1U');
+ assert.equal(selectDetailMarket({priceScope:'dex'},exchanges,pools).id,'dex');
+ assert.equal(selectDetailMarket({priceScope:'dex'},exchanges,pools,'binance-alpha:ALPHA_1U').kind,'exchange');
  assert.equal(selectDetailMarket({priceScope:'exchange'},[],pools).kind,'base');
  assert.equal(selectDetailMarket({priceScope:'dex'},exchanges,pools,'pool:p').kind,'pool');
 });

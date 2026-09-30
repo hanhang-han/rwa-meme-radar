@@ -3,6 +3,15 @@ import os
 from pathlib import Path
 
 
+def bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    """Invalid optional settings fall back; operators cannot remove bounds."""
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (ValueError, TypeError):
+        value = default
+    return min(maximum, max(minimum, value))
+
+
 def load_env() -> None:
     path = Path(__file__).resolve().parents[2] / ".env"
     if not path.exists():

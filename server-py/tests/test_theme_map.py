@@ -127,7 +127,12 @@ class ThemeMapTest(unittest.TestCase):
                     "importantChanges": changes}}
         full = compact_dashboard(original)
         overview = overview_dashboard(full)
-        self.assertEqual(overview["unified"]["themeMap"], theme_map)
+        preview = overview['unified']['themeMap']
+        self.assertEqual(preview['totalAssets'], theme_map['totalAssets'])
+        self.assertEqual(preview['totalThemes'], len(theme_map['themes']))
+        self.assertEqual(preview['bubbles'][0]['price'], {k:v for k,v in theme_map['bubbles'][0]['price'].items() if v is not None})
+        self.assertEqual(preview['bubbles'][0]['relation']['pool'], theme_map['bubbles'][0]['relation']['pool'])
+        self.assertNotIn('issuerSourceUrl', preview['bubbles'][0]['relation'])
         self.assertEqual(full["unified"]["importantChanges"], changes)
 
 

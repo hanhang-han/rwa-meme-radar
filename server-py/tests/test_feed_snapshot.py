@@ -3,11 +3,16 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from app.api import misc
 from app.api.misc import get_feed
 from app.realtime_projection import _feed_snapshot
 
 
 class FeedSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        misc._feed_cache.clear()
+        misc._feed_locks.clear()
+
     async def test_feed_keeps_thirty_recent_signals_for_each_chain(self):
         signals = [{'id': f'{chain}-{n}', 'chainId': chain, 't': 1000 - n}
                    for n in range(40) for chain in ('196', '56', '4663')]
@@ -17,6 +22,7 @@ class FeedSnapshotTests(unittest.IsolatedAsyncioTestCase):
         scoped = SimpleNamespace(recent_trades=AsyncMock(return_value=[]))
         with patch('app.api.misc.read_projection_json', read), \
              patch('app.api.misc.store', AsyncMock(return_value=scoped)), \
+             patch('app.api.misc.token_trades', AsyncMock(return_value=[])), \
              patch('app.api.misc.market_trades', AsyncMock(return_value=[])):
             result = await get_feed('56')
         self.assertEqual([row['id'] for row in result['relationships']],
@@ -41,27 +47,31 @@ class FeedSnapshotTests(unittest.IsolatedAsyncioTestCase):
                   recent_trades=AsyncMock(return_value=[{'id': chain, 't': int(chain)}]))
                   for chain in ('196', '56', '4663')}
 
-        async def market_tape(scoped, limit):
+        async def market_tape(scoped, limit, **kwargs):
             return [{'id': 'market-' + scoped.scope, 'chainId': scoped.scope, 't': 10000,
                      'venue': 'binance-alpha', 'priceCurrency': 'USDT', 'price': 1.23,
                      'marketId': 'ALPHA_1USDT'}]
+
+        async def token_tape(scoped, tokens, limit=100):
+            return [{'id': scoped.scope, 'token': token, 't': int(scoped.scope)} for token in tokens]
 
         snapshot = _feed_snapshot(data)
         read = AsyncMock(return_value=json.dumps(snapshot))
         with patch('app.api.misc.read_projection_json', read), \
              patch('app.api.misc.store', AsyncMock(side_effect=lambda chain: scopes[chain])), \
+             patch('app.api.misc.token_trades', AsyncMock(side_effect=token_tape)) as legacy, \
              patch('app.api.misc.market_trades', AsyncMock(side_effect=market_tape)):
             result = await get_feed()
         read.assert_awaited_once_with('feed')
-        scopes['196'].recent_trades.assert_awaited_once_with('same', 12)
-        scopes['56'].recent_trades.assert_not_awaited()
-        scopes['4663'].recent_trades.assert_awaited_once_with('other', 12)
+        self.assertEqual([list(call.args[1]) for call in legacy.await_args_list], [['same'], [], ['other']])
         for scoped in scopes.values():
             scoped.all.assert_not_awaited()
+            scoped.recent_trades.assert_not_awaited()
         self.assertEqual(result['relationships'], data.signals[:30])
-        self.assertEqual(len(result['trades']), 5)
-        self.assertEqual([row['t'] for row in result['trades']], [10000, 10000, 10000, 4663, 196])
-        self.assertTrue(all(row['priceCurrency'] == 'USDT' for row in result['trades'][:3]))
+        self.assertEqual(len(result['trades']), 2)
+        self.assertEqual([row['t'] for row in result['trades']], [4663, 196])
+        self.assertTrue(all(row['venue'] == 'dex' for row in result['trades']))
+        self.assertTrue(all(row['usdStatus'] == 'unknown' and row['volume'] is None for row in result['trades']))
         self.assertEqual(result['trades'][-1]['token'], 'same')
         self.assertEqual(result['trades'][-1]['symbol'], 'MEME')
 
@@ -73,11 +83,15 @@ class FeedSnapshotTests(unittest.IsolatedAsyncioTestCase):
         scopes = {chain: SimpleNamespace(scope=chain, recent_trades=AsyncMock(
             side_effect=lambda token, limit: [{'id': token + '-' + str(n), 't': int(token) * 100 + n} for n in range(limit)]))
             for chain in ('196', '56', '4663')}
+        async def token_tape(scoped, tokens, limit=100):
+            return [{'id': token+'-'+str(n), 'token': token, 't': int(token)*100+n}
+                    for token in tokens for n in range(12)][:limit]
         with patch('app.api.misc.read_projection_json', AsyncMock(return_value=json.dumps(_feed_snapshot(data)))), \
              patch('app.api.misc.store', AsyncMock(side_effect=lambda chain: scopes[chain])), \
+             patch('app.api.misc.token_trades', AsyncMock(side_effect=token_tape)) as legacy, \
              patch('app.api.misc.market_trades', AsyncMock(return_value=[])):
             result = await get_feed()
-        self.assertEqual([call.args[0] for call in scopes['196'].recent_trades.await_args_list],
-                         [str(n) for n in range(12, 2, -1)])
+        self.assertEqual(list(legacy.await_args_list[0].args[1]), [str(n) for n in range(12, 2, -1)])
+        self.assertTrue(all(not scope.recent_trades.called for scope in scopes.values()))
         self.assertEqual(len(result['trades']), 100)
         self.assertEqual([r['t'] for r in result['trades']], sorted((r['t'] for r in result['trades']), reverse=True))

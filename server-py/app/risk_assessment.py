@@ -13,7 +13,8 @@ MARKET_MAX_AGE_MS = 30 * 60_000
 HOLDER_MAX_AGE_MS = 24 * 60 * 60_000
 SCAN_MAX_AGE_MS = 24 * 60 * 60_000
 MAX_ASOF_SKEW_MS = 5 * 60_000
-FLAGS = ('wash_suspect', 'thin_spike', 'contract_risk', 'concentrated', 'holder_anomaly')
+FLAGS = ('wash_suspect', 'thin_spike', 'contract_risk', 'concentrated', 'holder_anomaly', 'liquidity_unlock')
+SCAN_PROVIDERS = ('OKX Onchain OS', 'Onchain OS', 'GoPlus')
 
 
 def _number(value):
@@ -30,6 +31,75 @@ def _check(status='unknown', reason='missing-evidence', evidence=None):
 
 def _same_asof(left, right):
     return _number(left) and _number(right) and abs(left - right) <= MAX_ASOF_SKEW_MS
+
+
+def safety_checks(asset, now):
+    """Independent checks: unknown inputs can neither pass nor mask a finding.
+
+    ``clear`` only describes the fields tested here, never overall safety.
+    Provider observation time is not a claim about the scanner's block time.
+    """
+    scan = asset.get('tokenScan') or {}
+    observation = asset.get('securityObservation') or {}
+    result = {key: _check() for key in ('tax', 'permissions', 'concentration', 'liquidityLock')}
+    valid_scan = (scan.get('provider') in SCAN_PROVIDERS and scan.get('status') in ('partial', 'complete')
+                  and _fresh(scan.get('checkedAt'), now, SCAN_MAX_AGE_MS))
+    if valid_scan:
+        provenance = {key: scan.get(key) for key in ('provider', 'checkedAt', 'timeKind', 'sourceUrl')}
+        buy, sell, honeypot = scan.get('buyTaxPct'), scan.get('sellTaxPct'), scan.get('honeypot')
+        buy = buy if _number(buy) and 0 <= buy <= 100 else None
+        sell = sell if _number(sell) and 0 <= sell <= 100 else None
+        honeypot = honeypot if isinstance(honeypot, bool) else None
+        triggers = (['honeypot'] if honeypot else []) + (['buyTaxPct'] if buy is not None and buy > 10 else []) + (['sellTaxPct'] if sell is not None and sell > 10 else [])
+        known = buy is not None and sell is not None and honeypot is not None
+        result['tax'] = {**_check('triggered' if triggers else 'clear' if known else 'unknown',
+            'scan-trigger' if triggers else 'scan-clear' if known else 'incomplete-scan',
+            {'buyTaxPct': buy, 'sellTaxPct': sell, 'honeypot': honeypot,
+             'thresholdPct': 10, 'triggers': triggers}), **provenance}
+        fields = ('mintable', 'pausable', 'blacklist', 'ownerChangeBalance', 'canTakeBackOwnership', 'hiddenOwner', 'selfDestruct')
+        evidence = {key: scan.get(key) if isinstance(scan.get(key), bool) else None for key in fields}
+        triggers = [key for key, value in evidence.items() if value is True]
+        # Legacy Onchain OS payloads do not include blacklist. Preserve their
+        # narrower test scope explicitly, rather than manufacturing false.
+        required = ('mintable', 'pausable', 'blacklist') if scan['provider'] == 'GoPlus' else ('mintable', 'pausable')
+        known = all(evidence[key] is not None for key in required) and scan.get('openSource') is not False
+        evidence.update({key: scan.get(key) for key in ('proxy', 'openSource', 'ownerAddress', 'creatorAddress')})
+        evidence.update(triggers=triggers, testedFields=list(required))
+        result['permissions'] = {**_check('triggered' if triggers else 'clear' if known else 'unknown',
+            'permission-detected' if triggers else 'scan-clear' if known else 'incomplete-scan', evidence), **provenance}
+    elif scan.get('checkedAt'):
+        for key in ('tax', 'permissions'):
+            result[key] = {**_check(reason='stale-scan'), 'provider': scan.get('provider'), 'checkedAt': scan.get('checkedAt')}
+
+    distribution = asset.get('holderDistribution') or {}
+    top10 = distribution.get('top10AdjustedPercent')
+    if (distribution.get('excludedKnownAddresses') is True and distribution.get('provider')
+            and _number(top10) and 0 <= top10 <= 100
+            and _fresh(distribution.get('checkedAt'), now, HOLDER_MAX_AGE_MS)):
+        result['concentration'] = {**_check('triggered' if top10 > 50 else 'clear', 'threshold-exceeded' if top10 > 50 else 'below-threshold',
+            {'top10AdjustedPercent': top10, 'thresholdPct': 50, 'exclusionsApplied': True}),
+            'provider': distribution['provider'], 'checkedAt': distribution['checkedAt']}
+    elif (observation.get('provider') == 'GoPlus'
+          and _fresh(observation.get('checkedAt'), now, HOLDER_MAX_AGE_MS)):
+        result['concentration'] = {**_check(reason='address-exclusions-unavailable', evidence=observation.get('holders') or {}),
+            'provider': observation['provider'], 'checkedAt': observation['checkedAt']}
+
+    if (observation.get('provider') == 'GoPlus'
+            and _fresh(observation.get('checkedAt'), now, SCAN_MAX_AGE_MS)):
+        lp = observation.get('liquidityLock') or {}
+        locked, burned, unlocked = (lp.get(key) for key in ('lockedPercentMin', 'burnedPercent', 'unlockedPercentMin'))
+        ends = lp.get('nextUnlockAt')
+        if (lp.get('identified') is True and all(_number(value) and 0 <= value <= 100 for value in (locked, burned, unlocked))
+                and locked + burned + unlocked <= 100.000001 and (ends is None or (_number(ends) and now < ends))):
+            # Bounds are enough: 96% demonstrably locked passes even if the
+            # remaining 4% are unknown; >5% demonstrably unlocked is notable.
+            status = 'clear' if locked + burned >= 95 else 'triggered' if unlocked > 5 else 'unknown'
+            reason = 'lp-lock-observed' if status == 'clear' else 'lp-unlocked-observed' if status == 'triggered' else 'lp-coverage-incomplete'
+        else:
+            status, reason = 'unknown', 'lp-lock-expired' if _number(ends) and now >= ends else lp.get('reason', 'lp-evidence-unavailable')
+        result['liquidityLock'] = {**_check(status, reason, {**lp, 'minimumLockedPercent': 95}),
+            'provider': observation['provider'], 'checkedAt': observation['checkedAt']}
+    return result
 
 
 def assess_risk(asset: dict, aggregate_market: dict | None = None, now: float | None = None) -> dict:
@@ -116,21 +186,17 @@ def assess_risk(asset: dict, aggregate_market: dict | None = None, now: float | 
 
     # An old generic `risk.level` or raw top-ten percentage is not an
     # Onchain OS scan and says nothing about honeypot/tax/mint/pause checks.
-    scan = asset.get('tokenScan') or {}
-    if (scan.get('provider') in ('OKX Onchain OS', 'Onchain OS')
-            and scan.get('status') == 'complete' and _fresh(scan.get('checkedAt'), now, SCAN_MAX_AGE_MS)):
-        tax_buy, tax_sell = scan.get('buyTaxPct'), scan.get('sellTaxPct')
-        fields = ('honeypot', 'mintable', 'pausable')
-        if all(isinstance(scan.get(field), bool) for field in fields) and _number(tax_buy) and _number(tax_sell):
-            triggers = [field for field in fields if scan[field]]
-            if tax_buy > 10:
-                triggers.append('buyTaxPct')
-            if tax_sell > 10:
-                triggers.append('sellTaxPct')
-            checks['contract_risk'] = _check('triggered' if triggers else 'clear', 'scan-trigger' if triggers else 'scan-clear', {
-                'provider': scan['provider'], 'checkedAt': scan['checkedAt'],
-                'triggers': triggers, 'buyTaxPct': tax_buy, 'sellTaxPct': tax_sell,
-            })
+    safety = safety_checks(asset, now)
+    checks['liquidity_unlock'] = safety['liquidityLock']
+    tax, permissions = safety['tax'], safety['permissions']
+    triggers = tax['evidence'].get('triggers', []) + permissions['evidence'].get('triggers', [])
+    contract_status = 'triggered' if triggers else 'clear' if tax['status'] == permissions['status'] == 'clear' else 'unknown'
+    checks['contract_risk'] = _check(contract_status,
+        'scan-trigger' if triggers else 'scan-clear' if contract_status == 'clear' else 'incomplete-scan', {
+            'provider': tax.get('provider'), 'checkedAt': tax.get('checkedAt'),
+            'triggers': triggers, 'buyTaxPct': tax['evidence'].get('buyTaxPct'),
+            'sellTaxPct': tax['evidence'].get('sellTaxPct'),
+        })
 
     # Most provider `top10` metrics include pool, burn and custodial wallets.
     # Concentration can only be decided after those exclusions are evidenced.
@@ -160,4 +226,4 @@ def assess_risk(asset: dict, aggregate_market: dict | None = None, now: float | 
     statuses = [check['status'] for check in checks.values()]
     status = ('flagged' if flags else 'clear' if all(item == 'clear' for item in statuses)
               else 'partial' if any(item == 'clear' for item in statuses) else 'unknown')
-    return {'version': 1, 'status': status, 'flags': flags, 'checks': checks, 'checkedAt': now}
+    return {'version': 2, 'status': status, 'flags': flags, 'checks': checks, 'safety': safety, 'checkedAt': now}

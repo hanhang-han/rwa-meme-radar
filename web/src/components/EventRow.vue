@@ -16,7 +16,7 @@ const props = defineProps({
   ev: { type: Object, required: true },
 });
 
-const label = computed(() => props.ev.kind === 'discovered' ? tr('新候选 · 股票关联待核验', 'New candidate · stock link unverified') : props.ev.kind === 'verified' ? (props.ev.level === 'A' || props.ev.relation?.level === 'A' ? tr('股票配对已核验', 'Stock pair verified') : tr('池结构已核验 · 股票身份待核验', 'Pool structure verified · stock identity unverified')) : props.ev.kind === 'invalidated' ? tr('关系证据变化', 'Relationship evidence changed') : props.ev.label);
+const label = computed(() => props.ev.kind === 'discovered' ? tr('新发现', 'New discovery') : props.ev.kind === 'verified' ? (props.ev.level === 'A' || props.ev.relation?.level === 'A' ? tr('池子配对', 'Pool pairing') : tr('新池子', 'New pool')) : props.ev.kind === 'invalidated' ? tr('关系证据变化', 'Relationship evidence changed') : props.ev.label);
 const chainId = computed(() => String(props.ev.chainId ?? '196'));
 const asset = computed(() => normalizeEventAddress(props.ev.asset, chainId.value));
 const detailHref = computed(() => `#/detail/${encodeURIComponent(chainId.value)}/${encodeURIComponent(asset.value)}`);

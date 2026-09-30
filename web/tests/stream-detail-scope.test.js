@@ -59,7 +59,7 @@ test('detail changes scope only trade events and leaving detail restores the glo
     await until(() => useFeedStore().trades.some(row => row.id === 'global-return'));
 
     const scopes = requests.map(raw => new URL(raw, 'http://localhost').searchParams.get('trades'));
-    assert.deepEqual(scopes, [null, '196:0xabc', '56:0xabc', null]);
+    assert.deepEqual(scopes, ['feed', '196:0xabc', '56:0xabc', 'feed']);
     assert.ok(requests.every(raw => new URL(raw, 'http://localhost').searchParams.get('after') === '100'));
   } finally {
     stopStream();

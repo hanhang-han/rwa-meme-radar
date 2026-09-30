@@ -1,539 +1,77 @@
 <template>
-  <div v-if="data">
-    <div class="page-heading">
-      <RouterLink :to="backLink">← {{ backLabel }}</RouterLink>
-      <h2>{{ asset.symbol }} <span v-if="asset.kind === 'stock'" class="x-badge">{{ asset.issuerIdentity?.verificationStatus === 'official' ? tr('身份已核验','Identity verified') : asset.issuerIdentity?.verificationStatus === 'legacy' ? tr('旧版官方部署','Legacy official deployment') : tr('身份未核验','Unverified identity') }}</span></h2>
-      <p>{{ asset.name }} · {{ chainName(asset) }} · {{ tr('首次发现', 'First seen') }} {{ date(asset.firstSeen) }}</p>
-    </div>
-
-    <section class="panel">
-      <div class="address-row">
-        <code>{{ asset.token }}</code>
-        <button :data-copy="asset.token" @click="copyAddress">{{ tr('复制合约地址', 'Copy contract') }}</button>
-        <a :href="explorer(asset.token, 'address', chain(asset))" target="_blank" rel="noopener">{{ tr('区块浏览器', 'Block explorer') }} ↗</a>
-        <a :href="okxUrl" target="_blank" rel="noopener">{{ tr('在 OKX 查看资产', 'View asset on OKX') }} ↗</a>
-      </div>
-      <p>{{ tr('行情来源', 'Quote source') }} {{ asset.provider ?? 'OKX' }} · {{ age(asset.quoteAt ?? asset.fieldTimes?.price ?? asset.updatedAt) }}{{ asset.error ? ' · ' + tr('部分数据更新失败', 'Some data failed to update') : '' }}</p>
-    </section>
-
-    <SpreadPanel v-if="asset.kind === 'stock'" :chain="String(asset.chainId)" :token="asset.token" />
-    <section class="panel x-verdict">
-      <h2>{{ verdictTitle }}</h2>
-      <div v-if="relations.length">
-        <article v-for="r in relations" :key="r.id" class="x-proof">
-          <div class="panel-head">
-            <h3>{{ r.ticker }} <RelationBadge :relation="r" /></h3>
-            <span class="x-badge" :class="{ verified: relationStockIdentityStatus(r) === 'official' }">{{ relationStockIdentityStatus(r) === 'official' ? tr('股票侧身份已核验','Stock identity verified') : relationStockIdentityStatus(r) === 'legacy' ? tr('股票侧为旧版官方部署','Stock side is a legacy official deployment') : tr('股票侧身份未核验','Stock identity unverified') }} · {{ age(r.checkedAt) }}</span>
-          </div>
-          <p>
-            {{ tr('代币', 'Token') }} <RouterLink :to="detailLink({ token: r.token, chainId: r.chainId ?? '196' })">{{ short(r.token) }}</RouterLink>
-            <template v-if="r.pool"> → {{ tr('池', 'Pool') }} <a :href="explorer(r.pool, 'address', r.chainId ?? '196')" target="_blank" rel="noopener">{{ short(r.pool) }}</a></template>
-            <template v-if="r.stockSide"> → {{ tr('股票侧', 'Stock side') }} <a :href="explorer(r.stockSide, 'address', r.chainId ?? '196')" target="_blank" rel="noopener">{{ short(r.stockSide) }}</a></template>
-          </p>
-          <div class="x-coverage">
-            <span>{{ r.protocol }}</span>
-            <span>{{ tr('池总流动性', 'Total pool liquidity') }} {{ usd(r.liquidityUsd) }}</span>
-            <span>{{ tr('核验区块', 'Verified block') }} {{ num(r.block) }}</span>
-          </div>
-          <RegistryBadge v-if="r.pool" :relation="r" />
-        </article>
-      </div>
-      <div v-else class="x-empty">{{ tr('暂无已核验配对。', 'No verified pairs yet.') }}</div>
-    </section>
-
-    <div class="kpis">
-      <div v-if="selectedPoolId" class="kpi" data-kpi-key="pool-price">
-        <span class="kpi-label">{{ tr('所选池最近成交价', 'Selected pool last trade price') }}</span>
-        <strong class="kpi-value mono"><LiveNumber :value="selectedPoolQuote?.price" :currency="marketSelection.pool.priceCurrency" :format="marketSelection.pool.priceCurrency === 'USD' ? 'price' : 'money'" /></strong>
-        <span class="kpi-note">{{ short(selectedPoolId) }} · {{ marketSelection.pool.priceCurrency ?? tr('币种未知', 'Currency unknown') }} · {{ selectedPoolQuote ? `${selectedPoolQuote.source} · ${date(selectedPoolQuote.at)} · ${poolQuoteAge}` : tr('暂无该池成交报价', 'No trade quote for this pool yet') }}</span>
-      </div>
-      <div class="kpi" data-kpi-key="price">
-        <span class="kpi-label">{{ selectedPoolId ? tr('资产市场价', 'Asset market price') : tr('最新价格', 'Latest price') }}</span>
-        <strong class="kpi-value mono" :class="{ 'kpi-flash': priceFlash }"><LiveNumber :value="asset.price" :currency="asset.priceCurrency" format="price" /></strong>
-        <span class="kpi-note">{{ asset.fieldSources?.price ?? asset.provider ?? asset.venue ?? tr('来源待核实', 'Source unverified') }} · {{ pct(asset.change24h) }} · 24h</span><QuoteStatus :row="asset" />
-      </div>
-      <div class="kpi"><span class="kpi-label">{{ tr('24h 成交额', '24h volume') }}</span><strong class="kpi-value mono"><LiveNumber :value="asset.volume24h" :currency="asset.volumeCurrency ?? asset.priceCurrency" /></strong><span class="kpi-note">{{ volumeScopeLabel }}</span></div>
-      <div class="kpi"><span class="kpi-label">{{ tr('24h 交易', '24h trades') }}</span><strong class="kpi-value mono">{{ num(asset.priceScope === 'exchange' ? asset.exchangeTrades24h : asset.txs24h) }}</strong><span class="kpi-note">{{ asset.priceScope === 'exchange' ? tr('交易所成交总数；未提供买卖方向', 'Exchange trades; buy/sell split unavailable') : `${num(asset.buys24h)} / ${num(asset.sells24h)}` }}</span></div>
-      <div class="kpi"><span class="kpi-label">{{ tr('持币地址数', 'Holder addresses') }}</span><strong class="kpi-value mono"><LiveNumber :value="asset.holders" format="number" /></strong><span class="kpi-note">{{ age(asset.fieldTimes?.holders) }}</span></div>
-      <div class="kpi"><span class="kpi-label">{{ tr('总流动性','Total liquidity') }}</span><strong class="kpi-value mono"><LiveNumber :value="asset.totalLiquidityUsd" /></strong><span class="kpi-note">{{ asset.totalLiquidityUsd == null ? tr('暂无总流动性','Total liquidity unavailable') : age(asset.fieldTimes?.totalLiquidityUsd ?? asset.totalLiquidityAt) }}</span></div>
-    </div>
-
-    <div class="x-grid">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>{{ tr('价格走势', 'Price history') }}<template v-if="selectedPoolId"> · {{ tr('池内成交价', 'Pool trade price') }}</template></h2>
-          <label v-if="exchangeMarkets.length || poolMarkets.length">{{ tr('图表市场', 'Chart market') }} <select data-chart-market :value="marketSelection.id" @change="onMarketChoice($event.target.value)">
-            <option v-if="baseAsset.priceScope==='exchange'" value="base">{{ baseAsset.provider ?? baseAsset.venue }} · {{ baseAsset.marketId ?? baseAsset.symbol }} · {{ baseAsset.priceCurrency }}</option>
-            <option v-else value="dex">{{ tr('DEX 聚合行情', 'Aggregated DEX') }}</option>
-            <option v-for="market in exchangeMarkets" :key="`${market.venue}:${market.marketId}`" :value="`${market.venue}:${market.marketId}`">{{ market.provider ?? market.venue }} · {{ market.marketId }} · {{ market.priceCurrency }}</option>
-            <option v-for="pool in poolMarkets" :key="pool.poolId ?? pool.marketId" :value="`pool:${pool.poolId ?? pool.pool ?? pool.marketId}`">{{ tr('链上池', 'On-chain pool') }} {{ short(pool.poolId ?? pool.pool ?? pool.marketId) }} · {{ pool.priceCurrency }}</option>
-          </select></label>
-        </div>
-        <p v-if="selectedPoolId" class="hint" data-pool-unit>{{ tr('每枚代币以', 'Each token is quoted in') }} {{ marketSelection.pool.priceCurrency }}{{ tr('计价；其它 24h 指标仍为资产整体行情。', '; other 24h metrics remain asset-wide.') }}</p>
-        <CandleChart :asset="asset" :samples="data.samples ?? []" :pool="selectedPoolId" />
-      </section>
-      <section class="panel">
-        <div class="panel-head">
-          <h2>{{ tr('最新成交', 'Latest trades') }}</h2>
-          <span class="hint">{{ marketFreshnessLabel }}</span>
-        </div>
-        <p class="hint">{{ selectedPoolId ? tr('所选池的已收录成交，时间为实际成交时间。', 'Recorded trades from the selected pool, shown at their trade time.') : tr('已接入市场的成交记录，可能不含全部交易。时间为实际成交时间。', 'Trades from connected markets; coverage may be incomplete. Times are trade times.') }}</p>
-        <div v-if="marketTrades.length" class="scroll" data-market-trades>
-          <table class="tbl">
-            <thead><tr><th>{{ tr('时间', 'Time') }}</th><th>{{ tr('来源 / 市场', 'Source / market') }}</th><th>{{ tr('方向', 'Side') }}</th><th>{{ tr('成交价', 'Price') }}</th><th>{{ tr('成交额', 'Quote amount') }}</th></tr></thead>
-            <tbody>
-              <tr v-for="t in marketTrades" :key="marketTradeKey(t)" :class="{ 'trade-new': newMarketIds.has(marketTradeKey(t)) }">
-                <td>{{ date(t.t) }}</td>
-                <td>{{ t.source ?? t.venue ?? tr('来源待核实', 'Source unverified') }}<small>{{ t.marketId ?? tr('市场待核实', 'Market unverified') }}</small></td>
-                <td :class="t.type==='buy'?'up':t.type==='sell'?'down':''">{{ t.type==='buy'?tr('买入','Buy'):t.type==='sell'?tr('卖出','Sell'):tr('未提供','Unknown') }}</td>
-                <td>{{ money(t.price,t.priceCurrency) }}</td>
-                <td>{{ money(t.quoteQuantity,t.volumeCurrency??t.priceCurrency) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div v-else class="x-empty">{{ selectedPoolId ? tr('所选池暂无已采集的逐笔成交；不代表该池没有交易。', 'No collected trades in the selected pool yet; this does not mean the pool had no trades.') : tr('当前没有已接入市场的逐笔成交记录；不代表没有交易。', 'No per-trade records from connected markets yet; this does not mean there were no trades.') }}</div>
-      </section>
-    </div>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2>{{ tr('链上成交记录', 'On-chain trades') }}</h2>
-        <span class="hint">{{ tr('已收录交易 · 含历史记录', 'Recorded trades · includes history') }}</span>
-      </div>
-      <p class="hint">{{ statText }}</p>
-      <div v-if="bucketSummary.length" class="v3-bucket-strip">
-        <div v-for="bucket in bucketSummary" :key="bucket.bar">
-          <span>{{ bucket.bar }} {{ tr('成交汇总', 'trade summary') }}</span>
-          <strong>{{ usd(bucket.volumeUsd) }}</strong>
-          <small>{{ num(bucket.tradeCount) }} {{ tr('笔', 'trades') }} · {{ bucket.complete ? tr('覆盖完整', 'complete') : `${coveragePct(bucket.coverageRatio)} ${tr('覆盖', 'covered')}` }} · {{ age(bucket.closeTime) }}</small>
-        </div>
-      </div>
-      <div v-if="trades.length" class="scroll">
-        <table class="tbl">
-          <thead><tr><th>{{ tr('时间', 'Time') }}</th><th>{{ tr('方向', 'Side') }}</th><th>{{ tr('美元成交额', 'USD volume') }}</th><th>DEX</th><th>{{ tr('交易', 'Transaction') }}</th></tr></thead>
-          <tbody id="v2TradeBody">
-            <tr v-for="t in trades" :key="t.id" :class="{ 'trade-new': newIds.has(t.id) }">
-              <td>{{ date(t.t) }}</td>
-              <td :class="t.type === 'buy' ? 'up' : 'down'">{{ t.type === 'buy' ? tr('买入', 'Buy') : tr('卖出', 'Sell') }}</td>
-              <td>{{ usd(t.volume) }}</td>
-              <td>{{ t.dex }}</td>
-              <td><a v-if="t.hash" :href="explorer(t.hash, 'tx', chain(asset))" target="_blank" rel="noopener">{{ short(t.hash) }} ↗</a><template v-else>{{ tr('未提供哈希', 'Hash unavailable') }}</template></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div v-else class="x-empty">{{ tr('暂无已收录的成交记录。', 'No recorded trades yet.') }}</div>
-    </section>
-
-    <section class="panel">
-      <h2>{{ tr('前10大地址持仓占比', 'Top-10 address share') }}</h2>
-      <template v-if="asset.risk?.top10 != null">
-        <strong class="kpi-value">{{ num(asset.risk.top10) }}%</strong>
-        <progress max="100" :value="Math.max(0, Math.min(100, asset.risk.top10))"></progress>
-        <p>{{ date(asset.risk.checkedAt) }} · {{ asset.risk.provider ?? asset.fieldSources?.holderTop10 ?? tr('来源待核实', 'Source unverified') }}</p>
-      </template>
-      <div v-else class="x-empty">{{ tr('暂无持仓集中度数据。', 'Holder concentration data unavailable.') }}</div>
-    </section>
-
-    <section class="panel x-ai">
-      <h2>{{ tr('行情摘要', 'Market summary') }}</h2>
-      <p class="hint">{{ tr('DeepSeek 生成 · 基于已收录数据，无价格预测。', 'Generated by DeepSeek from recorded data · no price forecasts.') }}</p>
-      <div class="v2-ai-text">{{ insight ?? insightPlaceholder }}</div>
-    </section>
-
-    <div class="x-grid">
-      <section class="panel">
-        <h2>{{ tr('风险信息', 'Risk information') }}</h2>
-        <template v-if="riskFlags(asset).length"><p v-for="flag in riskFlags(asset)" :key="flag">{{ riskLabel(flag) }}</p></template>
-        <p v-else>{{ asset.riskStatus === 'clear' ? tr('当前规则未触发，不代表无风险。','No current rules triggered; this is not a safety guarantee.') : tr('未检测或数据不足。','Not checked or insufficient data.') }}</p>
-      </section>
-      <section class="panel">
-        <h2>{{ tr('关系时间线', 'Relationship timeline') }}</h2>
-        <EventRow v-for="ev in events" :key="ev.id" :ev="ev" />
-        <p v-if="!events.length">{{ tr('暂无核验记录。', 'No verification records yet.') }}</p>
-      </section>
-    </div>
-  </div>
-  <section v-else-if="error" class="panel x-empty">{{ error }}</section>
-  <section v-else class="panel x-empty">{{ tr('正在加载资产详情…', 'Loading asset details…') }}</section>
+<div class="asset-page">
+<div class="page-heading asset-heading"><RouterLink :to="backLink">← {{ backLabel }}</RouterLink><div class="panel-head"><h2>{{ asset.name || asset.symbol || short(address) }} <small>{{ asset.name?asset.symbol:'' }}</small></h2><button :aria-pressed="followed" @click="account.toggle(watchKey)">{{ followed?tr('★ 已关注','★ Following'):tr('☆ 关注','☆ Follow') }}</button><a v-if="dex" class="asset-dex-action" :href="dex.url" target="_blank" rel="noopener" :title="tr('打开外部行情与交易页面','Open external market and swap page')">{{ tr('去 DEX','Open DEX') }} · {{ dex.provider }} ↗</a></div><p>{{ chainName({chainId:chain}) }} · <span :title="address">{{ short(address) }}</span> <button class="text-button" @click="copyAddress">{{ copied?tr('已复制','Copied'):tr('复制地址','Copy') }}</button> · <a :href="explorer(address,'address',chain)" target="_blank" rel="noopener">{{ tr('链上记录','Onchain') }} ↗</a></p></div>
+<section v-if="error&&!data" class="panel x-empty" role="alert">{{ tr('资产暂时无法加载。','This asset could not be loaded.') }} <button @click="load(true)">{{ tr('重试','Retry') }}</button></section>
+<section v-else-if="!data" class="panel loading-skeleton" role="status" :aria-label="tr('加载资产','Loading asset')"><div v-for="n in 5" :key="n" class="skeleton-line"></div></section>
+<template v-else>
+<p v-if="error" class="hint" role="status">{{ tr('更新暂时失败，保留上次行情。','Update failed; showing the previous quote.') }}</p>
+<div class="asset-price-line" :title="metricTitle('price')"><LiveNumber :value="asset.price" :currency="asset.priceCurrency" format="price" /><b :class="Number(asset.change24h)>0?'up':Number(asset.change24h)<0?'down':''">{{ pct(asset.change24h) }} <small>24h</small></b><QuoteStatus :row="asset" /></div>
+<div class="asset-kpis"><div :title="metricTitle('volume24h')"><span>{{ tr('24h 成交额','24h volume') }}</span><strong><LiveNumber :value="asset.volume24h" :currency="asset.volumeCurrency" /></strong></div><div :title="metricTitle('totalLiquidityUsd')"><span>{{ tr('总流动性','Liquidity') }}</span><strong><LiveNumber :value="asset.totalLiquidityUsd" /></strong></div><div :title="metricTitle('txs24h')"><span>{{ tr('24h 买入 / 卖出','24h buys / sells') }}</span><strong><span class="up">{{ num(asset.buys24h) }}</span> / <span class="down">{{ num(asset.sells24h) }}</span></strong></div><div :title="metricTitle('holders')"><span>{{ tr('持币地址','Holders') }}</span><strong><LiveNumber :value="asset.holders" format="number" /></strong></div></div>
+<nav class="asset-tabs" :aria-label="tr('资产栏目','Asset sections')"><RouterLink v-for="tab in tabs" :key="tab.key" :to="{query:{...route.query,tab:tab.key}}" :class="{active:activeTab===tab.key}" :aria-current="activeTab===tab.key?'page':undefined">{{ tr(tab.zh,tab.en) }}</RouterLink></nav>
+<template v-if="activeTab==='overview'">
+<div class="asset-overview-grid"><section class="panel asset-chart-panel"><div class="panel-head"><h2>{{ tr('价格走势','Price history') }}</h2><label>{{ tr('图表市场','Chart market') }} <select data-chart-market :value="marketSelection.id" @change="choice=$event.target.value"><option :value="asset.priceScope==='exchange'?'base':'dex'">{{ chartBaseLabel }}</option><option v-for="m in exchangeMarkets" :key="`${m.venue}:${m.marketId}`" :value="`${m.venue}:${m.marketId}`">{{ m.provider??m.venue }} · {{ m.marketId }} · {{ m.priceCurrency }}</option><option v-for="p in poolMarkets" :key="p.poolId??p.pool??p.marketId" :value="`pool:${p.poolId??p.pool??p.marketId}`">{{ short(p.poolId??p.pool??p.marketId) }} · {{ p.priceCurrency }}</option></select></label></div><p v-if="selectedPoolId" class="hint" data-pool-unit>{{ tr('所选池以','Selected pool currency:') }} {{ marketSelection.pool.priceCurrency || '—' }}{{ tr('计价','') }} · {{ tr('资产价格仍为主行情报价','Asset price uses the primary quote') }}</p><CandleChart :asset="chartAsset" :samples="data.samples??[]" :pool="selectedPoolId" /><p v-if="sectionErrors.markets" class="hint">{{ tr('市场列表暂时无法更新。','Market list is temporarily unavailable.') }} <button @click="loadSection('markets',true)">{{ tr('重试','Retry') }}</button></p></section><aside class="panel asset-live-trades"><div class="panel-head"><h2>{{ tr('最新成交','Latest trades') }}</h2><RouterLink :to="{query:{...route.query,tab:'trades'}}">{{ tr('全部','All') }} →</RouterLink></div><small class="hint">{{ tradeStatus }}</small><div v-if="loading.trades&&!trades.length" class="loading-skeleton"><div v-for="n in 5" :key="n" class="skeleton-line"></div></div><div v-for="t in trades.slice(0,8)" :key="tradeKey(t)" class="asset-trade-mini"><time :title="date(t.t)">{{ age(t.t) }}</time><span :class="t.type==='buy'?'up':t.type==='sell'?'down':''">{{ t.type==='buy'?tr('买入','Buy'):t.type==='sell'?tr('卖出','Sell'):'—' }}</span><b :title="tradeSourceTitle(t)">{{ tradeAmount(t) }}</b></div><p v-if="sectionErrors.trades" class="hint" role="alert">{{ tr('成交暂时无法更新。','Trades could not be updated.') }} <button @click="loadSection('trades',true)">{{ tr('重试','Retry') }}</button></p><p v-else-if="!trades.length&&!loading.trades" class="x-empty">{{ tr('暂无已收录成交','No recorded trades') }}</p></aside></div>
+<section class="panel"><h2>{{ tr('风险检查','Risk checks') }}</h2><RiskSummary :asset="asset" /></section>
+<section class="panel asset-facts"><h2>{{ tr('资产概况','Asset snapshot') }}</h2><dl><div><dt>{{ tr('关联股票','Related stocks') }}</dt><dd><template v-if="tickers.length"><RouterLink v-for="ticker in tickers" :key="ticker" :to="`/stock/${encodeURIComponent(ticker)}`">{{ ticker }} </RouterLink></template><span v-else>—</span></dd></div><div><dt>{{ tr('关系类型','Relationship') }}</dt><dd>{{ relationshipLabel }}</dd></div><div><dt>{{ tr('行情来源','Quote source') }}</dt><dd>{{ asset.primaryQuote?.provider??asset.fieldSources?.price??asset.provider??'—' }} · {{ date(asset.fieldTimes?.price) }}</dd></div><div><dt>{{ tr('首次收录','First indexed') }}</dt><dd>{{ date(asset.firstSeen) }}</dd></div></dl></section>
+<SpreadPanel v-if="asset.kind==='stock'" :chain="chain" :token="address" />
 </template>
-
+<section v-else-if="activeTab==='trades'" class="panel"><div class="panel-head"><h2>{{ tr('最新成交','Latest trades') }}</h2><span class="hint">{{ tradeStatus }}</span></div><p class="hint">{{ tr('已接入市场的成交记录；时间为实际成交时间。','Trades from connected markets, shown at their trade time.') }}</p><div v-if="loading.trades&&!trades.length" class="loading-skeleton" role="status"><div v-for="n in 6" :key="n" class="skeleton-line"></div></div><div v-else-if="trades.length" class="table-wrap" data-market-trades><table class="tbl"><thead><tr><th>{{ tr('时间','Time') }}</th><th>{{ tr('方向','Side') }}</th><th>{{ tr('价格','Price') }}</th><th>{{ tr('成交额','Amount') }}</th><th>{{ tr('市场','Market') }}</th><th>{{ tr('钱包 / 交易','Wallet / transaction') }}</th></tr></thead><tbody><tr v-for="t in trades" :key="tradeKey(t)" :class="{'trade-new':now-(t.browserReceivedAt??t.receivedAt??0)<2000}"><td :title="date(t.t)">{{ age(t.t) }}</td><td :class="t.type==='buy'?'up':t.type==='sell'?'down':''">{{ t.type==='buy'?tr('买入','Buy'):t.type==='sell'?tr('卖出','Sell'):'—' }}</td><td :title="tradeSourceTitle(t)">{{ money(t.price,t.priceCurrency) }}</td><td :title="tradeSourceTitle(t)">{{ tradeAmount(t) }}</td><td>{{ t.source??t.provider??t.venue??'—' }}<small>{{ short(t.poolId??t.pool??t.marketId) }}</small></td><td><a v-if="t.hash" :href="explorer(t.hash,'tx',chain)" target="_blank" rel="noopener">{{ short(t.wallet??t.hash) }} ↗</a><span v-else>{{ short(t.wallet) }}</span></td></tr></tbody></table></div><p v-else class="x-empty">{{ tr('暂无已收录成交。','No recorded trades yet.') }}</p><button v-if="data.sectionNext?.trades!=null" :disabled="loading.trades" @click="loadSection('trades',true,data.sectionNext.trades)">{{ tr('加载更多','Load more') }}</button><p v-if="sectionErrors.trades" role="alert">{{ tr('成交读取失败。','Trades could not be loaded.') }} <button @click="loadSection('trades',true)">{{ tr('重试','Retry') }}</button></p></section>
+<section v-else-if="activeTab==='holders'" class="panel"><h2>{{ tr('持仓分布','Holder distribution') }}</h2><p v-if="loading.holders" role="status">{{ tr('加载中…','Loading…') }}</p><div class="asset-kpis"><div :title="metricTitle('holders')"><span>{{ tr('持币地址','Holders') }}</span><strong>{{ num(asset.holders) }}</strong></div><div :title="holderSourceTitle"><span>{{ tr('前十大持仓占比','Top 10 holdings') }}</span><strong>{{ data.holdersSummary?.distribution?.top10Percent!=null?Number(data.holdersSummary.distribution.top10Percent).toFixed(1)+'%':'—' }}</strong><small>{{ tr('原始持仓，可能包含池子和合约地址','Raw holdings; may include pools and contracts') }}</small></div></div><RiskSummary :asset="asset" /><p class="hint">{{ tr('调整后的集中度仅在地址排除信息完整时显示。','Adjusted concentration is available only with complete address exclusions.') }}</p><p v-if="sectionErrors.holders" role="alert">{{ tr('持仓读取失败。','Holdings could not be loaded.') }} <button @click="loadSection('holders',true)">{{ tr('重试','Retry') }}</button></p></section>
+<section v-else class="panel"><div class="panel-head"><h2>{{ tr('股票关联','Stock relationships') }}</h2><span class="hint">{{ relations.length }} / {{ data.relationCount??relations.length }}</span></div><p v-if="loading.relations" role="status">{{ tr('加载中…','Loading…') }}</p><article v-for="r in relations" :key="r.id??`${r.chainId??chain}:${r.pool??r.token}:${r.ticker}`" class="asset-relation"><div class="panel-head"><RouterLink :to="`/stock/${encodeURIComponent(r.ticker)}`"><h3>{{ r.ticker }}</h3></RouterLink><RelationBadge :relation="r" /></div><div class="relation-flow"><RouterLink :to="{path:`/asset/${r.chainId??chain}/${r.token}`,query:{tab:'overview',pool:r.pool}}">{{ short(r.token) }}</RouterLink><span v-if="r.pool">↔</span><a v-if="r.pool" :href="explorer(r.pool,'address',String(r.chainId??chain))" target="_blank" rel="noopener">{{ r.protocol }} · {{ short(r.pool) }} ↗</a><span v-if="r.stock">↔ {{ short(r.stock) }}</span></div><p v-if="r.pool" class="hint" :title="`${r.liquiditySource??r.provider??'—'} · ${date(r.liquidityAt)}`">{{ tr('池流动性','Pool liquidity') }} {{ usd(r.liquidityUsd) }} · {{ age(r.liquidityAt) }}</p><RegistryBadge v-if="r.pool" :relation="r" /></article><p v-if="!relations.length&&!loading.relations" class="x-empty">{{ tr('暂无股票关联。','No stock relationships yet.') }}</p><button v-if="data.sectionNext?.relations!=null" :disabled="loading.relations" @click="loadSection('relations',true,data.sectionNext.relations)">{{ tr('加载更多','Load more') }}</button><p v-if="sectionErrors.relations" role="alert">{{ tr('关联读取失败。','Relationships could not be loaded.') }} <button @click="loadSection('relations',true)">{{ tr('重试','Retry') }}</button></p></section>
+</template></div>
+</template>
 <script setup>
+import {computed,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
+import {useRoute} from 'vue-router';
+import {useDetailStore} from '../stores/detail';
+import {useDashboardStore} from '../stores/dashboard';
+import {useAccountStore} from '../stores/account';
+import {tr} from '../i18n';
+import {age,chainName,date,explorer,money,num,pct,short,usd} from '../utils/format';
+import {selectDetailMarket} from '../utils/market-selection';
+import {tradeKey} from '../stores/feed';
+import {detailAsset,detailTrades,dexAction} from '../utils/detail-presentation';
 import LiveNumber from '../components/LiveNumber.vue';
 import QuoteStatus from '../components/QuoteStatus.vue';
-import SpreadPanel from '../components/SpreadPanel.vue';
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
 import CandleChart from '../components/CandleChart.vue';
-import RegistryBadge from '../components/RegistryBadge.vue';
+import RiskSummary from '../components/RiskSummary.vue';
 import RelationBadge from '../components/RelationBadge.vue';
-import EventRow from '../components/EventRow.vue';
-import { useDetailStore } from '../stores/detail';
-import { useDashboardStore } from '../stores/dashboard';
-import { useCandleStore } from '../stores/candles';
-import { getInsight } from '../api/client';
-import { tr, useI18n } from '../i18n';
-import { age, chain, chainName, date, detailLink, explorer, num, pct, short, usd, money } from '../utils/format';
-import { applyQuote } from '../utils/realtime';
-import { selectDetailMarket } from '../utils/market-selection';
-import { candlePacketMatches } from '../utils/candles';
-import { RISK_LABELS, riskFlags, relationStockIdentityStatus } from '../utils/product-labels';
-
-const props = defineProps({
-  chain: { type: String, required: true },
-  address: { type: String, required: true },
-});
-
-const route = useRoute();
-const router = useRouter();
-const detail = useDetailStore();
-const dash=useDashboardStore();
-const candleStreams=useCandleStore();
-const data = ref(null);
-const error = ref(null);
-const insight = ref(null);
-const insightStatus = ref('queued');
-const { lang } = useI18n();
-const riskLabel = flag => tr(...RISK_LABELS[flag]);
-const newIds = reactive(new Set());
-const newMarketIds = reactive(new Set());
-const knownMarketIds = new Set();
-const marketFlashTimers = new Set();
-let marketRowsPrimed = false;
-const marketClock = ref(Date.now());
-const priceFlash = ref(false);
-const knownTradeIds = new Set();
-// Raw numeric SSE values: assignment compares numbers (formatted strings
-// discard real micro-moves); the flash still keys off the displayed text.
-let lastPriceNum = null;
-let lastPriceText = '';
-let lastStockSse = null;
-let lastSse = null; // { price, at } — a poll older than this never wins
-let insightRequest = 0;
-let loadRequest = 0;
-
-const marketChoice=ref(null);
-const baseAsset=computed(()=>data.value?.asset??{});
-const exchangeMarkets=computed(()=>baseAsset.value.exchangeMarkets??[]);
-const poolMarkets=computed(()=>data.value?.poolMarkets??baseAsset.value.poolMarkets??[]);
-const marketSelection=computed(()=>selectDetailMarket(baseAsset.value,exchangeMarkets.value,poolMarkets.value,marketChoice.value));
-const selectedPoolId=computed(()=>marketSelection.value.kind==='pool'?String(marketSelection.value.pool.poolId??marketSelection.value.pool.pool??marketSelection.value.pool.marketId):'');
-const selectedPoolQuote=computed(()=>{
-  if(!selectedPoolId.value)return null;
-  const poolId=selectedPoolId.value.toLowerCase();
-  const currency=String(marketSelection.value.pool.priceCurrency??'').toUpperCase();
-  if(!currency)return null;
-  const matchesTrade=t=>
-    String(t.venue??'').toLowerCase()==='dex' &&
-    String(t.chainId??props.chain)===String(props.chain) &&
-    String(t.token??props.address).toLowerCase()===props.address.toLowerCase() &&
-    String(t.poolId??t.pool??t.marketId??'').toLowerCase()===poolId &&
-    String(t.priceCurrency??'').toUpperCase()===currency &&
-    Number.isFinite(Number(t.price)) && Number(t.price)>0 &&
-    Number(t.t??t.sourceEventAt)>0;
-  const trade=marketTrades.value.filter(matchesTrade).sort((a,b)=>Number(b.t??b.sourceEventAt)-Number(a.t??a.sourceEventAt))[0];
-  const tradeAt=Number(trade?.t??trade?.sourceEventAt)||0;
-  const tradeQuote=trade&&tradeAt>0?{price:Number(trade.price),at:tradeAt,source:trade.source??trade.provider??tr('链上池逐笔成交', 'On-chain pool trade')}:null;
-  // Native pool candles carry the last real trade time. A bare OHLC row does
-  // not establish a trade price for this KPI.
-  candleStreams.version;
-  const candleQuotes=[...candleStreams.series.values()].flatMap(packet=>{
-    if(String(packet.priceCurrency??'').toUpperCase()!==currency || !candlePacketMatches(packet,{chainId:props.chain,token:props.address,venue:'dex',bar:packet.bar,poolId:selectedPoolId.value}))return [];
-    const row=(packet.rows??[]).at(-1);
-    const at=Number(row?.lastEventAt)||0;
-    const price=Number(row?.c);
-    return at>0&&Number.isFinite(price)&&price>0?[{price,at,receivedAt:Number(packet.at)||0,source:packet.source??tr('链上池成交 K 线', 'On-chain pool trade candle')}]:[];
-  }).sort((a,b)=>b.at-a.at||b.receivedAt-a.receivedAt);
-  const candleQuote=candleQuotes[0];
-  return candleQuote&&(!tradeQuote||candleQuote.at>tradeQuote.at)?candleQuote:tradeQuote;
-});
-const poolQuoteAge=computed(()=>{marketClock.value;return age(selectedPoolQuote.value?.at);});
-const activeMarket=computed(()=>marketSelection.value.kind==='exchange'?marketSelection.value.exchange:null);
-const asset = computed(() => {
-  const base=baseAsset.value,market=activeMarket.value;if(!market)return base;
-  return {...base,...market,token:base.token,chainId:base.chainId,priceScope:'exchange',volumeScope:'exchange',quoteType:'exchange-token',txs24h:market.exchangeTrades24h??null,buys24h:null,sells24h:null,
-    fieldTimes:{...base.fieldTimes,price:market.quoteAt,volume24h:market.quoteAt,change24h:market.quoteAt,txs24h:market.quoteAt},fieldSources:{...base.fieldSources,price:market.provider??market.venue},priceProvenance:{timeKind:'market',venue:market.venue,marketAt:market.sourceEventAt??market.quoteAt},quoteStatus:'live'};
-});
-const relations = computed(() => data.value?.relations ?? []);
-const trades = computed(() => data.value?.trades ?? []);
-const marketTrades = computed(() => {
-  const rows = data.value?.marketTrades ?? [];
-  if (!selectedPoolId.value) return rows;
-  const pool = selectedPoolId.value.toLowerCase();
-  return rows.filter(row => String(row.poolId ?? row.pool ?? row.marketId ?? '').toLowerCase() === pool);
-});
-const marketTradeKey = t => `${t.venue ?? ''}:${t.marketId ?? ''}:${t.id}`;
-const marketFreshnessLabel = computed(() => {
-  marketClock.value;
-  const latest = marketTrades.value[0];
-  return latest?.t
-    ? `${tr('最近成交', 'Latest trade')} ${age(latest.t)}`
-    : tr('暂无逐笔记录', 'No per-trade records');
-});
-const events = computed(() => data.value?.events ?? []);
-const bucketSummary = computed(() => ['1m', '5m', '1h'].flatMap((bar) => {
-  const rows = data.value?.tradeBuckets?.[bar] ?? [];
-  const row = [...rows].reverse().find((item) => item.closeTime <= Date.now());
-  return row ? [{ ...row, bar }] : [];
-}));
-function coveragePct(value) {
-  const n = Math.max(0, Math.min(1, Number(value) || 0)) * 100;
-  return `${n < 10 && n > 0 ? n.toFixed(1) : Math.round(n)}%`;
-}
-const backLink = computed(() => (route.query.from === 'stock' ? '/stock' : '/meme'));
-const backLabel = computed(() => (route.query.from === 'stock' ? tr('股票', 'Stock') : tr('Meme', 'Meme')) + ' Radar');
-const verdictTitle = computed(() =>
-  relations.value.some((r) => relationStockIdentityStatus(r) === 'official')
-    ? tr('官方股票代币池配对', 'Approved stock-token pair')
-    : relations.value.some((r) => r.status === 'verified')
-      ? tr('池结构已核验 · 股票身份待核验', 'Pool structure verified · stock identity pending')
-    : asset.value.kind === 'stock'
-      ? tr('已收录股票代币', 'Stock token catalogued')
-      : tr('关系待核实', 'Relationship pending verification'),
-);
-const statText = computed(() =>
-  asset.value.tradeAt
-    ? tr('链上池成交记录，可能不完整；不含中心化交易所成交。', 'On-chain pool trades; coverage may be incomplete. Centralized exchange trades are excluded.')
-    : tr('暂无成交数据，不代表没有交易。', 'Trade data unavailable; this does not mean there were no trades.'),
-);
-const insightPlaceholder = computed(() => {
-  if (insightStatus.value === 'disabled') return tr('行情摘要暂未启用。', 'Market summaries are not enabled.');
-  if (insightStatus.value === 'upstream_failed') return tr('摘要暂时无法更新。', 'The summary could not be updated.');
-  return tr('摘要准备中…', 'Preparing summary…');
-});
-const volumeScopeLabel = computed(() => {
-  if (asset.value.volumeScope === 'exchange' || asset.value.priceScope === 'exchange') {
-    return asset.value.provider ?? asset.value.venue ?? tr('交易所', 'Exchange');
-  }
-  return asset.value.provider ?? asset.value.venue ?? 'DEX';
-});
-watch(() => marketTrades.value.map(marketTradeKey), keys => {
-  if (!marketRowsPrimed) {
-    keys.forEach(key => knownMarketIds.add(key));
-    marketRowsPrimed = true;
-    return;
-  }
-  for (const key of keys) {
-    if (knownMarketIds.has(key)) continue;
-    knownMarketIds.add(key);
-    newMarketIds.add(key);
-    const timer = setTimeout(() => {
-      newMarketIds.delete(key);
-      marketFlashTimers.delete(timer);
-    }, 2000);
-    marketFlashTimers.add(timer);
-  }
-  while (knownMarketIds.size > 1000) knownMarketIds.delete(knownMarketIds.values().next().value);
-});
-
-const okxUrl = computed(() => {
-  const cid = chain(asset.value);
-  const host = { 196: 'xlayer', 56: 'bsc', 4663: 'robinhood' }[cid] ?? 'xlayer';
-  return `https://www.okx.com/web3/detail?chain=${host}&address=${encodeURIComponent(asset.value.token ?? '')}`;
-});
-function flashPrice() {
-  priceFlash.value = false;
-  requestAnimationFrame(() => (priceFlash.value = true));
-  setTimeout(() => (priceFlash.value = false), 1200);
-}
-let disposed = false;
-let watchedAsset = null;
-function isCurrentAsset(chainId, address) {
-  return String(props.chain) === chainId && props.address.toLowerCase() === address;
-}
-function unwatchCurrent() {
-  if (watchedAsset && detail.current?.chain === watchedAsset.chainId && detail.current?.address === watchedAsset.address) detail.unwatch();
-  watchedAsset = null;
-}
-async function load(force = false) {
-  const chainId = String(props.chain);
-  const address = props.address.toLowerCase();
-  const request = ++loadRequest;
-  detail.watch(chainId, address);
-  watchedAsset = { chainId, address };
-  try {
-    const d = await detail.fetch(chainId, address, { force });
-    if (disposed || request !== loadRequest || !isCurrentAsset(chainId, address)) return;
-    if (lastStockSse && d.stock && (d.stock.quoteAt ?? 0) < lastStockSse.marketAt) {
-      applyQuote(d.stock, lastStockSse);
-    }
-    if (d.stock && d.asset && d.stock.price != null && d.asset.priceScope === d.stock.priceScope) applyQuote(d.asset, d.stock);
-    if (data.value?.trades?.length) {
-      const merged = new Map((d.trades ?? []).map(t => [t.id, t]));
-      for (const t of data.value.trades) if (!merged.has(t.id)) merged.set(t.id, t);
-      d.trades = [...merged.values()].sort((a,b) => b.t-a.t).slice(0,150);
-    }
-    data.value = d;
-    error.value = null;
-    // A full snapshot may be older than the last SSE tick: the newer value wins.
-    if (d.asset && !d.stock && lastSse) applyQuote(data.value.asset, lastSse);
-    const priceText = money(d.asset?.price, d.asset?.priceCurrency);
-    if (lastPriceText && priceText !== lastPriceText) flashPrice();
-    lastPriceText = priceText;
-    lastPriceNum = d.asset?.price ?? null;
-    for (const t of d.trades ?? []) knownTradeIds.add(t.id);
-    loadInsight();
-  } catch (e) {
-    if (disposed || request !== loadRequest || !isCurrentAsset(chainId, address)) return;
-    unwatchCurrent();
-    error.value = tr('资产未收录或暂时无法加载。', 'Asset not listed or temporarily unavailable.');
-  }
-}
-
-async function loadInsight() {
-  const request = ++insightRequest;
-  const language = lang.lang;
-  try {
-    const r = await getInsight(props.chain, props.address, language);
-    if (disposed || request !== insightRequest || language !== lang.lang) return;
-    insightStatus.value = r?.status ?? r?.reason ?? 'queued';
-    insight.value = r?.text ?? null;
-  } catch {
-    if (request !== insightRequest || language !== lang.lang) return;
-    insightStatus.value = 'upstream_failed';
-  }
-}
-
-function copyAddress() {
-  navigator.clipboard?.writeText(asset.value.token ?? '');
-}
-
-function onSsePrice(e) {
-  const d = e.detail;
-  if (data.value?.stock && asset.value.priceScope !== 'dex') return;
-  if (!asset.value?.token || asset.value.token !== d.token || String(d.chainId ?? '196') !== props.chain) return;
-  const knownAt = Math.max(lastSse?.at ?? 0, asset.value.fieldTimes?.price ?? asset.value.quoteAt ?? 0);
-  if (knownAt > (d.at ?? 0)) return;
-  const previousPrice = asset.value.price;
-  if (!applyQuote(asset.value, d)) return;
-  if (data.value?.stock) applyQuote(data.value.stock, d);
-  lastSse = { ...d };
-  if (d.price !== lastPriceNum || previousPrice !== asset.value.price) {
-    lastPriceNum = d.price;
-    const text = money(d.price, asset.value.priceCurrency);
-    if (text !== lastPriceText) {
-      lastPriceText = text;
-      flashPrice();
-    }
-  }
-}
-
-function onSseStockQuote(e) {
-  const d = e.detail;
-  if (!data.value?.stock) return;
-  const addr = data.value.stock.tokenContractAddress?.toLowerCase();
-  if (addr !== d.token || String(d.chainId ?? '196') !== props.chain) return;
-  if ((lastStockSse?.marketAt ?? data.value.stock.quoteAt ?? 0) > d.marketAt) return;
-  lastStockSse = d;
-  if (d.price != null) {
-    if (asset.value.price !== d.price) flashPrice();
-    asset.value.price = d.price;
-    asset.value.fieldTimes = {...asset.value.fieldTimes, price: d.marketAt};
-    data.value.stock.price = d.price;
-    data.value.stock.quoteAt = d.marketAt;
-  }
-  if (d.change24h != null) data.value.stock.change24h = d.change24h;
-  if (d.volume24h != null) data.value.stock.volume24h = d.volume24h;
-  if (d.change24h != null) asset.value.change24h = d.change24h;
-  if (d.volume24h != null) asset.value.volume24h = d.volume24h;
-  applyQuote(asset.value, d);
-  applyQuote(data.value.stock, d);
-}
-
-function onSseTrades(e) {
-  const d = e.detail;
-  if (!asset.value?.token || asset.value.token !== d.token || String(d.chainId ?? '196') !== props.chain) return;
-  for (const t of d.fresh ?? []) {
-    if (knownTradeIds.has(t.id)) continue;
-    knownTradeIds.add(t.id);
-    data.value.trades.unshift(t);
-    newIds.add(t.id);
-    setTimeout(() => newIds.delete(t.id), 2000);
-  }
-  data.value.trades.sort((a,b) => b.t-a.t);
-  if (data.value.trades.length > 150) data.value.trades.length = 150;
-}
-
-let pollTimer;
-let insightTimer;
-let marketClockTimer;
-let releaseActive;
-let lastDetailLoad=0;
-function switchAsset() {
-  releaseActive?.();
-  releaseActive = detail.activate(props.chain, props.address);
-  ++insightRequest;
-  data.value = null;
-  error.value = null;
-  insight.value = null;
-  insightStatus.value = 'queued';
-  marketChoice.value = route.query.pool ? `pool:${route.query.pool}` : null;
-  marketRowsPrimed = false;
-  knownMarketIds.clear();
-  newMarketIds.clear();
-  for (const timer of marketFlashTimers) clearTimeout(timer);
-  marketFlashTimers.clear();
-  knownTradeIds.clear();
-  newIds.clear();
-  lastStockSse = null;
-  lastSse = null;
-  lastPriceNum = null;
-  lastPriceText = '';
-  priceFlash.value = false;
-  load();
-}
-function onMarketChoice(choice){
-  marketChoice.value=choice;
-  marketRowsPrimed=false;
-  knownMarketIds.clear();
-  newMarketIds.clear();
-  const pool=choice.startsWith('pool:')?choice.slice(5):undefined;
-  if(String(route.query.pool??'')!==String(pool??''))router.replace({query:{...route.query,pool}});
-}
-watch(() => route.query.pool, pool => {
-  if(pool)marketChoice.value=`pool:${pool}`;
-  else if(marketChoice.value?.startsWith('pool:'))marketChoice.value=baseAsset.value.priceScope==='exchange'?'base':'dex';
-});
-function onResourceChange(event){
-  const r=event.detail??{};
-  if(r.chainId&&String(r.chainId)!==props.chain||r.token&&String(r.token).toLowerCase()!==props.address.toLowerCase())return;
-  if(r.kind==='insight'||r.kind==='all')loadInsight();
-}
-watch(() => asset.value.price, (value,old)=>{if(value!=null&&old!=null&&value!==old)flashPrice();});
-onMounted(() => {
-  window.addEventListener('resource-change',onResourceChange);
-  switchAsset();
-  pollTimer = setInterval(() => { if (!document.hidden && (!dash.hasProjectionStream || Date.now()-lastDetailLoad>60000)) {lastDetailLoad=Date.now();load(true);} }, 20000);
-  insightTimer = setInterval(() => {if(!dash.hasProjectionStream&&!document.hidden)loadInsight();}, 15000);
-  marketClockTimer = setInterval(() => (marketClock.value = Date.now()), 30000);
-  window.addEventListener('manual-refresh', onManualRefresh);
-  window.addEventListener('sse-price', onSsePrice);
-  window.addEventListener('sse-stock-quote', onSseStockQuote);
-  window.addEventListener('sse-trades', onSseTrades);
-});
-onBeforeUnmount(() => {
-  disposed = true;
-  ++loadRequest;
-  ++insightRequest;
-  releaseActive?.();
-  window.removeEventListener('resource-change',onResourceChange);
-  clearInterval(pollTimer);
-  clearInterval(insightTimer);
-  clearInterval(marketClockTimer);
-  for (const timer of marketFlashTimers) clearTimeout(timer);
-  unwatchCurrent();
-  window.removeEventListener('sse-price', onSsePrice);
-  window.removeEventListener('sse-stock-quote', onSseStockQuote);
-  window.removeEventListener('sse-trades', onSseTrades);
-  window.removeEventListener('manual-refresh', onManualRefresh);
-});
-watch(() => `${props.chain}:${props.address.toLowerCase()}`, () => {
-  if (!disposed) switchAsset();
-});
-function onManualRefresh() { load(true); loadInsight(); }
-watch(() => lang.lang, () => {
-  insight.value = null;
-  loadInsight();
-});
+import RegistryBadge from '../components/RegistryBadge.vue';
+import SpreadPanel from '../components/SpreadPanel.vue';
+const props=defineProps({chain:{type:String,required:true},address:{type:String,required:true}});
+const route=useRoute(),detail=useDetailStore(),dash=useDashboardStore(),account=useAccountStore();
+const error=ref(null),copied=ref(false),now=ref(Date.now()),choice=ref(null),loading=reactive({}),sectionErrors=reactive({});
+const data=computed(()=>detail.cache.get(`${props.chain}:${props.address.toLowerCase()}`)?.data??null),asset=computed(()=>detailAsset(data.value?.asset,props.chain,props.address));
+const dex=computed(()=>dexAction(props.chain,props.address));
+const tabs=[{key:'overview',zh:'概览',en:'Overview'},{key:'trades',zh:'成交',en:'Trades'},{key:'holders',zh:'持仓',en:'Holders'},{key:'relation',zh:'关联',en:'Relationships'}];
+const activeTab=computed(()=>tabs.some(t=>t.key===route.query.tab)?route.query.tab:'overview');
+const watchKey=computed(()=>`${props.chain}:${props.address.toLowerCase()}`),followed=computed(()=>account.watches.includes(watchKey.value));
+const backLink=computed(()=>({path:route.query.from==='stock'?(route.query.ticker?'/stock/'+encodeURIComponent(route.query.ticker):'/stock'):route.query.from==='watch'?'/watch':route.query.from==='live'?'/live':'/meme',query:{chain:route.query.chain}})),backLabel=computed(()=>route.query.from==='stock'?tr('股票','Stocks'):route.query.from==='watch'?tr('我的关注','Watchlist'):route.query.from==='live'?tr('首页','Home'):'Meme');
+const relations=computed(()=>data.value?.relations??[]),tickers=computed(()=>[...new Set([...relations.value.map(r=>r.ticker),asset.value.match?.ticker].filter(Boolean))]),hasPool=computed(()=>relations.value.some(r=>r.level==='A'&&r.status==='verified'&&r.pool));
+const relationshipLabel=computed(()=>hasPool.value?tr('池子配对','Pool pairing'):asset.value.match?.level==='B'||relations.value.some(r=>r.level==='B')?tr('名称匹配','Name match'):Number(data.value?.relationCount??0)>relations.value.length?tr('查看关联栏目','See relationships'):tr('暂无股票关联','No stock relationship'));
+const exchangeMarkets=computed(()=>asset.value.exchangeMarkets??data.value?.markets?.filter?.(m=>m.venue!=='dex')??[]),poolMarkets=computed(()=>data.value?.poolMarkets??asset.value.poolMarkets??data.value?.markets?.filter?.(m=>m.venue==='dex')??[]);
+const marketSelection=computed(()=>selectDetailMarket(asset.value,exchangeMarkets.value,poolMarkets.value,choice.value)),selectedPoolId=computed(()=>marketSelection.value.kind==='pool'?String(marketSelection.value.pool.poolId??marketSelection.value.pool.pool??marketSelection.value.pool.marketId):'');
+// Chart market selection never changes the canonical headline quote.
+const chartAsset=computed(()=>marketSelection.value.kind==='exchange'?{...asset.value,...marketSelection.value.exchange,token:asset.value.token,chainId:asset.value.chainId,priceScope:'exchange'}:asset.value);
+const trades=computed(()=>detailTrades(data.value,marketSelection.value));
+const chartBaseLabel=computed(()=>`${asset.value.primaryQuote?.provider??asset.value.fieldSources?.price??asset.value.provider??tr('主行情','Primary quote')} · ${asset.value.priceCurrency??'—'}`);
+const holderSourceTitle=computed(()=>`${data.value?.holdersSummary?.distribution?.provider??'—'} · ${date(data.value?.holdersSummary?.distribution?.checkedAt)}`);
+function tradeSourceTitle(t){return `${t.source??t.provider??t.venue??'—'} · ${date(t.t)}`;}
+const tradeStatus=computed(()=>{now.value;const lag=Math.max(0,...trades.value.slice(0,1).map(t=>Number(t.delayMs??0)));return lag>30000?tr(`延迟约 ${Math.ceil(lag/1000)} 秒`,`Delayed ~${Math.ceil(lag/1000)}s`):dash.hasProjectionStream?tr('实时推送已连接','Live stream connected'):tr('定时更新','Periodic updates');});
+function metricTitle(field){return `${asset.value.fieldSources?.[field]??asset.value.primaryQuote?.provider??asset.value.provider??'—'} · ${date(asset.value.fieldTimes?.[field])}`;}
+function tradeAmount(t){if(t.quoteQuantity!=null&&t.volumeCurrency)return money(t.quoteQuantity,t.volumeCurrency);return t.volume!=null&&(!t.volumeCurrency||t.volumeCurrency==='USD')?usd(t.volume):'—';}
+let generation=0,release,timer,disposed=false;
+async function loadSection(section,force=false,offset=0){const gen=generation,c=props.chain,a=props.address;loading[section]=true;sectionErrors[section]=false;try{await detail.fetchSection(c,a,section,{force,offset});}catch{if(gen===generation)sectionErrors[section]=true;}finally{if(gen===generation)loading[section]=false;}}
+function loadActive(force=false){if(!data.value)return;const section=activeTab.value==='overview'?'markets':activeTab.value==='relation'?'relations':activeTab.value;loadSection(section,force);if(section==='trades')loadSection('markets',force);if(section==='markets')loadSection('trades',force);}
+async function load(force=false){const gen=generation;try{await detail.fetch(props.chain,props.address,{force});if(gen!==generation||disposed)return;error.value=null;loadActive(force);}catch(e){if(gen===generation)error.value=e.message;}}
+function switchAsset(){++generation;release?.();detail.watch(props.chain,props.address);release=detail.activate(props.chain,props.address);error.value=null;choice.value=route.query.pool?`pool:${route.query.pool}`:null;Object.keys(loading).forEach(k=>delete loading[k]);Object.keys(sectionErrors).forEach(k=>delete sectionErrors[k]);load();}
+async function copyAddress(){try{await navigator.clipboard.writeText(props.address);copied.value=true;setTimeout(()=>copied.value=false,1500);}catch{copied.value=false;}}
+function invalidate(e){const r=e.detail??{};if(r.chainId&&String(r.chainId)!==props.chain||r.token&&String(r.token).toLowerCase()!==props.address.toLowerCase())return;loadActive(true);}
+function manual(){load(true);}
+watch(()=>`${props.chain}:${props.address}`,switchAsset);watch(activeTab,()=>loadActive());watch(()=>route.query.pool,pool=>{choice.value=pool?`pool:${pool}`:null;});
+onMounted(()=>{switchAsset();timer=setInterval(()=>{now.value=Date.now();if(!document.hidden&&(!dash.hasProjectionStream||Date.now()-(detail.cache.get(watchKey.value)?.at??0)>60000))load(true);},20000);window.addEventListener('resource-change',invalidate);window.addEventListener('manual-refresh',manual);});
+onBeforeUnmount(()=>{disposed=true;++generation;release?.();detail.unwatch();clearInterval(timer);window.removeEventListener('resource-change',invalidate);window.removeEventListener('manual-refresh',manual);});
 </script>
+<style scoped>
+.asset-overview-grid{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px}.asset-trade-mini{display:grid;grid-template-columns:1fr 45px 80px;gap:8px;align-items:center;border-bottom:1px solid var(--border);padding:15px 0;font-size:12px}.asset-trade-mini time{color:var(--muted)}.asset-trade-mini b{text-align:right}@media(max-width:1100px){.asset-overview-grid{grid-template-columns:minmax(0,1fr)}.asset-live-trades{display:block}.asset-trade-mini:nth-of-type(n+6){display:none}}
+.asset-dex-action{display:inline-flex;align-items:center;justify-content:center;padding:8px 12px;border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:13px}.asset-heading .panel-head{flex-wrap:wrap}.asset-heading .panel-head h2{margin-right:auto}.asset-chart-panel select{max-width:100%}.asset-page{display:grid;gap:16px}.asset-heading h2{margin:8px 0}.asset-heading small{font-size:14px;color:var(--muted)}.asset-heading button{background:var(--surface-raised);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:5px;cursor:pointer}.asset-heading .text-button{background:none;border:0;padding:2px;color:var(--accent)}.asset-price-line{display:flex;align-items:center;flex-wrap:wrap;gap:20px}.asset-price-line>:first-child{font-size:32px;font-weight:600;font-variant-numeric:tabular-nums}.asset-price-line small{font-size:12px;color:var(--muted)}.asset-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid var(--border);border-radius:7px;background:var(--panel)}.asset-kpis>div{display:grid;gap:8px;padding:18px;border-right:1px solid var(--border)}.asset-kpis>div:last-child{border:0}.asset-kpis>div>span,.asset-kpis small{font-size:12px;color:var(--muted)}.asset-kpis strong{font-size:19px;font-variant-numeric:tabular-nums}.asset-tabs{display:flex;gap:28px;border-bottom:1px solid var(--border)}.asset-tabs a{padding:12px 0;border-bottom:2px solid transparent}.asset-tabs a.active{border-color:var(--accent);color:var(--text)}.asset-chart-panel{min-height:420px}.asset-facts dl>div{display:grid;grid-template-columns:130px 1fr;gap:15px;padding:10px 0;border-bottom:1px solid var(--border)}.asset-facts dt{color:var(--muted)}.asset-facts dd{margin:0}.asset-facts a{margin-right:12px}.asset-relation{padding:18px 0;border-bottom:1px solid var(--border)}.relation-flow{display:flex;gap:15px;flex-wrap:wrap}.table-wrap{overflow-x:auto}.table-wrap table{min-width:690px}@media(max-width:700px){.asset-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.asset-kpis>div{border-bottom:1px solid var(--border)}.asset-price-line>:first-child{font-size:28px}.asset-tabs{gap:22px}.asset-chart-panel .panel-head{align-items:flex-start;gap:10px;flex-direction:column}.asset-facts dl>div{grid-template-columns:100px 1fr}.asset-heading .panel-head{align-items:flex-start}.asset-kpis strong{font-size:17px}}
+</style>

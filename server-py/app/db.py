@@ -18,6 +18,8 @@ DB_PATH = os.environ.get("RESEARCH_DB", "data/research.sqlite")
 WAL_JOURNAL_SIZE_LIMIT_BYTES = 256 * 1024 * 1024
 QUOTE_BUSY_TIMEOUT_MS = 2000
 CHECKPOINT_BUSY_TIMEOUT_MS = 250
+STARTUP_RETRY_SECONDS = 300
+STARTUP_MAX_ATTEMPTS = 400
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(kind,id));
@@ -101,6 +103,21 @@ def _is_transient_write_busy(exc: BaseException) -> bool:
     code = getattr(exc, 'sqlite_errorcode', None)
     if code is not None:
         return code == sqlite3.SQLITE_BUSY
+    return 'database is locked' in str(exc).lower()
+
+
+def _is_startup_busy(exc: BaseException) -> bool:
+    """Opening/recovering WAL may return an extended BUSY code immediately.
+
+    Keep this separate from transaction retry: BUSY_SNAPSHOT and logical
+    LOCKED errors must not silently replay a live transaction.
+    """
+    if not isinstance(exc, aiosqlite.OperationalError):
+        return False
+    code = getattr(exc, 'sqlite_errorcode', None)
+    if code is not None:
+        return code in {sqlite3.SQLITE_BUSY, getattr(sqlite3, 'SQLITE_BUSY_RECOVERY', 261),
+                        getattr(sqlite3, 'SQLITE_BUSY_TIMEOUT', 773)}
     return 'database is locked' in str(exc).lower()
 
 
@@ -207,9 +224,29 @@ class ResearchStore:
         directory = os.path.dirname(self.path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        self.db = await aiosqlite.connect(self.path)
-        self.db.row_factory = aiosqlite.Row
+        deadline = time.monotonic()+STARTUP_RETRY_SECONDS
+        for attempt in range(STARTUP_MAX_ATTEMPTS):
+            remaining = max(0, deadline-time.monotonic())
+            timeout_ms = max(1, min(15000, int(remaining*1000)))
+            try:
+                await self._connect_once(timeout_ms)
+                return self
+            except aiosqlite.OperationalError as exc:
+                remaining = deadline-time.monotonic()
+                if (not _is_startup_busy(exc) or remaining <= 0
+                        or attempt+1 >= STARTUP_MAX_ATTEMPTS):
+                    raise
+                # Closing the failed handle and releasing the writer lock
+                # happens before waiting. Another process can finish recovery.
+                await asyncio.sleep(min(remaining, 0.1*2**min(attempt, 3), 1.0))
+
+    async def _connect_once(self, startup_timeout_ms: int) -> None:
+        # Keep the handle reachable even if opening is cancelled or fails.
+        connection = aiosqlite.connect(self.path, timeout=startup_timeout_ms/1000)
+        self.db = connection
         try:
+            await connection
+            connection.row_factory = aiosqlite.Row
             # DDL is a writer too. It must participate in the exact same
             # process lock as collector transactions; otherwise a concurrent
             # connect can wait on a transaction whose task is waiting for DDL.
@@ -218,8 +255,8 @@ class ResearchStore:
                 # while another process is writing. Give startup the normal
                 # DDL budget, then use the quote lane's short timeout for
                 # recurring observations after initialization completes.
-                await self.db.execute("PRAGMA busy_timeout=15000")
-                await self.db.execute("PRAGMA journal_mode=WAL")
+                await self.fetchone(f"PRAGMA busy_timeout={startup_timeout_ms}")
+                await self.fetchone("PRAGMA journal_mode=WAL")
                 if self.path != ':memory:':
                     # Cap the reusable WAL file after SQLite's normal reset;
                     # this does not force a checkpoint or interrupt readers.
@@ -232,13 +269,14 @@ class ResearchStore:
                     await self.db.executescript('BEGIN IMMEDIATE;\n' + trigger_schema(replace=True))
                     await self.db.execute("INSERT INTO realtime_schema_version VALUES ('triggers',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", (version,))
                 await self.db.commit()
-                if self.busy_timeout_ms != 15000:
-                    await self.db.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
+                if self.busy_timeout_ms != startup_timeout_ms:
+                    await self.fetchone(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
         except BaseException:
-            await self.db.close()
-            self.db = None
+            try:
+                await asyncio.shield(connection.close())
+            finally:
+                self.db = None
             raise
-        return self
 
     async def close(self) -> None:
         if self._checkpoint_db:

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 os.environ['NODE_ENV'] = 'test'
 
 from app.stock_identity import (MANIFEST, RULE_VERSION, assess_pool_relation,
-                                manifest_status, match_name, token_identity)
+                                classify_derivative, manifest_status, match_name, token_identity)
 
 NOW = 1_790_341_200_000
 NATIVE = '0xc845b2894dbddd03858fd2d643b4ef725fe0849d'
@@ -87,6 +87,23 @@ class StockIdentityTest(unittest.TestCase):
         self.assertEqual(match_name('TSLACAT', 'xTeslaCat'), None)
         self.assertEqual(match_name('BTC', 'Bitcoin'), None)
         self.assertEqual(match_name('MSTR', 'Strategy')['level'], 'B')
+
+    def test_derivative_names_are_separate_and_cannot_become_meme_name_clues(self):
+        for symbol, name, kind in (('TSLA3L', 'Tesla 3x Long', 'leverage'),
+                                    ('GME', 'GameStop leveraged token', 'leverage'),
+                                    ('WNVDA', 'Wrapped NVIDIA', 'wrapper'),
+                                    ('TSLA', 'Tesla index token', 'index'),
+                                    ('TENCENT', '腾讯指数', 'index')):
+            with self.subTest(symbol=symbol, name=name):
+                category = classify_derivative(symbol, name)
+                self.assertEqual(category['kind'], kind)
+                self.assertEqual(category['evidenceStatus'], 'name-only')
+                self.assertIsNone(match_name(symbol, name))
+        for symbol, name in (('MSTR', 'Strategy'), ('NVDA', 'NVIDIA meme'),
+                              ('AMC', 'A MEME CAT'), ('WON', 'Wonder cat'), ('XTSLA', 'xTeslaCat')):
+            self.assertIsNone(classify_derivative(symbol, name))
+        self.assertIsNone(match_name('CAT', 'A MEME CAT'))
+        self.assertIsNone(match_name('AMCAT', 'AMCAT'))
 
 
 class CollectorQualificationTest(unittest.IsolatedAsyncioTestCase):

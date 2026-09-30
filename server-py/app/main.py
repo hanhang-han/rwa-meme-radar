@@ -9,11 +9,11 @@ from pathlib import Path
 from .config import load_env
 
 load_env()
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
-from .api import ai_route, candles, comparisons, dashboard, developer, misc, public_v1, stream, token
+from .api import ai_route, candles, comparisons, dashboard, developer, misc, public_v1, stream, token, telegram
 from . import developer_access
 
 
@@ -45,6 +45,7 @@ app.include_router(candles.router, prefix="/api")
 app.include_router(ai_route.router, prefix="/api")
 app.include_router(misc.router, prefix="/api")
 app.include_router(developer.router, prefix="/api")
+app.include_router(telegram.router, prefix="/api")
 app.include_router(public_v1.router, prefix="/api")
 
 
@@ -262,7 +263,16 @@ async def _health_storage_snapshot(now):
 
 
 @app.get("/api/health/data")
-async def health_data():
+async def health_data(request: Request):
+    from .user_features import is_operator
+    user, _ = await developer._session(request)
+    if not is_operator(user):
+        raise HTTPException(403, detail='operator-required', headers={'Cache-Control': 'no-store'})
+    return JSONResponse(await health_data_payload(), headers={'Cache-Control': 'no-store'})
+
+
+async def health_data_payload():
+    """Internal diagnostics. Only the authenticated HTTP wrapper exposes it."""
     from . import state
     now = int(time.time() * 1000)
     storage_error = False

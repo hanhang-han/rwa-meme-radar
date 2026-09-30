@@ -9,7 +9,7 @@
 // trades when that scope changes or the page returns to the market lists.
 import { watch } from 'vue';
 import { API_BASE } from '../api/client.js';
-import { useDashboardStore } from '../stores/dashboard.js';
+import { projectionByteLength, useDashboardStore } from '../stores/dashboard.js';
 import { useDetailStore } from '../stores/detail.js';
 import { useFeedStore } from '../stores/feed.js';
 import { useComparisonStore } from '../stores/comparisons.js';
@@ -74,9 +74,75 @@ export function parseSseFrame(frame) {
 
 export function appendSseChunk(buffer, chunk) {
   // Nginx/upstream implementations may use either LF or CRLF. Normalize the
-  // accumulated buffer so a CRLF separator split across network chunks still
-  // becomes the same blank-line boundary consumed below.
-  return `${buffer}${chunk}`.replace(/\r\n/g, '\n');
+  // incoming chunk only: repeatedly replacing an incomplete multi-MB frame
+  // would scan its entire prefix again for every network read.
+  if (buffer.endsWith('\r') && chunk.startsWith('\n')) {
+    return `${buffer.slice(0, -1)}\n${chunk.slice(1).replace(/\r\n/g, '\n')}`;
+  }
+  return buffer + chunk.replace(/\r\n/g, '\n');
+}
+
+const yieldToMainThread = () => new Promise(resolve => setTimeout(resolve, 0));
+const monotonicNow = () => globalThis.performance?.now() ?? Date.now();
+
+// Awaiting an already-resolved frame handler only drains microtasks. A replay
+// backlog can therefore starve input and rendering even though this is async.
+// Keep one ordered consumer and stop reading while yielding (backpressure).
+// Frames are never coalesced or dropped; the caller commits each cursor only
+// after its handler completes. A single JSON parse/projection is still atomic,
+// so server-side frame size limits remain necessary for large projections.
+export async function consumeSseStream(reader, onFrame, {
+  signal,
+  isCurrent = () => true,
+  onChunk = () => {},
+  yieldToMain = yieldToMainThread,
+  now = monotonicNow,
+  maxFrames = 20,
+  maxChars = 256 * 1024,
+  maxMs = 8,
+} = {}) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let searchFrom = 0;
+  let frames = 0;
+  let chars = 0;
+  let startedAt = now();
+  const active = () => !signal?.aborted && isCurrent();
+  async function yieldIfNeeded() {
+    if (frames >= maxFrames || chars >= maxChars || now() - startedAt >= maxMs) {
+      await yieldToMain();
+      frames = 0;
+      chars = 0;
+      startedAt = now();
+    }
+    return active();
+  }
+
+  while (active()) {
+    const { done, value } = await reader.read();
+    if (!active() || done) return;
+    onChunk();
+    buffer = appendSseChunk(buffer, decoder.decode(value, { stream: true }));
+    chars += value.byteLength;
+    // Yield while receiving a large incomplete frame as well as before a
+    // complete large frame, not only after JSON.parse has already run.
+    if (!await yieldIfNeeded()) return;
+    let consumed = 0;
+    let boundary;
+    while ((boundary = buffer.indexOf('\n\n', searchFrom)) >= 0) {
+      const frame = buffer.slice(consumed, boundary);
+      await onFrame(frame);
+      consumed = boundary + 2;
+      searchFrom = consumed;
+      frames += 1;
+      chars += frame.length;
+      if (!await yieldIfNeeded()) return;
+    }
+    buffer = buffer.slice(consumed);
+    // Only the tail can acquire a new separator. Keep two characters because
+    // a trailing "\n\r" can normalize to "\n\n" when the next read starts LF.
+    searchFrom = Math.max(0, buffer.length - 2);
+  }
 }
 
 async function connectStream(generation) {
@@ -102,7 +168,7 @@ async function connectStream(generation) {
       if (lastEventId != null) headers['Last-Event-ID'] = String(lastEventId);
       const query=new URLSearchParams({snapshot:'false',protocol:'1',candles:useCandleStore().subscriptionScope});
       const tradeScope=currentTradeScope();
-      if(tradeScope)query.set('trades',tradeScope);
+      query.set('trades',tradeScope || 'feed');
       // The home view loads its own scoped feed. Only reload global history
       // when leaving a detail page, whose stream intentionally excluded it.
       if(previousTradeScope && !tradeScope)useFeedStore().load();
@@ -112,33 +178,27 @@ async function connectStream(generation) {
       if (!res.ok || !res.body) throw new Error('stream unavailable');
       dash.setStreamStatus({ connected: true, state: 'syncing', lastAt: Date.now() });
       const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) throw new Error('stream closed');
-        received = Date.now();
-        buf = appendSseChunk(buf, dec.decode(value, { stream: true }));
-        let idx;
-        while ((idx = buf.indexOf('\n\n')) >= 0) {
-          const frame = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          const { event, id, data } = parseSseFrame(frame);
-          if(id&&lastEventId!=null&&Number(id)<=Number(lastEventId))continue;
-          if (data && event !== 'heartbeat') {
-            const applied = await handleStreamEvent(event, data);
-            if (id && !applied) {
-              // A new server event/schema must not trap an older tab in a
-              // reconnect loop on the same frame. Reconcile once and advance.
-              if(Date.now()-compatibilityRefreshAt>60000){compatibilityRefreshAt=Date.now();await dash.poll();}
-              dash.setStreamStatus({compatibilityWarning:event});
-            }
-            if (id) lastEventId = id;
+      await consumeSseStream(reader, async frame => {
+        const { event, id, data } = parseSseFrame(frame);
+        if(id&&lastEventId!=null&&Number(id)<=Number(lastEventId))return;
+        if (data && event !== 'heartbeat') {
+          const applied = await handleStreamEvent(event, data);
+          if (id && !applied) {
+            // A new server event/schema must not trap an older tab in a
+            // reconnect loop on the same frame. Reconcile once and advance.
+            if(Date.now()-compatibilityRefreshAt>60000){compatibilityRefreshAt=Date.now();await dash.poll();}
+            dash.setStreamStatus({compatibilityWarning:event});
           }
-          retry = 0;
-          dash.setStreamStatus({ connected: true, lastMessageAt: Date.now() });
+          if (id) lastEventId = id;
         }
-      }
+        retry = 0;
+        dash.setStreamStatus({ connected: true, lastMessageAt: Date.now() });
+      }, {
+        signal: controller.signal,
+        isCurrent: () => !stopped && generation === streamGeneration,
+        onChunk: () => { received = Date.now(); },
+      });
+      if (!stopped && generation === streamGeneration && !controller.signal.aborted) throw new Error('stream closed');
     } catch {
       if(generation === streamGeneration && !scopeChanged){
         dash.setStreamStatus({ connected: false, state: stopped ? 'offline' : 'reconnecting' });
@@ -188,7 +248,9 @@ export async function handleStreamEvent(event, raw) {
   const dash = useDashboardStore();
   const detail = useDetailStore();
   if(event==='projection.delta'){
-    if(!dash.applyProjection(d))return false;
+    // Reuse the received JSON for byte accounting; do not stringify a large
+    // parsed projection again just to bound its replay history.
+    if(!dash.applyProjection(d,true,projectionByteLength(raw)))return false;
     detail.syncProjection();
     for(const resource of d.invalidations??[]){
       dash.invalidate(resource);
@@ -226,7 +288,7 @@ export async function handleStreamEvent(event, raw) {
     const marketRows=Array.isArray(d.fresh)?d.fresh:[{...d,symbol:d.symbol??dash.stockIndex.get(`${d.chainId}:${d.token.toLowerCase()}`)?.tokenSymbol??dash.assetIndex.get(`${d.chainId}:${d.token.toLowerCase()}`)?.symbol}];
     if (marketRows.some((row) => !row?.id)) return false;
     const feed = useFeedStore();
-    feed.appendTrades(marketRows);
+    feed.appendTrades(marketRows.filter(t=>String(t.venue??'dex').toLowerCase()==='dex'));
     if(!Array.isArray(d.fresh)){detail.appendMarketTrade(d);dash.setStreamStatus({state:'live'});return true;}
     if (watching) emit('sse-trades', d);
     detail.appendTrades(d);

@@ -87,6 +87,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { API_BASE } from '../api/client.js';
+import {useAccountStore} from '../stores/account.js';
+const account=useAccountStore();
 import { createDeveloperKey, getDeveloperSession, getDeveloperUsage, listDeveloperKeys, loginDeveloper, logoutDeveloper, registerDeveloper, revokeDeveloperKey } from '../api/developer.js';
 import { tr, useI18n } from '../i18n';
 
@@ -148,6 +150,7 @@ async function submitAccount() {
   busy.value = true; error.value = '';
   try {
     session.value = mode.value === 'register' ? await registerDeveloper(email.value, inviteCode.value, password.value) : await loginDeveloper(email.value, password.value);
+    await account.useSession(session.value);
     password.value = ''; inviteCode.value = '';
     state.value = 'ready';
     await loadAccount();
@@ -159,6 +162,7 @@ async function signOut() {
   busy.value = true; error.value = '';
   try {
     await logoutDeveloper(session.value?.csrfToken);
+    await account.start(true);
     session.value = null; keys.value = []; usage.value = null; newSecret.value = ''; password.value = '';
     state.value = 'guest';
   } catch (exception) { error.value = errorLabel(exception); }

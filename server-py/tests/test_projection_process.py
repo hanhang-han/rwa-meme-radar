@@ -190,7 +190,7 @@ class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
         database.all.assert_not_called()
 
     async def test_health_aggregates_old_task_contract_but_marks_missing_projection_degraded(self):
-        from app.main import health_data
+        from app.main import health_data_payload as health_data
         now = int(time.time()*1000)
         snapshot = health_storage(latest=now)
         collector = {'pid': os.getpid(), 'updatedAt': now, 'ageMs': 0, 'ok': True,
@@ -223,7 +223,7 @@ class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(degraded['collector']['ok'])
 
     async def test_optional_entitlement_keeps_core_healthy_but_reports_reference_gap(self):
-        from app.main import health_data
+        from app.main import health_data_payload as health_data
         now=int(time.time()*1000)
         stock={'price':12,'stockPrice':100,'referenceScope':'issuer-reference',
                'fieldTimes':{'price':now},'quoteAt':now}
@@ -244,7 +244,7 @@ class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health['capabilities']['stockReferences']['reason'],'entitlement-required')
 
     async def test_unquoted_market_remains_in_total_but_not_quoteable_coverage(self):
-        from app.main import health_data
+        from app.main import health_data_payload as health_data
         now = int(time.time()*1000)
         priced = {'kind':'candidate','price':1,'fieldTimes':{'price':now},'quoteAt':now}
         unavailable = {'kind':'candidate','price':None,'quoteStatus':'no-verified-market',
@@ -275,7 +275,7 @@ class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('stock-no-verified-market',health['warnings'])
 
     async def test_known_unsupported_pools_are_visible_without_collector_failure(self):
-        from app.main import health_data
+        from app.main import health_data_payload as health_data
         now=int(time.time()*1000)
         snapshot = health_storage(latest=now, scan_quality={
             'total': 1, 'partial': 1, 'unsupportedPools': 3, 'failedPools': 0})
@@ -337,7 +337,7 @@ class HealthProjectionReadTests(unittest.IsolatedAsyncioTestCase):
         await self.store.db.commit()
 
     async def test_matching_named_views_and_scoped_aggregates_preserve_health_contract(self):
-        from app.main import _health_storage_snapshot, health_data
+        from app.main import _health_storage_snapshot, health_data_payload as health_data
         running = {'ageMs': 0, 'ok': True, 'tasks': {'maintenance': {'status': 'waiting'}}}
         with patch('app.db.store', AsyncMock(return_value=self.store)), \
              patch('app.state.reload_if_stale', side_effect=AssertionError('full reload forbidden')):
@@ -366,7 +366,7 @@ class HealthProjectionReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('discovery-unsupported-pools', health['warnings'])
 
     async def test_missing_or_mismatched_views_degrade_without_building_full_projection(self):
-        from app.main import _health_storage_snapshot, health_data
+        from app.main import _health_storage_snapshot, health_data_payload as health_data
         running = {'ageMs': 0, 'ok': True, 'tasks': {'maintenance': {'status': 'waiting'}}}
         await self.store.db.execute("UPDATE dashboard_projection SET revision=2 WHERE name='feed'")
         await self.store.db.commit()
@@ -408,7 +408,7 @@ class HealthProjectionReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot['domains']['196']['quote']['total'], 2)
 
     async def test_storage_failure_returns_degraded_health(self):
-        from app.main import health_data
+        from app.main import health_data_payload as health_data
         running = {'ageMs': 0, 'ok': True, 'tasks': {}}
         with patch('app.main._health_storage_snapshot', AsyncMock(side_effect=RuntimeError('storage busy'))), \
              patch('app.state.reload_if_stale', side_effect=AssertionError('full reload forbidden')), \

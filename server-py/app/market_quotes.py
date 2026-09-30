@@ -5,6 +5,8 @@ field times remain usable as historical values, never as fresh observations.
 """
 import math
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from .stock_quotes import _read_snapshot, EODHD_FILE
 from .risk_assessment import assess_risk
 
@@ -21,6 +23,80 @@ def field_at(q: dict, field: str):
     if not at and field == 'holders' and q.get('provider') == 'Blockscout':
         at = q.get('updatedAt')
     return at if _number(at) and at > 0 else None
+
+
+# The previous published selection survives worker restarts. It is bound only
+# while building the next projection, never while serving an HTTP request.
+_previous_quotes = ContextVar('previous_primary_quotes', default={})
+QUOTE_FIELDS = ('price', 'volume24h', 'change24h')
+PRIMARY_MAX_AGE_MS = 900_000
+
+
+@contextmanager
+def bind_previous_quotes(payload):
+    rows = ((payload or {}).get('unified') or {}).get('assets') or []
+    binding = _previous_quotes.set({f"{r.get('chainId')}:{str(r.get('token') or '').lower()}":
+                                    r.get('primaryQuote') for r in rows})
+    try:
+        yield
+    finally:
+        _previous_quotes.reset(binding)
+
+
+def _source(value):
+    return value.get('provider') if isinstance(value, dict) else value
+
+
+def _quote_scope(q):
+    return (q.get('fieldScopes') or {}).get('price') or 'unknown'
+
+
+def _select_primary(asset, observations, key, now):
+    own_provider = _source((asset.get('fieldSources') or {}).get('price')) or asset.get('provider')
+    own = {**asset, 'provider': own_provider}
+    # A fact can itself contain fields merged by different collectors. Only
+    # retain its price source's matching market, not an accidental mixed tuple.
+    for field in QUOTE_FIELDS[1:]:
+        source = _source((asset.get('fieldSources') or {}).get(field))
+        scope = (asset.get('fieldScopes') or {}).get(field) or 'unknown'
+        if ((source and source != own_provider) or scope != _quote_scope(own)):
+            own[field] = None
+    candidates = [q for q in [own, *observations] if _number(q.get('price')) and q['price'] >= 0]
+    if not candidates:
+        return None, [], None
+    # One newest observation per provider and market, not one source per field.
+    grouped = {}
+    for q in candidates:
+        identity = (_source(q.get('provider')), _quote_scope(q))
+        if identity not in grouped or (field_at(q, 'price') or 0) > (field_at(grouped[identity], 'price') or 0):
+            grouped[identity] = q
+    candidates = list(grouped.values())
+    previous = asset.get('primaryQuote') or _previous_quotes.get().get(key) or {}
+    prior = next((q for q in candidates if (_source(q.get('provider')), _quote_scope(q)) ==
+                  (previous.get('provider'), previous.get('scope'))), None)
+    def fresh(q):
+        at = field_at(q, 'price')
+        return bool(at and 0 <= now-at <= PRIMARY_MAX_AGE_MS)
+    def order(q):
+        scope = _quote_scope(q)
+        return (fresh(q), bool(field_at(q, 'price')), scope in ('token', 'token-aggregate'),
+                sum(_number(q.get(f)) for f in QUOTE_FIELDS), field_at(q, 'price') or 0,
+                str(q.get('provider') or ''), scope)
+    chosen = prior if prior and fresh(prior) else max(candidates, key=order)
+    reason = 'retained-primary' if chosen is prior and fresh(prior) else ('primary-expired' if previous else 'initial-selection')
+    alternatives = sorted((q for q in candidates if q is not chosen), key=order, reverse=True)[:6]
+    return chosen, alternatives, reason
+
+
+def _quote_summary(q, now):
+    scope = _quote_scope(q)
+    fields = {f: q.get(f) if _number(q.get(f)) and
+              ((q.get('fieldScopes') or {}).get(f) or 'unknown') == scope else None for f in QUOTE_FIELDS}
+    at = field_at(q, 'price')
+    return {**fields, 'provider': _source(q.get('provider')), 'scope': scope,
+            'currency': q.get('priceCurrency') or ('USD' if _source(q.get('provider')) in {'OKX', 'CoinGecko', 'DexScreener', 'Chain RPC'} else None), 'at': at,
+            'fieldTimes': {f: field_at(q, f) if fields[f] is not None else None for f in QUOTE_FIELDS},
+            'status': 'unknown' if not at else 'current' if 0 <= now-at <= PRIMARY_MAX_AGE_MS else 'stale'}
 
 
 def _aggregate_market(asset: dict, observations: list[dict], now: float):
@@ -70,6 +146,7 @@ def enrich_asset(asset: dict) -> dict:
     if holder:
         observations.append(holder)
     now = time.time() * 1000
+    primary, alternatives, selection_reason = _select_primary(asset, observations, key, now)
     aggregate = _aggregate_market(asset, observations, now)
     prior_scope = row['fieldScopes'].get('liquidity') or ''
     if prior_scope.startswith('pool:'):
@@ -87,10 +164,19 @@ def enrich_asset(asset: dict) -> dict:
     for field in FIELDS:
         available = [q for q in observations if _number(q.get(field))
                      and (field != 'liquidity' or (q.get('fieldScopes') or {}).get(field) == 'token-aggregate')]
+        if field in QUOTE_FIELDS and primary:
+            available = [primary] if (_number(primary.get(field)) and
+                         ((primary.get('fieldScopes') or {}).get(field) or 'unknown') == _quote_scope(primary)) else []
+            # Unavailable fields remain null rather than coming from a second market.
+            if not available:
+                row[field] = None
+                for container in ('fieldTimes', 'fieldSources', 'fieldScopes', 'fieldTimeKinds'):
+                    row[container][field] = None
+                row['fieldObservations'].pop(field, None)
         if available:
             q = max(available, key=lambda q: field_at(q, field) or 0)
             at = field_at(q, field)
-            if row.get(field) is None or (at and at > (row['fieldTimes'].get(field) or 0)):
+            if field in QUOTE_FIELDS or row.get(field) is None or (at and at > (row['fieldTimes'].get(field) or 0)):
                 row[field] = q[field]
                 row['fieldTimes'][field] = at
                 row['fieldSources'][field] = q.get('provider')
@@ -103,9 +189,17 @@ def enrich_asset(asset: dict) -> dict:
                     row['priceProvenance'] = q.get('priceProvenance')
         at = row['fieldTimes'].get(field)
         missing = row.get(field) is None
-        age_limit = 86_400_000 if field == 'holders' else 1_800_000
+        age_limit = 86_400_000 if field == 'holders' else PRIMARY_MAX_AGE_MS if field in QUOTE_FIELDS else 1_800_000
         status = 'missing' if missing else 'unknown' if not at else 'scheduled' if 0 <= now-at <= age_limit else 'stale'
         row['fieldStatus'][field] = {'status': status, 'reason': 'not-observed' if missing else 'field-time-unavailable' if not at else None}
+    if primary:
+        row['primaryQuote'] = {**_quote_summary(primary, now), 'selectionReason': selection_reason}
+        previous = asset.get('primaryQuote') or _previous_quotes.get().get(key) or {}
+        if previous.get('provider') and (previous.get('provider'), previous.get('scope')) != (row['primaryQuote']['provider'], row['primaryQuote']['scope']):
+            row['primaryQuote']['switchedFrom'] = {k: previous.get(k) for k in ('provider', 'scope', 'at')}
+        row['quoteAlternatives'] = [_quote_summary(q, now) for q in alternatives]
+        row['volumeCurrency'] = row['primaryQuote']['currency']
+        row['volumeScope'] = row['primaryQuote']['scope']
     distribution = [q for q in observations if _number(q.get('holderTop10')) and 0 <= q['holderTop10'] <= 100]
     if distribution:
         q = max(distribution, key=lambda q: field_at(q, 'holderTop10') or field_at(q, 'holders') or 0)

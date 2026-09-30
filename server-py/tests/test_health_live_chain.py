@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app.main import _health_storage_snapshot, chain_stream_degraded, health_data
+from app.main import _health_storage_snapshot, chain_stream_degraded, health_data_payload as health_data
 
 
 class LiveChainHealthTests(unittest.IsolatedAsyncioTestCase):

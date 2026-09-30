@@ -12,7 +12,8 @@
         <option value="4663">Robinhood Chain</option>
       </select>
       <GlobalSearch v-if="isMarketPage" />
-      <RouterLink v-if="isMarketPage" to="/status" id="updatedAt" class="header-status" :class="statusClass" :title="streamLabel"><i></i><time>{{ statusTime }}</time></RouterLink>
+      <span v-if="isMarketPage" id="updatedAt" class="header-status" :class="statusClass" :title="streamLabel"><i></i><time>{{ statusTime }}</time></span>
+      <RouterLink to="/developer" class="header-api">API</RouterLink>
       <div class="lang-control">
         <div class="lang-switch">
           <button class="lang-btn" :class="{ active: lang.lang === 'zh' }" @click="setLangWithFeedback('zh')">中</button>
@@ -24,10 +25,9 @@
   </header>
   <main class="radar-workspace">
     <nav class="workspace-nav">
-      <RouterLink v-for="item in nav" :key="item.to" :to="item.to" :class="{ active: item.match.has(route.name) }">
+      <RouterLink v-for="item in nav" :key="item.to" :to="item.to" :class="{ active: item.match.has(activeNav) }">
         {{ tr(item.zh, item.en) }}
       </RouterLink>
-      <RouterLink to="/developer" class="workspace-nav-utility" :class="{ active: route.name === 'developer' }">{{ tr('API / 开发者', 'API / Developers') }}</RouterLink>
     </nav>
     <div class="view">
       <p v-if="routeError" role="alert" class="x-empty">{{ tr('页面加载失败，请重新加载。', 'Page failed to load. Please reload.') }} <button @click="reloadPage">{{ tr('重新加载', 'Reload') }}</button></p>
@@ -45,6 +45,7 @@
       <RouterView v-if="!waitingForSnapshot" :key="$route.path" />
     </div>
   </main>
+  <footer class="site-footer"><p v-if="isMarketPage && syncedAt">{{ tr('数据时间','Data as of') }} {{ statusTime }}<span v-if="clock-syncedAt>180000" class="warn"> · {{ tr('已过期','Stale') }}</span></p>{{ tr('池子配对与名称匹配仅用于市场研究，不代表发行方授权或投资建议。','Pool pairings and name matches are research information, not issuer endorsement or investment advice.') }}</footer>
 </template>
 
 <script setup>
@@ -85,9 +86,9 @@ watch(waitingForSnapshot, (waiting, _, onCleanup) => {
 }, { immediate: true });
 
 
-const syncedAt = computed(() => store.updatedAt);
+const syncedAt = computed(() => Number(store.snapshot?.now) || 0);
 const statusTime = computed(() => { clock.value; return syncedAt.value ? new Date(syncedAt.value).toLocaleTimeString(lang.lang === 'en' ? 'en-US' : 'zh-CN', { hour:'2-digit', minute:'2-digit', hour12:false }) : '—'; });
-const statusClass = computed(() => { clock.value; return !syncedAt.value || clock.value - syncedAt.value > 300000 ? 'is-stale' : store.stream.connected ? 'is-live' : 'is-paused'; });
+const statusClass = computed(() => { clock.value; return !syncedAt.value || clock.value - syncedAt.value > 120000 ? 'is-stale' : clock.value-syncedAt.value>30000 || !store.stream.connected ? 'is-paused' : 'is-live'; });
 const streamLabel = computed(() => {
   clock.value;
   if (store.stream.state === 'syncing') return tr('行情同步中', 'Market data syncing');
@@ -97,10 +98,12 @@ const streamLabel = computed(() => {
 });
 const nav = [
   { to: '/live', zh: '首页', en: 'Home', match: new Set(['live']) },
-  { to: '/meme', zh: 'Meme', en: 'Memes', match: new Set(['meme', 'detail']) },
   { to: '/stock', zh: '股票', en: 'Stocks', match: new Set(['stock', 'stockDetail']) },
-  { to: '/pair', zh: '池子', en: 'Pools', match: new Set(['pair', 'pairIndex']) },
+  { to: '/meme', zh: 'Meme', en: 'Memes', match: new Set(['meme', 'pair']) },
+  { to: '/watch', zh: '追踪', en: 'Watchlist', match: new Set(['watch', 'events']) },
+  { to: '/me', zh: '我的', en: 'My account', match: new Set(['account', 'developer','status']) },
 ];
+const activeNav=computed(()=>route.name==='detail'?(route.query.from==='stock'?'stock':route.query.from==='watch'?'watch':'meme'):route.name);
 
 function setLangWithFeedback(l) {
   setLang(l);

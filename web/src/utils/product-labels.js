@@ -4,6 +4,7 @@ export const RISK_LABELS = {
   contract_risk: ['合约风险', 'Contract risk'],
   concentrated: ['持仓集中', 'Concentrated'],
   holder_anomaly: ['持币地址异常', 'Holder anomaly'],
+  liquidity_unlock: ['流动性未锁定', 'Unlocked liquidity'],
 };
 
 export function relationLevel(relation) {

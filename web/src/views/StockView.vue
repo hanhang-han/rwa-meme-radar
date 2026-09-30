@@ -1,287 +1,93 @@
 <template>
-  <div>
-    <div class="page-heading">
-      <RouterLink v-if="detailMode" :to="{path:'/stock',query:{chain:scope}}">← {{ tr('返回股票', 'Back to stocks') }}</RouterLink>
-      <h2>{{ detailMode ? tr('股票详情', 'Stock detail') : tr('股票', 'Stocks') }}</h2>
-    </div>
-
-    <div v-if="!detailMode" class="v2-stock-toolbar v3-theme-toolbar">
-      <input id="xStockSearch" v-model="qInput" :placeholder="tr('搜索股票、名称或合约地址', 'Search ticker, name or contract')" @input="onSearch">
-      <select v-model="sortBy" :aria-label="tr('关联资产排序', 'Sort related assets')">
-        <option value="poolLiquidity">{{ tr('按配对池规模', 'Pair-pool size') }}</option>
-        <option value="volume24h">{{ tr('按资产 24h 成交额', 'Asset 24h volume') }}</option>
-        <option value="change24h">{{ tr('按资产 24h 涨跌', 'Asset 24h change') }}</option>
-        <option value="firstSeen">{{ tr('按发现时间', 'Discovery time') }}</option>
-      </select>
-      <label class="v3-check"><input v-model="includeHistorical" type="checkbox"> {{ tr('展示历史池估值', 'Include historical pool estimates') }}</label>
-    </div>
-
-    <div id="xStockRows" class="v3-theme-list">
-      <div v-if="!cards.length" class="x-empty">{{ !store.snapshot ? tr('正在加载股票行情…', 'Loading stock quotes…') : store.snapshot.unified?.snapshotScope === 'overview' ? tr('正在加载更多股票…', 'Loading more stocks…') : tr('暂无匹配股票主题。', 'No matching stock themes.') }}</div>
-      <div v-else-if="!detailMode" class="stock-summary-head"><span>{{ tr('股票','Stock') }}</span><span>{{ tr('价格','Price') }}</span><span>24h</span><span>Meme</span><span>{{ tr('Meme 24h 成交','Meme volume') }}</span><span>{{ tr('配对池流动性','Pair liquidity') }}</span></div>
-      <details v-for="card in cards" :key="card.ticker" class="x-stock v3-theme-card" :open="detailMode || autoOpen(card.ticker)">
-        <summary class="stock-summary-row" :aria-label="detailMode ? undefined : tr('查看股票详情', 'View stock detail') + ' ' + card.ticker" @click="onStockSummary($event, card)">
-          <strong>{{ companyTitle(card.ticker, card.list[0]) }}</strong>
-          <span><small class="stock-mobile-label">{{ tr('价格','Price') }}</small><LiveNumber :value="officialStock(card)?.price" :currency="officialStock(card)?.priceCurrency ?? ''" format="price" /><small v-if="officialStock(card)" class="stock-quote-source">{{ chainName(officialStock(card)) }} · {{ officialStock(card)?.fieldSources?.price ?? officialStock(card)?.provider ?? tr('来源待核验','Source unverified') }}</small><QuoteStatus v-if="officialStock(card)" :row="officialStock(card)" /></span>
-          <span :class="Number(officialStock(card)?.change24h)>0?'up':Number(officialStock(card)?.change24h)<0?'down':''"><small class="stock-mobile-label">24h</small><LiveNumber :value="officialStock(card)?.change24h" format="percent" /><small v-if="officialStock(card)" class="stock-quote-source" :title="date(stockFieldAt(officialStock(card), 'change24h'))">{{ stockFieldLabel(officialStock(card), 'change24h') }}</small></span>
-          <span><small class="stock-mobile-label">Meme</small>{{ card.themeRows.length }} Meme</span><span><small class="stock-mobile-label">{{ tr('Meme 24h 成交','Meme volume') }}</small>{{ usd(cardMemeVolume(card)) }}<small class="stock-quote-source">{{ cardMemeVolume(card) == null ? tr('数据不全或过期', 'Incomplete or stale') : tr('近期数据 · 美元合计', 'Recent data · USD total') }}</small></span><span><small class="stock-mobile-label">{{ tr('配对池流动性','Pair liquidity') }}</small>{{ usd(cardPoolLiquidity(card)) }}<small class="stock-quote-source">{{ cardPoolLiquidity(card) == null ? tr('池估值不全或过期', 'Pool values incomplete or stale') : tr('近期估值合计', 'Recent pool estimates') }}</small></span>
-        </summary>
-
-        <section class="v3-theme-body">
-          <div class="panel-head v3-theme-head">
-            <div>
-              <h3>{{ tr('关联资产比较', 'Related asset comparison') }}</h3>
-              <p class="hint">{{ tr('每个资产展示一个代表池，优先近期估值，再按规模选择。成交额为资产整体数据。', 'One pool per asset, selected by quote recency then size. Volume is asset-wide.') }}</p>
-            </div>
-            <div class="v3-theme-stats">
-              <span>{{ card.themeRows.length }} {{ tr('资产', 'assets') }}</span>
-              <span>{{ poolCount(card) }} {{ tr('已核验池', 'verified pools') }}</span>
-            </div>
-          </div>
-
-          <div v-if="card.visibleRows.length" class="scroll v3-theme-scroll">
-            <table class="tbl v3-theme-table">
-              <thead>
-                <tr>
-                  <th>{{ tr('关联资产', 'Related asset') }}</th>
-                  <th>{{ tr('配对关系', 'Pairing') }}</th>
-                  <th>{{ tr('股票配对池规模', 'Stock pair-pool size') }}</th>
-                  <th>{{ tr('资产 24h 成交额', 'Asset 24h volume') }}</th>
-                  <th>{{ tr('资产 24h 涨跌', 'Asset 24h change') }}</th>
-                  <th>{{ tr('较股票涨幅 · 1h', 'Vs stock return · 1h') }}</th>
-                  <th>{{ tr('操作', 'Action') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in card.visibleRows" :key="row.key">
-                  <td>
-                    <strong class="v3-token-name">{{ row.asset?.symbol ?? short(row.relation.token) }}</strong>
-                    <small>{{ chainName(row.relation) }} · {{ short(row.relation.token) }}</small>
-                  </td>
-                  <td>
-                    <span class="v3-proof-kind">{{ relationType(row.relation) }}</span>
-                    <small>{{ row.relation.protocol || tr('协议待核实', 'Protocol pending') }} · {{ short(row.relation.pool) }}</small>
-                  </td>
-                  <td>
-                    <strong><LiveNumber :value="row.relation.liquidityUsd" /></strong>
-                    <span class="v3-state" :class="`is-${row.liquidityState}`">{{ poolStateLabel(row) }}</span>
-                    <div class="v3-pool-bar"><i :style="{ width: poolBarWidth(card.poolBarMax, row) + '%' }"></i></div>
-                    <small :title="date(row.relation.liquidityAt)">{{ row.relation.liquiditySource ?? row.relation.provider ?? tr('来源待核实','Source pending') }} · {{ age(row.relation.liquidityAt) }}<template v-if="row.poolCount > 1"> · {{ row.poolCount }} {{ tr('个池，当前显示代表池', 'pools; representative shown') }}</template></small>
-                  </td>
-                  <td>
-                    <strong><LiveNumber :value="row.asset?.volume24h" :currency="row.asset?.volumeCurrency ?? row.asset?.priceCurrency" /></strong>
-                    <small :title="date(assetFieldAt(row.asset, 'volume24h'))">{{ assetFieldLabel(row.asset, 'volume24h') }}</small>
-                  </td>
-                  <td>
-                    <strong :class="Number(row.asset?.change24h) > 0 ? 'up' : Number(row.asset?.change24h) < 0 ? 'down' : ''"><LiveNumber :value="row.asset?.change24h" format="percent" /></strong>
-                    <small :title="date(assetFieldAt(row.asset, 'change24h'))">{{ assetFieldLabel(row.asset, 'change24h') }}</small>
-                  </td>
-                  <td><ComparisonMetric :value="relativeMetric(row.relation)" unit="pp" /></td>
-                  <td><RouterLink class="v3-action" :to="pairLink(row.relation)">{{ tr('查看配对', 'View pair') }} →</RouterLink></td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div v-else-if="card.themeRows.length" class="x-empty">{{ tr('暂无 15 分钟内的池估值，可勾选“展示历史池估值”。', 'No pool estimates within 15 minutes. Select “Include historical pool estimates” to see older values.') }}</div>
-          <div v-else class="x-empty">{{ tr('尚未发现已核验配对。', 'No verified pairs discovered yet.') }}</div>
-
-          <details class="v2-versions v3-versions">
-            <summary>{{ card.list.length }} {{ tr('个股票代币版本与参考行情', 'stock-token versions and reference quotes') }}</summary>
-            <div class="scroll">
-              <table class="tbl">
-                <thead><tr><th>{{ tr('股票代币 / 网络', 'Stock token / network') }}</th><th>{{ tr('发行方', 'Issuer') }}</th><th>{{ tr('代币价格', 'Token price') }}</th><th>{{ tr('参考股价', 'Stock reference') }}</th><th>{{ tr('链上价 vs 股价', 'On-chain vs stock') }}</th><th>{{ tr('24h 成交额 / 市场', '24h volume / market') }}</th><th>{{ tr('操作', 'Actions') }}</th></tr></thead>
-                <tbody>
-                  <tr v-for="s in card.list" :key="s.assetId ?? s.tokenSymbol" :data-asset="s.assetId ?? s.tokenContractAddress ?? s.instrumentId">
-                    <td>{{ s.tokenSymbol }}<small>{{ chainName(s) }} · {{ short(s.tokenContractAddress ?? s.instrumentId ?? '') }}</small></td>
-                    <td>{{ s.issuer }}<small>{{ s.issuerIdentity?.verificationStatus === 'official' ? tr('身份已核验','Identity verified') : s.issuerIdentity?.verificationStatus === 'legacy' ? tr('旧版官方部署','Legacy official deployment') : tr('身份未核验','Unverified identity') }}</small></td>
-                    <td data-field="price"><LiveNumber :value="s.price" :currency="s.priceCurrency" format="price" /><QuoteStatus :row="s" /></td>
-                    <td data-field="stockPrice"><LiveNumber :value="s.stockPrice" :currency="s.referenceCurrency" format="price" /><QuoteStatus :row="s" reference /></td>
-                    <td data-field="premium"><ComparisonMetric :value="comparisons.latest.get(`${s.chainId}:${s.tokenContractAddress?.toLowerCase()}`)?.premium ?? s.premium" /></td>
-                    <td data-field="volume24h"><LiveNumber :value="s.volume24h" :currency="s.volumeCurrency ?? s.priceCurrency" /><small :title="date(stockFieldAt(s, 'volume24h'))">{{ stockFieldLabel(s, 'volume24h') }}</small></td>
-                    <td><RouterLink :to="pairLinkFor(s)">{{ tr('交易池分析', 'Pool analysis') }} →</RouterLink></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </details>
-        </section>
-      </details>
-    </div>
-
-    <div v-if="!detailMode" class="x-pager">
-      <button :disabled="safePage <= 0" @click="setPage(Math.max(0, safePage - 1))">{{ tr('上一页', 'Previous') }}</button>
-      <span>{{ safePage + 1 }} / {{ pages }} · {{ allRows.length }} {{ tr('个股票主题', 'stock themes') }}</span>
-      <button :disabled="(safePage + 1) >= pages" @click="setPage(safePage + 1)">{{ tr('下一页', 'Next') }}</button>
-    </div>
-    <section v-if="!detailMode" class="panel stock-themes-index"><h2>{{ tr('主题指数','Theme indexes') }}</h2><p v-if="sectors.length" class="hint">{{ tr('行情可用', 'Available') }} {{ num(currentSectorCount) }}/{{ num(sectors.length) }}。{{ tr('暂停更新的指数可查看成分和最后有效时间。', 'Paused indexes show their constituents and last valid time.') }}</p><div class="v2-baskets"><details v-for="sector in sectors" :key="sector.chainId+':'+sector.sector+':'+sector.basketVersion" class="x-basket"><summary class="stock-basket-summary"><strong>{{ themeLabel(sector.sector, lang.lang) }} <small>{{ sector.scopeLabel || chainName(sector) }}</small><small v-if="sector.dataStatus !== 'current'" class="basket-reason">{{ tr(sector.reason || '指数暂停，等待有效行情', 'Paused: qualifying assets or current quotes are insufficient') }}</small></strong><span :class="{ 'is-stale':sector.dataStatus !== 'current' }">{{ sector.dataStatus === 'current' && sector.value != null ? num(sector.value) : '—' }}</span><small>{{ tr('有效行情','Current quotes') }} {{ num(sector.quoteCoverage?.fresh) }} / {{ num(sector.quoteCoverage?.total) }}<br>{{ tr('最后有效','Last valid') }} {{ date(sector.dataStatus === 'current' ? sector.at : sector.lastAt) }}</small></summary><div class="stock-basket-meta">{{ tr('基期','Base') }} {{ date(sector.baseAt) }} · {{ num(sector.members) }} {{ tr('个成分','constituents') }} · {{ tr('篮子版本','Basket version') }} {{ sector.basketVersion ?? '—' }} · {{ tr('方法版本','Method version') }} {{ sector.methodVersion ?? '—' }}</div><p v-for="part in sector.components??[]" :key="part.token"><RouterLink :to="'/detail/'+sector.chainId+'/'+part.token">{{ part.symbol }}</RouterLink> {{ part.weight!=null?pct(part.weight*100):'' }}</p></details></div><p v-if="!sectors.length" class="x-empty">{{ tr('暂无可用指数：成分或近期行情不足。','Indexes unavailable: insufficient constituents or recent quotes.') }}</p></section>
+  <div class="stock-index-page">
+    <section class="panel">
+      <div class="stock-index-heading"><h2>{{ tr('股票','Stocks') }}</h2><span>{{ tr('显示','Showing') }} {{ cards.length }} / {{ tr('共','of') }} {{ allRows.length }} {{ tr('个主题','themes') }}</span></div>
+      <div class="stock-index-toolbar"><p v-if="search">{{ tr('搜索','Search') }}：{{ route.query.q }} <button @click="setQuery({q:undefined})">×</button></p><select :value="sort" :aria-label="tr('排序','Sort')" @change="setQuery({sort:$event.target.value})"><option value="related">{{ tr('关联 Meme 数','Related meme count') }}</option><option value="ticker">{{ tr('股票代码','Ticker') }}</option><option value="change24h">{{ tr('股票代币 24h 涨跌','Stock-token 24h change') }}</option></select></div>
+      <div v-if="!cards.length && loading" role="status" :aria-label="tr('加载股票','Loading stocks')"><div v-for="n in 8" :key="n" class="skeleton-line"></div></div>
+      <p v-else-if="!cards.length" class="x-empty">{{ tr('暂无匹配股票主题。','No matching stock themes.') }} <button v-if="search" @click="setQuery({q:undefined})">{{ tr('清除搜索','Clear search') }}</button></p>
+      <template v-else>
+        <div class="stock-index-table scroll"><table class="tbl"><thead><tr><th>{{ tr('股票','Stock') }}</th><th class="numeric">{{ tr('股票代币价格','Stock-token price') }}</th><th class="numeric">24h</th><th class="numeric">{{ tr('配对 Meme','Paired memes') }}</th><th class="numeric">{{ tr('Meme 24h 成交','Meme 24h volume') }}</th><th>{{ tr('数据覆盖','Coverage') }}</th></tr></thead><tbody>
+          <tr v-for="card in cards" :key="card.ticker"><td><RouterLink :to="themeLink(card.ticker)"><strong>{{ card.ticker }}</strong><small>{{ companyTitle(card.stock ?? card.list[0]) }}</small></RouterLink></td><td class="numeric" :title="quoteTitle(card.stock)"><LiveNumber :value="card.stock?.price" :currency="card.stock?.priceCurrency ?? ''" format="price" /><small>{{ card.stock?chainLabel(card.stock.chainId):tr('暂无数据','Unavailable') }}</small></td><td class="numeric" :class="Number(card.stock?.change24h)>0?'up':Number(card.stock?.change24h)<0?'down':''"><LiveNumber :value="card.stock?.change24h" format="percent" /><small v-if="card.stock?.change24h != null && !currentChange(card.stock)" class="historical">{{ tr('历史值','Historical') }}</small></td><td class="numeric">{{ card.theme.pairedCount }}<small v-if="card.theme.nameCount">+{{ card.theme.nameCount }} {{ tr('名称匹配','name matches') }}</small></td><td class="numeric">{{ usd(card.theme.volume.value) }}</td><td>{{ card.theme.volume.known }} / {{ card.theme.volume.total }}<small>{{ tr('美元成交数据','USD volume data') }}</small></td></tr>
+        </tbody></table></div>
+        <div class="stock-index-mobile"><RouterLink v-for="card in cards" :key="card.ticker" :to="themeLink(card.ticker)" class="stock-index-card"><div><strong>{{ card.ticker }} <small>{{ companyTitle(card.stock ?? card.list[0]) }}</small></strong><span>→</span></div><div><span><LiveNumber :value="card.stock?.price" :currency="card.stock?.priceCurrency ?? ''" format="price" /></span><span :class="Number(card.stock?.change24h)>0?'up':Number(card.stock?.change24h)<0?'down':''"><LiveNumber :value="card.stock?.change24h" format="percent" /> · 24h</span></div><small>{{ card.theme.pairedCount }} {{ tr('配对 Meme','paired memes') }} · {{ usd(card.theme.volume.value) }} {{ tr('24h 成交','24h volume') }}</small><small>{{ tr('成交覆盖','Volume coverage') }} {{ card.theme.volume.known }} / {{ card.theme.volume.total }}</small></RouterLink></div>
+        <div class="x-pager"><button :disabled="safePage<=0" @click="setQuery({page:safePage-1})">{{ tr('上一页','Previous') }}</button><span>{{ safePage+1 }} / {{ pages }}</span><button :disabled="safePage+1>=pages" @click="setQuery({page:safePage+1})">{{ tr('下一页','Next') }}</button></div>
+      </template>
+    </section>
+    <section v-if="sectors.length" class="panel stock-themes-index"><h2>{{ tr('主题指数','Theme indexes') }}</h2><div class="v2-baskets"><details v-for="sector in sectors" :key="sector.chainId+':'+sector.sector+':'+sector.basketVersion" class="x-basket"><summary class="stock-basket-summary"><strong>{{ themeLabel(sector.sector, lang.lang) }} <small>{{ sector.scopeLabel || chainLabel(sector.chainId) }}</small></strong><span :class="{'is-stale':sector.dataStatus!=='current'}">{{ sector.dataStatus==='current' && sector.value!=null?num(sector.value):'—' }}</span><small>{{ tr('有效行情','Current quotes') }} {{ num(sector.quoteCoverage?.fresh) }} / {{ num(sector.quoteCoverage?.total) }}<br>{{ tr('最后有效','Last valid') }} {{ date(sector.dataStatus==='current'?sector.at:sector.lastAt) }}</small></summary><div class="stock-basket-meta">{{ tr('基期','Base') }} {{ date(sector.baseAt) }} · {{ num(sector.members) }} {{ tr('个成分','constituents') }}</div><p v-for="part in sector.components??[]" :key="part.token"><RouterLink :to="{path:'/asset/'+sector.chainId+'/'+part.token,query:{chain:scope,from:'stock'}}">{{ part.symbol }}</RouterLink> {{ part.weight!=null?pct(part.weight*100):'' }}</p></details></div></section>
   </div>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import LiveNumber from '../components/LiveNumber.vue';
-import QuoteStatus from '../components/QuoteStatus.vue';
-import ComparisonMetric from '../components/ComparisonMetric.vue';
-import { useComparisonStore } from '../stores/comparisons';
 import { useDashboardStore } from '../stores/dashboard';
+import { useMinuteClock } from '../composables/useMinuteClock';
 import { tr, useI18n } from '../i18n';
-import { age, chainName, date, num, pairLink, pct, short, usd } from '../utils/format';
+import { date, num, pct, usd } from '../utils/format';
 import { chainScope, inChainScope } from '../utils/chain-scope';
-import { assetKey } from '../utils/realtime';
-import { buildThemeAssetMap, buildThemeRows, countThemeRows, observationState, sortThemeRows } from '../utils/theme-presentation';
 import { preferredOfficialStock } from '../utils/product-labels';
+import { countThemeRows } from '../utils/theme-presentation';
+import { buildStockTheme, isRecentObservation, normalizeTicker, stockTicker } from '../utils/stock-theme-model';
 import { themeLabel } from '../utils/theme-labels';
+import LiveNumber from '../components/LiveNumber.vue';
 
-const route = useRoute();
-const router = useRouter();
-const store = useDashboardStore();
-const { lang } = useI18n();
-const detailMode = computed(() => route.name === 'stockDetail');
-const scope = computed(() => chainScope(route.query));
-const sectors = computed(() => (store.snapshot?.unified?.sectors ?? []).filter(row => inChainScope(row,scope.value)));
-const currentSectorCount = computed(() => sectors.value.filter(row => row.dataStatus === 'current' && row.value != null).length);
-const comparisons = useComparisonStore();
-function relativeMetric(relation) {
-  const packet = comparisons.latest.get(`${relation.chainId}:${relation.stock?.toLowerCase()}`);
-  const pair = packet?.pairs?.find(p => p.pool.toLowerCase() === relation.pool.toLowerCase());
-  return pair?.relative?.['1h'] ?? relation.priceComparison?.relative?.['1h'];
-}
-const qInput = ref(route.query.q ?? '');
-const sortBy = ref('poolLiquidity');
-const includeHistorical = ref(true);
-
-const COMPANY = { AAPL: '苹果', AMD: '超威半导体', AMZN: '亚马逊', BABA: '阿里巴巴', COIN: 'Coinbase', GME: '游戏驿站', GOOGL: '谷歌', HOOD: 'Robinhood', INTC: '英特尔', META: 'Meta', MSFT: '微软', NVDA: '英伟达', NFLX: '奈飞', QQQ: '纳斯达克100指数ETF', SPY: '标普500指数ETF', TSLA: '特斯拉', TSM: '台积电', MU: '美光科技', PLTR: '帕兰提尔', PYPL: '贝宝', QCOM: '高通', CRM: '赛富时', ORCL: '甲骨文', SNDK: '闪迪', SOXL: '半导体三倍做多ETF' };
-
-const search = computed(() => String(detailMode.value ? route.params.ticker : route.query.q ?? '').toLowerCase());
-const PAGE = 20;
-const page = computed(() => Math.max(0, Number(route.query.page) || 0));
-const assetMap = computed(() => buildThemeAssetMap(store.assets));
-
-const allRows = computed(() => {
-  const grouped = new Map();
-  const groupsByStock = new Map();
-  for (const stock of store.stockTokens) {
-    if (!inChainScope(stock,scope.value)) continue;
-    const id = stock.stockIdentity?.id || stock.stockCode || stock.assetId || stock.instrumentId;
-    const haystack = [stock.stockCode, stock.tokenSymbol, stock.tokenName, stock.tokenContractAddress, stock.stockIdentity?.nameZh, stock.stockIdentity?.nameEn, stock.stockIdentity?.code].filter(Boolean).join(' ').toLowerCase();
-    if (search.value && !haystack.includes(search.value)) continue;
-    if (!grouped.has(id)) grouped.set(id, { ticker: id, list: [], relations: [] });
-    const group = grouped.get(id);
-    group.list.push(stock);
-    const key = assetKey(stock?.chainId ?? stock?.chain ?? stock?.chainIndex, stock?.tokenContractAddress ?? stock?.instrumentId);
-    if (!groupsByStock.has(key)) groupsByStock.set(key, new Set());
-    groupsByStock.get(key).add(group);
+const route=useRoute(), router=useRouter(), store=useDashboardStore(), now=useMinuteClock();
+const {lang}=useI18n();
+const scope=computed(()=>chainScope(route.query));
+const search=computed(()=>String(route.query.q??'').trim().toLowerCase());
+const sort=computed(()=>['ticker','change24h'].includes(route.query.sort)?route.query.sort:'related');
+const loading=computed(()=>!store.snapshot||store.snapshot.unified?.snapshotScope==='overview');
+const sectors=computed(()=>(store.snapshot?.unified?.sectors??[]).filter(row=>inChainScope(row,scope.value)));
+const allRows=computed(()=>{
+  const grouped=new Map(), stockKeys=new Map();
+  for(const stock of store.stockTokens){
+    const ticker=stockTicker(stock);if(!ticker||!inChainScope(stock,scope.value))continue;
+    if(!grouped.has(ticker))grouped.set(ticker,{ticker,list:[],relations:[]});
+    grouped.get(ticker).list.push(stock);stockKeys.set(`${stock.chainId}:${String(stock.tokenContractAddress).toLowerCase()}`,ticker);
   }
-  // Keep the relation's source order, including when several stock tokens share a ticker.
-  for (const relation of store.relations) {
-    const key = assetKey(relation?.chainId ?? relation?.chain ?? relation?.chainIndex, relation?.stock);
-    for (const group of groupsByStock.get(key) ?? []) group.relations.push(relation);
+  for(const relation of store.relations){
+    if(!inChainScope(relation,scope.value))continue;
+    const ticker=stockKeys.get(`${relation.chainId}:${String(relation.stock).toLowerCase()}`)??normalizeTicker(relation.ticker);
+    grouped.get(ticker)?.relations.push(relation);
   }
-  return [...grouped.values()]
-    .map((group) => ({ ...group, themeRowCount: countThemeRows(group.relations) }))
-    .sort((a, b) => b.themeRowCount - a.themeRowCount || String(a.ticker ?? '').localeCompare(String(b.ticker ?? '')));
+  const rows=[...grouped.values()].filter(group=>!search.value||[group.ticker,...group.list.flatMap(stock=>[stock.tokenSymbol,stock.tokenName,stock.tokenContractAddress,stock.stockIdentity?.nameZh,stock.stockIdentity?.nameEn])].some(value=>String(value??'').toLowerCase().includes(search.value)))
+    .map(group=>({...group,count:countThemeRows(group.relations),stock:preferredOfficialStock(group.list)}));
+  return rows.sort((a,b)=>sort.value==='ticker'?a.ticker.localeCompare(b.ticker,undefined,{numeric:true}):sort.value==='change24h'?(Number(b.stock?.change24h??-Infinity)-Number(a.stock?.change24h??-Infinity)||a.ticker.localeCompare(b.ticker)):(b.count-a.count||a.ticker.localeCompare(b.ticker,undefined,{numeric:true})));
 });
-const pages = computed(() => Math.max(1, Math.ceil(allRows.value.length / PAGE)));
-const safePage = computed(() => Math.min(page.value, pages.value - 1));
-const cards = computed(() => allRows.value.slice(safePage.value * PAGE, safePage.value * PAGE + PAGE).map((group) => {
-  const themeRows = buildThemeRows(group.relations, assetMap.value);
-  const visibleRows = sortThemeRows(themeRows, sortBy.value, includeHistorical.value);
-  const poolBarMax = Math.max(0, ...visibleRows.map((row) => Number(row.relation.liquidityUsd) || 0));
-  return { ...group, themeRows, visibleRows, poolBarMax };
-}));
-
-function officialStock(card) { return preferredOfficialStock(card.list); }
-function assetFieldAt(asset, field) { return asset?.fieldTimes?.[field] ?? null; }
-function stockFieldAt(stock, field) { return stock?.fieldTimes?.[field] ?? (field === 'price' ? stock?.quoteAt ?? stock?.updatedAt : null) ?? null; }
-function currentObservation(value, at) {
-  const time=Number(at), now=Date.now();
-  return Number.isFinite(Number(value)) && value!=null && Number.isFinite(time) && time>0 && time<=now+1000
-    && observationState(value,time,now)==='fresh';
-}
-function observationLabel(value, at, window = 900000) {
-  if (value!=null && (!Number.isFinite(Number(at)) || Number(at)<=0 || Number(at)>Date.now()+1000)) return tr('时间待核实', 'Time unverified');
-  const state=observationState(value, at, Date.now(), window);
-  return state==='missing' ? tr('待采集', 'Not collected') : !at ? tr('时间待核实', 'Time unverified')
-    : state==='historical' ? `${tr('历史值', 'Historical')} · ${age(at)}` : age(at);
-}
-function assetFieldLabel(asset, field) {
-  const source=asset?.fieldSources?.[field] ?? tr('来源待核实', 'Source unverified');
-  return `${source} · ${observationLabel(asset?.[field], assetFieldAt(asset, field))}`;
-}
-function stockFieldLabel(stock, field) {
-  const source=stock?.fieldSources?.[field] ?? stock?.provider ?? tr('来源待核实', 'Source unverified');
-  return `${source} · ${observationLabel(stock?.[field], stockFieldAt(stock, field))}`;
-}
-function cardMemeVolume(card) {
-  const assets=[...new Map(card.themeRows.map(row => [row.key,row.asset])).values()];
-  if(!assets.length || assets.some(asset => asset?.volumeCurrency !== 'USD' || !currentObservation(asset?.volume24h,assetFieldAt(asset,'volume24h'))))return null;
-  return assets.reduce((sum,asset)=>sum+Number(asset.volume24h),0);
-}
-function cardPoolLiquidity(card) {
-  const pools=new Map();
-  for(const row of card.themeRows)for(const pool of row.pools ?? [])if(pool.pool)pools.set(String(pool.chainId)+':'+String(pool.pool).toLowerCase(),pool);
-  if(!pools.size || [...pools.values()].some(pool => !currentObservation(pool.liquidityUsd,pool.liquidityAt)))return null;
-  return [...pools.values()].reduce((sum,pool)=>sum+Number(pool.liquidityUsd),0);
-}
-
-function freshPoolCount(card) {
-  return card.themeRows.filter((row) => row.liquidityState === 'fresh').length;
-}
-
-function poolCount(card) {
-  return card.themeRows.reduce((total, row) => total + row.poolCount, 0);
-}
-
-function poolBarWidth(max, row) {
-  return max > 0 ? Math.max(1, Math.min(100, (Number(row.relation.liquidityUsd) || 0) / max * 100)) : 0;
-}
-
-function poolStateLabel(row) {
-  if (row.liquidityState === 'fresh') return tr('15 分钟内', 'Within 15m');
-  if (row.liquidityState === 'historical') return tr('历史估值', 'Historical');
-  return tr('规模待采集', 'Size pending');
-}
-
-function relationType(relation) {
-  return relation.wrapper ? tr('包装代币配对 · 已核验', 'Wrapped-token pair · verified') : tr('直接配对 · 已核验', 'Direct pair · verified');
-}
-
-function companyTitle(ticker, first) {
-  const identity = first?.stockIdentity;
-  if (identity?.status === 'identified' && (identity.nameZh || identity.nameEn)) return `${tr(identity.nameZh || identity.nameEn, identity.nameEn || identity.nameZh)} · ${identity.code}`;
-  if (/^\d+$/.test(ticker)) return first?.tokenName ? `${ticker} · ${first.tokenName}` : ticker;
-  const zh = COMPANY[ticker];
-  return zh ? tr(`${ticker} · ${zh}`, ticker) : ticker;
-}
-
-function autoOpen(ticker) {
-  const key = String(ticker ?? '').toLowerCase();
-  return (search.value && allRows.value.length === 1) || search.value === key;
-}
-
-function openStock(card) {
-  router.push({ name: 'stockDetail', params: { ticker: card.list[0]?.stockCode ?? card.ticker }, query: { chain: scope.value } });
-}
-
-function onStockSummary(event, card) {
-  if (detailMode.value) return;
-  event.preventDefault();
-  openStock(card);
-}
-
-function setPage(next) {
-  router.push({ query: { ...route.query, page: next || undefined } });
-}
-
-function pairLinkFor(stock) {
-  if (stock.tokenContractAddress) return { path: `/pair/${String(stock.chainId ?? stock.chainIndex ?? '196')}/${stock.tokenContractAddress}`, query: {} };
-  return { path: '/pair' };
-}
-
-let searchTimer;
-function onSearch(event) {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => router.push({ query: { ...route.query, q: event.target.value || undefined, page: undefined } }), 250);
-}
+const PAGE_SIZE=20;
+const pages=computed(()=>Math.max(1,Math.ceil(allRows.value.length/PAGE_SIZE)));
+const safePage=computed(()=>Math.min(Math.max(0,Number(route.query.page)||0),pages.value-1));
+const cards=computed(()=>allRows.value.slice(safePage.value*PAGE_SIZE,(safePage.value+1)*PAGE_SIZE).map(group=>({...group,theme:buildStockTheme({ticker:group.ticker,stockTokens:group.list,relations:group.relations,assets:store.assets,scope:scope.value,now:now.value})})));
+const COMPANY={AAPL:'苹果',AMD:'超威半导体',AMZN:'亚马逊',BABA:'阿里巴巴',COIN:'Coinbase',GME:'游戏驿站',GOOGL:'谷歌',HOOD:'Robinhood',INTC:'英特尔',META:'Meta',MSFT:'微软',NVDA:'英伟达',NFLX:'奈飞',QQQ:'纳斯达克100指数ETF',SPY:'标普500指数ETF',TSLA:'特斯拉',TSM:'台积电',MU:'美光科技',PLTR:'帕兰提尔','700':'腾讯控股','1810':'小米集团','9992':'泡泡玛特'};
+function companyTitle(stock){const identity=stock?.stockIdentity;return lang.lang==='en'?(identity?.nameEn??stock?.tokenName??''):(identity?.nameZh??COMPANY[stockTicker(stock)]??identity?.nameEn??stock?.tokenName??'');}
+function themeLink(ticker){return {path:`/stock/${encodeURIComponent(ticker)}`,query:{chain:scope.value}};}
+function setQuery(patch){router.push({query:{...route.query,...patch,page:patch.page||undefined}});}
+function chainLabel(chain){return {'56':'BNB Chain','196':'X Layer','4663':'Robinhood Chain'}[chain]??chain;}
+function quoteTitle(stock){return `${stock?.fieldSources?.price??stock?.provider??'—'} · ${date(stock?.fieldTimes?.price??stock?.quoteAt)}`;}
+function currentChange(stock){return isRecentObservation(stock?.fieldTimes?.change24h,900000,now.value);}
 </script>
+
+<style scoped>
+.stock-index-heading,.stock-index-toolbar { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; margin-bottom:16px; }
+.stock-index-heading h2 { font-size:20px; }
+.stock-index-heading span,.stock-index-toolbar p { color:var(--muted); font-size:12px; }
+.stock-index-toolbar { justify-content:flex-end; }
+.stock-index-toolbar p { margin-right:auto; }
+.stock-index-toolbar select { padding:7px 10px; color:var(--text); background:var(--bg); border:1px solid var(--border); border-radius:6px; }
+.stock-index-table th { font-size:12px; }
+.stock-index-table td { padding-top:15px; padding-bottom:15px; }
+.stock-index-table small { display:block; font-size:12px; color:var(--muted); margin-top:3px; }
+.stock-index-table .historical { color:var(--warning); }
+.stock-index-table a { color:var(--text); }
+.stock-index-table td.numeric,.stock-index-table th.numeric { text-align:right; font-family:ui-monospace,monospace; font-variant-numeric:tabular-nums; }
+.stock-index-mobile { display:none; }
+.stock-themes-index h2 { font-size:16px; margin-bottom:14px; }
+@media(max-width:760px) {
+  .stock-index-table { display:none; }
+  .stock-index-mobile { display:grid; gap:10px; }
+  .stock-index-card { display:flex; flex-direction:column; gap:10px; padding:14px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); }
+  .stock-index-card > div { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .stock-index-card small { color:var(--muted); font-size:12px; }
+  .stock-index-card strong small { display:block; margin-top:3px; }
+}
+</style>

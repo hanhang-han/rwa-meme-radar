@@ -280,6 +280,20 @@ class ProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated['unified']['assets'][0]['price'], 2)
         self.assertGreater(updated['realtime']['cursor'], json.loads(original)['realtime']['cursor'])
 
+    async def test_each_view_cache_survives_other_views_and_tape_only_input_cursor(self):
+        await self.put_asset()
+        await self.tick()
+        projection._serialized_projection = None
+        with patch.object(projection, '_decode_snapshot', wraps=projection._decode_snapshot) as decode:
+            for view in ('full', 'market', 'overview', 'full', 'market', 'overview'):
+                await projection.read_projection_json(view)
+            self.assertEqual(decode.call_count, 3)
+            await self.s.db.execute('UPDATE dashboard_projection SET input_cursor=input_cursor+1')
+            await self.s.db.commit()
+            for view in ('full', 'market', 'overview'):
+                await projection.read_projection_json(view)
+            self.assertEqual(decode.call_count, 3)
+
     async def test_named_views_share_full_revision_and_roll_forward_safely(self):
         await self.put_asset()
         await self.tick()
@@ -308,9 +322,13 @@ class ProjectionTests(unittest.IsolatedAsyncioTestCase):
                          market_dashboard(full))
 
         # Feed cannot be recovered from the dashboard's globally truncated
-        # signals, so a missing row must be rebuilt from the fact snapshot.
+        # signals. HTTP reports unavailable until the sole worker publishes.
         await self.s.db.execute("DELETE FROM dashboard_projection WHERE name='feed'")
         await self.s.db.commit()
+        with patch.object(projection, 'projection_tick', side_effect=AssertionError('HTTP must never build')):
+            with self.assertRaises(projection.ProjectionUnavailable):
+                await projection.read_projection_json('feed')
+        await self.tick(force=True)
         rebuilt = json.loads(await projection.read_projection_json('feed'))
         self.assertEqual(rebuilt['realtime'], (await projection.read_projection())['realtime'])
         refreshed = await self.s.fetchall('SELECT name,revision,cursor,input_cursor,built_at FROM dashboard_projection')

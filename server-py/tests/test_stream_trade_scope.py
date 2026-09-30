@@ -4,7 +4,7 @@ import os
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
@@ -68,3 +68,39 @@ class TradeScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b'id: 5\n', frames[-1])
         self.assertIn(b'"cursor":5', frames[-1])
         self.assertFalse(hub.clients(), 'closed scoped subscribers must be removed')
+
+    async def test_feed_scope_filters_exchange_and_unknown_assets_and_keeps_revision(self):
+        scope = parse_trade_scope('feed')
+        allowed = {('196', '0xabc')}
+        cases = [
+            ('trade', {'chainId': '196', 'token': '0xABC', 'venue': 'dex'}, True),
+            ('trade', {'chainId': '196', 'token': '0xabc', 'source': 'OKX trades'}, True),
+            ('trade', {'chainId': '196', 'token': '0xabc', 'venue': 'binance-alpha'}, False),
+            ('trade', {'chainId': '196', 'token': '0xother', 'venue': 'dex'}, False),
+            ('trade', {'chainId': '196', 'token': '0xabc'}, False),
+            ('projection.delta', {'revision': 3}, True),
+        ]
+        for event, body, expected in cases:
+            self.assertEqual(frame_visible(hub._frame(event, body), trade_scope=scope, feed_tokens=allowed), expected)
+        # Scoped detail still receives its explicitly selected exchange venue.
+        self.assertTrue(frame_visible(hub._frame('trade', cases[2][1]), trade_scope=('196', '0xabc')))
+
+    async def test_feed_replay_updates_membership_without_dropping_global_revision(self):
+        events = [
+            ('trade', {'chainId': '196', 'token': '0xnew', 'venue': 'dex'}),
+            ('projection.delta', {'revision': 2, 'upserts': {'assets': [{'chainId': '196', 'token': '0xnew', 'kind': 'candidate'}]}}),
+            ('trade', {'chainId': '196', 'token': '0xnew', 'venue': 'dex'}),
+            ('trade', {'chainId': '196', 'token': '0xnew', 'venue': 'binance'}),
+        ]
+        ledger = hub._ledger()
+        ledger.executemany('INSERT INTO realtime_events(event,body,at) VALUES (?,?,?)',
+                           [(event, json.dumps(body), int(time.time()*1000)) for event, body in events])
+        ledger.commit()
+        with patch('app.realtime_projection.read_projection_json', AsyncMock(return_value=json.dumps({'trackedAssets': []}))):
+            response = await get_stream(last_event_id='0', snapshot=False, protocol=1, trades='feed')
+            frames = [await anext(response.body_iterator) for _ in range(3)]
+            await response.body_iterator.aclose()
+        self.assertIn(b'event: projection.delta', frames[0])
+        self.assertIn(b'event: trade', frames[1])
+        self.assertIn(b'"cursor":4', frames[2])
+        self.assertNotIn(b'binance', b''.join(frames))

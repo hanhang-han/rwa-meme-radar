@@ -6,18 +6,23 @@ const identity = bubble => `${String(bubble?.chainId ?? '')}:${String(bubble?.to
 const observedMs = value => value == null ? null : Number.isFinite(Number(value)) ? Number(value) : Date.parse(value);
 const identityOf = (chainId, token) => `${String(chainId ?? '')}:${String(token ?? '').toLowerCase()}`;
 export const THEME_WATCH_KEY = 'cliperx-theme-watch-v1';
+export function watchStorageKey() {
+  try { const user = localStorage.getItem('cliperx-watch-account'); return user ? `${THEME_WATCH_KEY}:${user}` : THEME_WATCH_KEY; }
+  catch { return THEME_WATCH_KEY; }
+}
 
 export function readThemeWatches() {
   try {
-    const saved = JSON.parse(localStorage.getItem(THEME_WATCH_KEY) || '[]');
+    const saved = JSON.parse(localStorage.getItem(watchStorageKey()) || '[]');
     return new Set(Array.isArray(saved) ? saved.filter(value => typeof value === 'string').slice(0, 200) : []);
   } catch { return new Set(); }
 }
 
-export function writeThemeWatches(keys) {
+export function writeThemeWatches(keys, silent = false) {
+  const before = [...readThemeWatches()];
   const saved = [...keys].filter(value => typeof value === 'string').slice(0, 200);
-  try { localStorage.setItem(THEME_WATCH_KEY, JSON.stringify(saved)); } catch {}
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('theme-watch-change'));
+  try { localStorage.setItem(watchStorageKey(), JSON.stringify(saved)); } catch {}
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('theme-watch-change', {detail:{before,after:saved,silent}}));
 }
 
 export function metricStatus(metric, now = Date.now()) {
@@ -101,8 +106,8 @@ export function metricStateLabel(metric, language = 'zh', now = Date.now()) {
     stale: ['已过期', 'Stale'],
     'unknown-time': ['采样时间未知', 'Observation time unknown'],
     missing: ['暂无数据', 'Unavailable'],
-    'unsupported-currency': ['计价币种不可比', 'Currency not comparable'],
-    'unsupported-scope': ['统计口径不可比', 'Scope not comparable'],
+    'unsupported-currency': ['计价单位不同，暂不比较', 'Different currencies; not comparable'],
+    'unsupported-scope': ['统计范围不同，暂不比较', 'Different coverage; not comparable'],
   };
   return (labels[metricStatus(metric, now)] ?? labels.missing)[language === 'en' ? 1 : 0];
 }

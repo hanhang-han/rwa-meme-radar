@@ -46,7 +46,7 @@ class ProjectionTest(unittest.TestCase):
         self.assertEqual(small['unified']['totals'],{'assets':20,'stockTokens':1,'relations':0})
         self.assertEqual(small['unified']['quality']['assets']['price']['total'],20)
         self.assertEqual(small['unified']['quality']['assets']['price']['fresh'],20)
-        self.assertEqual(len(small['unified']['assets']),12)
+        self.assertEqual(len(small['unified']['assets']),2)
         self.assertEqual(small['unified']['stockTokens'],[])
         self.assertEqual(full['unified']['groups'], [])
         self.assertEqual(raw['unified']['groups'], [{'assets': assets}])
@@ -69,10 +69,12 @@ class ProjectionTest(unittest.TestCase):
         full={'now':1000,'unified':{'assets':assets,'stockTokens':stocks,'relations':relations}}
         result=overview_dashboard(full)['unified']
         self.assertEqual(result['totals'] if 'totals' in result else None,None)
-        self.assertEqual(len(result['assets']),12)
-        self.assertEqual(len(result['relations']),12)
+        self.assertEqual(len(result['assets']),2)
+        self.assertEqual(len(result['relations']),2)
         self.assertEqual([s['tokenContractAddress'] for s in result['stockTokens']],
-                         [f'0xstock{i}' for i in range(12)])
+                         [f'0xstock{i}' for i in range(2)])
+        self.assertEqual(len(full['unified']['assets']),30)
+        self.assertEqual(len(full['unified']['relations']),30)
         self.assertEqual(len(full['unified']['stockTokens']),31)
 
     def test_market_retains_every_identity_and_list_metric_without_full_evidence(self):

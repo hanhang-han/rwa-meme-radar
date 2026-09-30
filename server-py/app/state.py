@@ -125,6 +125,22 @@ def _active_meme_count(assets: list[dict], now: float, chain_id: str | None = No
     return len(identities)
 
 
+def newly_discovered_assets(assets, now):
+    """Discovery is first indexing, distinct from token or pool creation."""
+    first = {}
+    for row in assets:
+        token = str(row.get('token') or '').lower()
+        at = row.get('firstSeen')
+        if token and isinstance(at, (int, float)) and not isinstance(at, bool) and 0 < at <= now:
+            key = (str(row.get('chainId') or '196'), token)
+            first[key] = min(at, first.get(key, at))
+    by_chain = {cid: sum(1 for (chain, _), at in first.items() if chain == cid and now-86_400_000 <= at <= now)
+                for cid in ('196', '56', '4663')}
+    return {'value': sum(by_chain.values()), 'byChain': by_chain, 'window': '24h',
+            'from': now-86_400_000, 'to': now, 'scope': 'first-indexed-assets',
+            'knownFirstSeen': len(first), 'timeField': 'firstSeen'}
+
+
 def _source_statuses(stock_tokens: list[dict], assets: list[dict]) -> list[dict]:
     """Per-source health, so the page can say realtime/scheduled/stale/market
     closed instead of silently showing frozen numbers."""
@@ -317,7 +333,7 @@ class DashboardData:
     # -- unified payload pieces -------------------------------------------------
 
     def visible_assets(self, enriched=None, now=None, relations=None) -> list[dict]:
-        from .stock_identity import match_name
+        from .stock_identity import match_name, classify_derivative
         out = []
         by_asset = {}
         now = time.time() * 1000 if now is None else now
@@ -344,6 +360,8 @@ class DashboardData:
             approved = [r for r in asset_relations if r.get('status') == 'verified' and r.get('level') == 'A']
             # Old persisted substring matches included generic BTC-like terms.
             # Recompute the name clue from the pinned whole-term dictionary.
+            row['derivative'] = classify_derivative(row.get('symbol'), row.get('name'))
+            row['assetCategory'] = 'derivative' if row['derivative'] else 'meme'
             row['match'] = match_name(row.get('symbol'), row.get('name'))
             row['relationLevel'] = 'A' if approved else 'B' if row['match'] else None
             pool_totals = _pool_totals(_official_pools(approved), now)
@@ -536,11 +554,14 @@ class DashboardData:
         }
         metrics = self.metrics(now=now, pools=official_pools)
         metrics['activeMemeCount'] = _active_meme_count(assets, now)
+        new_assets = newly_discovered_assets(assets, now)
+        metrics['newAssets24h'] = new_assets['value']
         metrics_by_chain = {}
         for cid in ('196', '56', '4663'):
             chain_pools = [r for r in official_pools if str(r.get('chainId')) == cid]
             metrics_by_chain[cid] = self.metrics(now=now, pools=chain_pools)
             metrics_by_chain[cid]['activeMemeCount'] = _active_meme_count(assets, now, cid)
+            metrics_by_chain[cid]['newAssets24h'] = new_assets['byChain'][cid]
         # Dashboard rows contain only list/sort fields. Risk profiles, trade
         # cursors and full field histories remain available from token detail;
         # excluding them here materially reduces every 20-second snapshot.
@@ -595,6 +616,7 @@ class DashboardData:
                 "groups": self.groups(assets) if include_groups else [],
                 "quality": quality,
                 "metrics": metrics,
+                "newAssets24h": new_assets,
                 "metricsByChain": metrics_by_chain,
                 "sectors": await self._sectors(enriched),
 

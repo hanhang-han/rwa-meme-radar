@@ -235,7 +235,9 @@ class DeveloperApiTests(unittest.IsolatedAsyncioTestCase):
             "thin_spike": {"status": "triggered", "reason": "threshold-exceeded",
                            "evidence": {"change24hPct": 1200, "threshold": 1000,
                                         "volume24hUsd": 123456}}}})
-        self.assertEqual(len(checks), 5)
+        self.assertEqual(set(checks), {'wash_suspect', 'thin_spike', 'contract_risk',
+                                       'concentrated', 'holder_anomaly', 'liquidity_unlock'})
+        self.assertEqual(checks['liquidity_unlock']['status'], 'unknown')
         self.assertEqual(checks["wash_suspect"]["status"], "unknown")
         self.assertEqual(checks["thin_spike"]["status"], "triggered")
         self.assertNotIn("volume24hUsd", checks["thin_spike"]["evidence"])

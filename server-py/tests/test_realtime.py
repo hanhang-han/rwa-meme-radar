@@ -88,14 +88,15 @@ class RealtimeTest(unittest.TestCase):
         second = ResearchStore(':memory:', '56')
         self.assertIs(first._write_lock, second._write_lock)
 
-    def test_enrichment_is_fieldwise_and_chain_scoped(self):
+    def test_enrichment_uses_one_quote_tuple_and_is_chain_scoped(self):
         from app.market_quotes import enrich_asset
         asset = {'chainId':'56','token':'0xa','price':2,'volume24h':4,'fieldTimes':{'price':100,'volume24h':300}}
         snapshot = {'assets':{'56:0xa':{'DexScreener':{'provider':'DexScreener','price':3,'volume24h':1,'updatedAt':200,'fieldTimes':{'price':200,'volume24h':200}}}}}
         with patch('app.market_quotes._read_snapshot', return_value=snapshot):
             enriched = enrich_asset(asset)
             self.assertEqual(enriched['price'], 3)
-            self.assertEqual(enriched['volume24h'], 4)
+            self.assertEqual(enriched['volume24h'], 1)
+            self.assertEqual(enriched['primaryQuote']['provider'], 'DexScreener')
             self.assertEqual(asset['price'], 2)
             self.assertEqual(enrich_asset({**asset,'chainId':'196'})['price'], 2)
 

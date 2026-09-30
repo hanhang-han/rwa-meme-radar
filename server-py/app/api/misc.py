@@ -1,6 +1,7 @@
 """Events, pair, feed and registry endpoints completing the Node API contract."""
 import base64
 import binascii
+import asyncio
 import json
 import time
 
@@ -10,12 +11,15 @@ from ..db import store
 from ..registry import registry_info
 from ..state import _assessed_relations
 from ..scoped_reads import candidate_relations
-from ..market_history import market_trades
-from ..realtime_projection import read_projection_json
+from ..market_history import market_trades, token_trades
+from ..realtime_projection import read_projection_json, ProjectionUnavailable
 
 router = APIRouter()
 EVENT_PAGE_SIZE = 50
 SUPPORTED_CHAINS = {"196", "56", "4663"}
+FEED_CACHE_SECONDS = 2
+_feed_cache = {}
+_feed_locks = {}
 
 
 def _encode_event_cursor(item: dict) -> str:
@@ -59,32 +63,73 @@ async def get_feed(chain: str | None = None):
     on top; this is the initial load and the polling fallback."""
     if chain is not None and chain not in SUPPORTED_CHAINS and chain != 'all':
         raise HTTPException(status_code=400, detail='Unsupported chain')
+    key = chain if chain in SUPPORTED_CHAINS else 'all'
+    cached = _feed_cache.get(key)
+    if cached and time.monotonic()-cached[0] < FEED_CACHE_SECONDS:
+        return cached[1]
+    lock = _feed_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        cached = _feed_cache.get(key)
+        if cached and time.monotonic()-cached[0] < FEED_CACHE_SECONDS:
+            return cached[1]
+        result = await _load_feed(chain)
+        _feed_cache[key] = (time.monotonic(), result)
+        return result
+
+
+async def _load_feed(chain):
     selected_chains = (chain,) if chain in SUPPORTED_CHAINS else ('196', '56', '4663')
-    snapshot = json.loads(await read_projection_json('feed'))
+    try:
+        snapshot = json.loads(await read_projection_json('feed'))
+    except ProjectionUnavailable as exc:
+        raise HTTPException(status_code=503, detail='snapshot-not-ready', headers={'Retry-After': '3'}) from exc
     assets, signals = snapshot['assets'], snapshot['signals']
     hot_by_chain = {chain: [] for chain in SUPPORTED_CHAINS}
     for asset in assets:
         asset_chain = str(asset.get("chainId") or "196")
         if asset_chain in selected_chains:
             hot_by_chain[asset_chain].append(asset)
-    trades: list = []
-    for selected_chain in selected_chains:
+    tracked = {(str(a.get("chainId") or "196"), str(a.get("token") or "").lower()): a
+               for a in snapshot.get("trackedAssets", assets)}
+    async def chain_trades(selected_chain):
+        trades = []
         s = await store(selected_chain)
-        for a in hot_by_chain[selected_chain]:
-            for r in await s.recent_trades(a["token"], 12):
-                r.setdefault("chainId", selected_chain)
-                r.setdefault("token", a["token"])
-                r.setdefault("symbol", a.get("symbol"))
-                trades.append(r)
-        # Live exchange/pool trades are stored under their own market keys.
-        # Include that tape on initial load/reconnect, preserving currency and
-        # market identity; never recompute DEX aggregate counts from it.
-        trades.extend(await market_trades(s, limit=100))
+        hot = {str(a['token']).lower(): a for a in hot_by_chain[selected_chain]}
+        for r in await token_trades(s, hot, limit=100):
+            token = str(r.get('token') or '').lower()
+            if token in hot:
+                trades.append({**r, 'chainId': selected_chain, 'symbol': hot[token].get('symbol')})
+        # Market tapes are limited to indexed site assets and actual DEX
+        # swaps before pagination. Exchange trades belong on the token's
+        # explicitly labelled markets tab, never in this on-chain feed.
+        tokens = [token for (cid, token) in tracked if cid == selected_chain]
+        for r in await market_trades(s, limit=100, dex_only=True, tokens=tokens):
+            identity = (selected_chain, str(r.get('token') or '').lower())
+            if r.get('venue') != 'dex' or identity not in tracked:
+                continue
+            trades.append({**r, 'chainId': selected_chain, 'symbol': tracked[identity].get('symbol')})
+        return trades
+    trades = [row for rows in await asyncio.gather(*(chain_trades(cid) for cid in selected_chains)) for row in rows]
+    now = int(time.time()*1000)
+    unique = {}
+    for row in trades:
+        if row.get('venue') in ('binance', 'binance-alpha', 'exchange') or row.get('priceScope') == 'exchange':
+            continue
+        row = {**row, 'venue': 'dex', 'tradesScope': 'dex'}
+        at = row.get('sourceEventAt') or row.get('t')
+        row['delayMs'] = max(0, now-at) if isinstance(at, (int, float)) else None
+        row['usdStatus'] = 'known' if row.get('volume') is not None and row.get('volumeCurrency', 'USD') == 'USD' else 'unknown'
+        if row['usdStatus'] == 'unknown':
+            row['volume'] = None
+        identity = (str(row.get('chainId')), row.get('token'), row.get('id'))
+        unique[identity] = row
+    trades = list(unique.values())
     trades.sort(key=lambda r: -(r.get("t") or 0))
     return {
         "trades": trades[:100],
         "relationships": [row for row in signals if str(row.get('chainId')) in selected_chains][:30],
-        "at": int(time.time() * 1000),
+        "at": now,
+        "scope": "indexed-assets-dex-swaps",
     }
 
 

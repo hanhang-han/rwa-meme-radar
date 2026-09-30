@@ -62,9 +62,33 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
         last_id = None
     candle_keys = set(candles.split(',')) if isinstance(candles, str) and candles != 'all' else None
     trade_scope = parse_trade_scope(trades)
+    feed_tokens = set()
+    if trade_scope == ('feed', ''):
+        from ..realtime_projection import read_projection_json, ProjectionUnavailable
+        try:
+            feed = json.loads(await read_projection_json('feed'))
+        except ProjectionUnavailable as exc:
+            raise HTTPException(status_code=503, detail='snapshot-not-ready', headers={'Retry-After': '3'}) from exc
+        feed_tokens = {(str(row.get('chainId')), str(row.get('token') or '').lower())
+                       for row in feed.get('trackedAssets', feed.get('assets', []))}
 
     def visible(frame):
-        return frame_visible(frame, protocol=protocol, candle_keys=candle_keys, trade_scope=trade_scope)
+        if trade_scope == ('feed', '') and b'event: projection.delta\n' in frame:
+            # The full delta still reaches clients and advances their version.
+            # Update membership in memory; no database query per trade/client.
+            try:
+                data = json.loads(next(line[5:].strip() for line in frame.split(b'\n') if line.startswith(b'data:')))
+                for row in (data.get('upserts') or {}).get('assets', []):
+                    identity = (str(row.get('chainId')), str(row.get('token') or '').lower())
+                    if row.get('kind') == 'candidate':
+                        feed_tokens.add(identity)
+                for key in (data.get('removes') or {}).get('assets', []):
+                    chain, _, token = str(key).partition(':')
+                    feed_tokens.discard((chain, token.lower()))
+            except (ValueError, StopIteration, TypeError):
+                pass
+        return frame_visible(frame, protocol=protocol, candle_keys=candle_keys, trade_scope=trade_scope,
+                             feed_tokens=feed_tokens)
 
     async def frames():
         # StreamingResponse may be abandoned before its body is iterated. Only
@@ -141,23 +165,31 @@ def parse_trade_scope(value):
     """An omitted scope keeps the existing global trade stream."""
     if value is None or value == 'all':
         return None
+    if value == 'feed':
+        return ('feed', '')
     chain, separator, token = value.partition(':')
     if not separator or not chain.isdecimal() or not token or len(token) > 200:
-        raise HTTPException(status_code=422, detail='trades must be chainId:token or all')
+        raise HTTPException(status_code=422, detail='trades must be chainId:token, feed or all')
     return chain, token.lower()
 
 
-def frame_visible(frame, protocol=0, candle_keys=None, trade_scope=None):
+def frame_visible(frame, protocol=0, candle_keys=None, trade_scope=None, feed_tokens=None):
     lines = frame.split(b'\n', 3)
     event_line = lines[1] if lines[0].startswith(b'id:') else lines[0]
     event = event_line.partition(b':')[2].strip().decode()
     if protocol == 1 and event in ('price', 'stock-quote'):
         return False
-    if trade_scope is not None and event in ('trade', 'trade-remove'):
+    if trade_scope is not None and event in ('trade', 'trade-remove', 'market.trade'):
         try:
             data_line = next(line for line in lines if line.startswith(b'data:'))
             data = json.loads(data_line.partition(b':')[2])
-            return isinstance(data, dict) and (str(data.get('chainId')), str(data.get('token') or '').lower()) == trade_scope
+            if not isinstance(data, dict):
+                return False
+            identity = (str(data.get('chainId')), str(data.get('token') or '').lower())
+            if trade_scope == ('feed', ''):
+                dex = data.get('venue') == 'dex' or (not data.get('venue') and data.get('source') == 'OKX trades')
+                return dex and data.get('priceScope') != 'exchange' and identity in (feed_tokens or set())
+            return identity == trade_scope
         except (ValueError, StopIteration):
             return False  # unknown trade identity cannot be assigned to the watched asset
     if candle_keys is not None and event in ('candle', 'candle.upsert', 'candle.close', 'candle.correct'):

@@ -28,6 +28,7 @@ class DetailConsistencyTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(state, 'reload_if_stale', AsyncMock()) as reload, \
              patch.object(token_api, 'store', AsyncMock(return_value=scoped)), \
+             patch.object(token_api, 'read_token_projection', AsyncMock(return_value={'asset': {'token': meme, 'chainId': '196', 'kind': 'candidate', 'pairLiquidityUsd': None, 'relationLevel': None}, 'stock': None})), \
              patch('app.demand_leases.publish_lease'), \
              patch.object(token_api, 'candidate_relations', AsyncMock(return_value=[relation])), \
              patch.object(token_api, 'token_pools', AsyncMock(return_value=[])), \

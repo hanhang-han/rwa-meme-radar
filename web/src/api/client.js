@@ -30,8 +30,12 @@ export async function getDataHealth() {
   return getJSON('/health/data');
 }
 
-export async function getDetail(chain, address) {
-  return getJSON(`/token/${encodeURIComponent(chain)}/${encodeURIComponent(address)}`);
+export async function getDetail(chain, address, options = {}) {
+  const q = new URLSearchParams();
+  if(options.section) q.set('section',options.section);
+  if(options.offset) q.set('offset',String(options.offset));
+  if(options.limit) q.set('limit',String(options.limit));
+  return getJSON(`/token/${encodeURIComponent(chain)}/${encodeURIComponent(address)}${q.size?'?'+q:''}`);
 }
 
 export async function getCandles(chain, address, bar, limit = 180, venue = 'dex', options = {}) {

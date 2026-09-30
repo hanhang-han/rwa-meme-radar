@@ -1,0 +1,22 @@
+<template>
+<div class="watch-page"><section class="panel"><div class="panel-head"><h2>{{ tr('我的关注','Watchlist') }} <small>{{ rows.length }}</small></h2><RouterLink to="/me">{{ account.session?tr('账号与提醒','Account and alerts'):tr('登录同步','Sign in to sync') }} →</RouterLink></div>
+<p class="hint" role="status">{{ account.syncState==='saving'?tr('正在同步关注…','Syncing watchlist…'):account.syncState==='error'?tr('暂未同步，关注已保留在此设备。','Not synced yet; saved on this device.'):account.session?tr('已同步到账号','Synced to your account'):tr('已保存在此设备','Saved on this device') }} <button v-if="account.syncState==='error'" @click="account.flush()">{{ tr('重试','Retry') }}</button></p>
+<div v-if="rows.length" class="watch-list"><article v-for="row in rows" :key="row.key"><RouterLink :to="row.to"><strong>{{ row.name }}</strong><small>{{ row.subtitle }}</small></RouterLink><span>{{ row.stock?tr('股票主题','Stock theme'):price(row.asset?.price,row.asset?.priceCurrency) }}</span><span :class="Number(row.asset?.change24h)>0?'up':Number(row.asset?.change24h)<0?'down':''">{{ row.stock?'':pct(row.asset?.change24h) }}</span><button :aria-label="tr('取消关注','Unfollow')+' '+row.name" @click="account.toggle(row.key)">★</button></article></div>
+<div v-else class="x-empty"><p>{{ tr('还没有关注的资产。','Your watchlist is empty.') }}</p><RouterLink to="/meme">{{ tr('浏览 Meme','Explore memes') }} →</RouterLink><span> · </span><RouterLink to="/stock">{{ tr('浏览股票主题','Explore stock themes') }} →</RouterLink></div></section>
+<section v-if="rows.length" class="panel"><div class="panel-head"><h2>{{ tr('关注动态','Watchlist activity') }}</h2><RouterLink to="/events">{{ tr('全部市场动态','All market activity') }} →</RouterLink></div><div v-if="events.length" class="watch-events"><RouterLink v-for="event in events" :key="event.id" :to="event.to"><span>{{ event.name }} · {{ event.ticker }}</span><small>{{ event.level==='A'?tr('池子配对','Pool pairing'):tr('名称匹配','Name match') }} · {{ age(event.at) }}</small></RouterLink></div><p v-else class="x-empty">{{ tr('关注范围内暂无新动态。','No new activity in your watchlist.') }}</p></section></div>
+</template>
+<script setup>
+import {computed,onMounted} from 'vue';
+import {useAccountStore} from '../stores/account';
+import {useDashboardStore} from '../stores/dashboard';
+import {useFeedStore} from '../stores/feed';
+import {tr} from '../i18n';
+import {age,chainName,pct,price,short} from '../utils/format';
+const account=useAccountStore(),dash=useDashboardStore(),feed=useFeedStore();
+const rows=computed(()=>account.watches.map(key=>{if(key.startsWith('stock:'))return {key,stock:true,name:key.slice(6),subtitle:tr('股票主题','Stock theme'),to:`/stock/${encodeURIComponent(key.slice(6))}`};const [chain,token]=key.split(':'),asset=dash.assetByToken(token,chain);return {key,asset,name:asset?.name||asset?.symbol||short(token),subtitle:`${chainName({chainId:chain})} · ${short(token)}`,to:{path:`/asset/${chain}/${token}`,query:{from:'watch'}}};}));
+const events=computed(()=>{const watched=new Set(account.watches);return feed.relationships.map(e=>{const r=e.relation??e,chain=String(r.chainId??e.chainId),token=r.token??e.asset;if(typeof token!=='string')return null;const ticker=r.ticker??e.ticker;if(!watched.has(`${chain}:${token.toLowerCase()}`)&&!watched.has(`stock:${String(ticker).toUpperCase()}`))return null;const asset=dash.assetByToken(token,chain);return {id:e.id,at:e.t??e.at??r.checkedAt,name:asset?.name||asset?.symbol||short(token),ticker,level:r.level,to:{path:`/asset/${chain}/${token}`,query:{from:'watch',tab:'relation'}}};}).filter(Boolean).slice(0,20);});
+onMounted(()=>{account.start();feed.load();});
+</script>
+<style scoped>
+.watch-page{display:grid;gap:16px}.watch-list article{display:grid;grid-template-columns:minmax(130px,1fr) 140px 90px 35px;align-items:center;gap:14px;padding:16px 0;border-bottom:1px solid var(--border)}.watch-list a{display:grid;gap:5px}.watch-list small,.watch-events small{font-size:12px;color:var(--muted)}.watch-list button{border:0;background:none;color:var(--accent);font-size:20px;cursor:pointer}.watch-events a{display:flex;justify-content:space-between;gap:12px;padding:14px 0;border-bottom:1px solid var(--border)}@media(max-width:600px){.watch-list article{grid-template-columns:minmax(0,1fr) 95px 30px}.watch-list article>span:nth-of-type(2){display:none}.watch-events a{flex-direction:column}}
+</style>

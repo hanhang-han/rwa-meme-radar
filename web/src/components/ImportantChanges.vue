@@ -1,7 +1,7 @@
 <template>
   <section class="panel important-changes" aria-labelledby="important-changes-title">
     <div class="important-heading">
-      <h2 id="important-changes-title">{{ tr('最新动态', 'Latest activity') }}</h2>
+      <h2 id="important-changes-title">{{ tr('动态', 'Activity') }}</h2>
       <div class="important-filter" role="group" :aria-label="tr('动态筛选', 'Activity filter')">
         <button type="button" :class="{active:filter==='all'}" :aria-pressed="filter==='all'" @click="filter='all'">{{ tr('全部', 'All') }}</button>
         <button type="button" :class="{active:filter==='watched'}" :aria-pressed="filter==='watched'" @click="filter='watched'">{{ tr('已关注', 'Following') }}</button>
@@ -22,22 +22,22 @@
         <div class="important-time">
           <span class="important-time-dot" aria-hidden="true"></span>
           <time :datetime="iso(eventTime(item))" :title="date(eventTime(item))">{{ relativeTime(item) }}</time>
-          <small>{{ viewMode==='verified' && item.type==='relation-verified' ? tr('核验', 'Verified') : tr('收录', 'Indexed') }}</small>
+          <small>{{ viewMode==='verified' && item.type==='relation-verified' ? tr('配对', 'Paired') : tr('收录', 'Indexed') }}</small>
         </div>
         <div class="important-body">
           <div class="important-asset-line">
             <RouterLink :to="detailPath(item)" class="important-name">{{ assetName(item) }}</RouterLink>
-            <span v-if="item.ticker" class="important-theme"><span aria-hidden="true">{{ viewMode==='verified' ? '↔' : '·' }}</span> {{ item.ticker }}</span>
-            <span class="important-status" :class="{'is-unverified':viewMode==='observed' && !item.currentlyVerified}" :title="viewMode==='observed' && !item.currentlyVerified ? tr('股票身份或配对条件尚未核实', 'Stock identity or pairing criteria are unverified') : undefined">{{ viewMode==='verified' || item.currentlyVerified ? tr('配对已核验', 'Verified pair') : tr('待核验', 'Unverified') }}</span>
+            <RouterLink v-if="item.ticker" class="important-theme" :to="{path:'/stock/'+item.ticker,query:{chain:scope}}">{{ item.ticker }}</RouterLink>
+            <span v-if="viewMode==='verified' || item.currentlyVerified || item.keyword" class="important-status" :class="{'is-unverified':viewMode==='observed' && !item.currentlyVerified}">{{ viewMode==='verified' || item.currentlyVerified ? tr('池子配对', 'Pool pair') : tr('名称匹配', 'Name match') }}</span><small v-if="item.recordCount>1" class="important-record-count">{{ item.recordCount }} {{ tr('次记录','records') }}</small>
           </div>
           <div class="important-identity"><span>{{ chainName(item) }}</span><span class="important-contract">{{ short(item.token) }}</span></div>
-          <p v-if="viewMode==='observed' && observationFact(item)" class="important-fact">{{ observationFact(item) }}</p>
+          <p v-if="eventFact(item)" class="important-fact">{{ eventFact(item) }}</p>
           <details class="important-record">
             <summary>{{ tr('时间记录', 'Record times') }}</summary>
             <dl v-if="viewMode==='verified'">
-              <div><dt>{{ tr('池创建', 'Pool created') }}</dt><dd>{{ date(item.occurredAt) }}</dd></div>
-              <div><dt>{{ tr('首次收录', 'First indexed') }}</dt><dd>{{ date(item.discoveredAt) }}</dd></div>
-              <div><dt>{{ tr('核验', 'Verified') }}</dt><dd>{{ date(item.verifiedAt) }}</dd></div>
+              <div v-if="item.occurredAt"><dt>{{ tr('池创建', 'Pool created') }}</dt><dd>{{ date(item.occurredAt) }}</dd></div>
+              <div v-if="item.discoveredAt && item.discoveredAt!==item.verifiedAt"><dt>{{ tr('首次收录', 'First indexed') }}</dt><dd>{{ date(item.discoveredAt) }}</dd></div>
+              <div v-if="item.verifiedAt"><dt>{{ tr('配对记录', 'Pair recorded') }}</dt><dd>{{ date(item.verifiedAt) }}</dd></div>
             </dl>
             <dl v-else>
               <div><dt>{{ tr('收录', 'Indexed') }}</dt><dd>{{ date(item.at) }}</dd></div>
@@ -47,7 +47,7 @@
           </details>
         </div>
         <div class="important-actions">
-          <RouterLink v-if="viewMode==='verified' && item.relation?.stock && item.relation?.pool" :to="pairPath(item)">{{ tr('查看配对', 'View pair') }} <span aria-hidden="true">↗</span></RouterLink>
+          <RouterLink v-if="viewMode==='verified' && item.relation?.stock && item.relation?.pool" :to="pairPath(item)">{{ tr('关系证据', 'Relationship') }} <span aria-hidden="true">↗</span></RouterLink>
           <RouterLink v-else :to="detailPath(item)">{{ tr('查看资产', 'View asset') }} <span aria-hidden="true">↗</span></RouterLink>
           <a v-if="item.relation?.pool || item.pool" :href="explorer(item.relation?.pool || item.pool,'address',String(item.chainId))" target="_blank" rel="noopener">{{ tr('链上记录', 'Onchain') }} ↗</a>
           <button type="button" :aria-pressed="watched.has(itemKey(item))" @click="toggleWatch(item)">{{ watched.has(itemKey(item)) ? tr('★ 已关注', '★ Following') : tr('☆ 关注', '☆ Follow') }}</button>
@@ -55,7 +55,7 @@
       </article>
     </div>
     <div class="important-footer">
-      <details class="important-explainer"><summary>{{ tr('记录说明', 'About these records') }}</summary><p>{{ tr('核验确认链上池的配对关系，不代表发行方授权或价格联动。收录时间是本站首次记录时间，不是池创建时间。', 'Verification confirms an onchain pool pairing, not issuer endorsement or linked prices. Indexing time is when the site first recorded it, not when the pool was created.') }}</p></details>
+      <details class="important-explainer"><summary>{{ tr('记录说明', 'About these records') }}</summary><p>{{ tr('收录时间是本站首次记录时间；池创建时间单独列出。', 'Indexing time is the first record on this site. Pool creation is listed separately.') }}</p></details>
       <RouterLink :to="{path:'/events',query:{chain:scope}}">{{ tr('全部记录', 'All records') }} →</RouterLink>
     </div>
   </section>
@@ -64,7 +64,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { tr } from '../i18n';
-import { chainName, date, explorer, short } from '../utils/format';
+import { age, chainName, date, explorer, short, usd } from '../utils/format';
+import { groupActivityItems } from '../utils/home-model';
 import { useMinuteClock } from '../composables/useMinuteClock';
 import { readThemeWatches, themeEventTime, visibleRecentObservations, visibleThemeEvents, writeThemeWatches } from '../utils/theme-map-model';
 
@@ -82,10 +83,10 @@ const viewMode = ref('verified');
 const manuallySelected = ref(false);
 const watched = ref(readThemeWatches());
 const eventTime = item => item?.at ?? themeEventTime(item);
-const events = computed(() => visibleThemeEvents(props.changes, props.scope, now.value, 12));
-const recentRows = computed(() => visibleRecentObservations(props.observations,props.unified,props.scope,now.value,30));
+const events = computed(() => groupActivityItems(visibleThemeEvents(props.changes, props.scope, now.value, Infinity)));
+const recentRows = computed(() => groupActivityItems(visibleRecentObservations(props.observations,props.unified,props.scope,now.value,Infinity)));
 const displayed = computed(() => (filter.value === 'watched'
-  ? (viewMode.value === 'verified' ? events.value : recentRows.value).filter(item => watched.value.has(itemKey(item)))
+  ? (viewMode.value === 'verified' ? events.value : recentRows.value).filter(item => watched.value.has(itemKey(item)) || watched.value.has(`stock:${String(item.ticker??'').toUpperCase()}`))
   : (viewMode.value === 'verified' ? events.value : recentRows.value)).slice(0, 6));
 const assetIndex = computed(() => new Map(props.assets.map(asset => [itemKey(asset),asset])));
 watch([events,recentRows], ([verified,observed]) => {
@@ -99,7 +100,12 @@ function assetName(item) {
   const asset = assetIndex.value.get(itemKey(item));
   return asset?.name || asset?.symbol || item.symbol || short(item.token);
 }
-function observationFact(item) {
+function eventFact(item) {
+  const relation = item.relation ?? {};
+  if(item.type==='relation-verified' || item.currentlyVerified){
+    const protocol=relation.protocol ?? props.unified?.relations?.find(row=>String(row.chainId)===String(item.chainId) && String(row.pool).toLowerCase()===String(relation.pool??item.pool).toLowerCase())?.protocol;
+    return [protocol,relation.liquidityUsd!=null?tr('池流动性 '+usd(relation.liquidityUsd),'Pool liquidity '+usd(relation.liquidityUsd)):null].filter(Boolean).join(' · ');
+  }
   if (item.kind === 'pair-observed') return '';
   return item.keyword ? tr(`名称匹配“${item.keyword}”`, `Name match: “${item.keyword}”`) : '';
 }
@@ -110,15 +116,15 @@ function relativeTime(item) {
   if (!at || elapsed < 0) return '—';
   if (elapsed < 60_000) return tr('刚刚', 'just now');
   if (elapsed < 3_600_000) return tr(`${Math.floor(elapsed / 60_000)} 分钟前`, `${Math.floor(elapsed / 60_000)}m ago`);
-  return date(at);
+  return age(at);
 }
 function recent(item) { const at = eventTime(item); return at && now.value - at >= 0 && now.value - at <= 300_000; }
 function detailPath(item) {
-  return {path:`/detail/${encodeURIComponent(item.chainId)}/${encodeURIComponent(item.token)}`,query:{chain:props.scope}};
+  return {path:`/asset/${encodeURIComponent(item.chainId)}/${encodeURIComponent(item.token)}`,query:{chain:props.scope,from:'live'}};
 }
 function pairPath(item) {
-  return {path:`/pair/${encodeURIComponent(item.chainId)}/${encodeURIComponent(item.relation.stock)}`,
-    query:{chain:props.scope,pool:item.relation.pool}};
+  return {path:`/asset/${encodeURIComponent(item.chainId)}/${encodeURIComponent(item.token)}`,
+    query:{chain:props.scope,from:'live',tab:'relation',pool:item.relation.pool}};
 }
 function toggleWatch(item) {
   const next = new Set(watched.value);
@@ -147,28 +153,28 @@ onUnmounted(() => {
 .important-filter button{border-radius:4px;padding:5px 11px}.important-filter button.active{background:var(--surface-raised);color:var(--text)}
 .important-tab-switch{display:flex;gap:20px;border-bottom:1px solid var(--border)}
 .important-tab-switch button{display:flex;align-items:center;gap:7px;padding:7px 0 12px;border-bottom:2px solid transparent}
-.important-tab-switch button.active{border-color:var(--accent);color:var(--text)}.important-tab-switch b{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;font-weight:500}
+.important-tab-switch button.active{border-color:var(--accent);color:var(--text)}.important-tab-switch b{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;font-weight:500}
 .important-empty{padding:34px 12px;color:var(--muted);text-align:center;font-size:13px}
 .important-list{display:flex;flex-direction:column}
-.important-item{display:grid;grid-template-columns:112px minmax(0,1fr) auto;gap:20px;padding:17px 0;border-bottom:1px solid var(--border);min-width:0}
+.important-item{display:grid;grid-template-columns:90px minmax(0,1fr);gap:10px;padding:17px 0;border-bottom:1px solid var(--border);min-width:0}
 .important-item:last-child{border-bottom:0}
-.important-time{display:grid;grid-template-columns:7px minmax(0,1fr);align-content:start;gap:2px 9px;color:var(--muted);font-size:11px;line-height:1.5;padding-top:3px;font-variant-numeric:tabular-nums}
-.important-time small{grid-column:2;color:var(--muted);font-size:10px}.important-time-dot{width:5px;height:5px;margin-top:6px;border-radius:50%;background:var(--muted)}
+.important-time{display:grid;grid-template-columns:7px minmax(0,1fr);align-content:start;gap:2px 9px;color:var(--muted);font-size:12px;line-height:1.5;padding-top:3px;font-variant-numeric:tabular-nums}
+.important-record-count{color:var(--muted);font-size:12px}.important-time small{grid-column:2;color:var(--muted);font-size:12px}.important-time-dot{width:5px;height:5px;margin-top:6px;border-radius:50%;background:var(--muted)}
 .important-item.is-recent .important-time-dot{background:var(--accent)}
 .important-body{min-width:0}.important-asset-line{display:flex;flex-wrap:wrap;align-items:center;gap:7px 12px}
 .important-name{color:var(--text);font-size:14px;font-weight:600;text-decoration:none;overflow-wrap:anywhere}.important-name:hover{color:var(--accent)}
 .important-theme{color:var(--text);font-size:12px;font-weight:600}.important-theme>span{color:var(--muted);margin-right:5px}
-.important-status{color:var(--accent);background:var(--accent-soft);border-radius:4px;padding:2px 6px;font-size:10px}.important-status.is-unverified{color:var(--warning)}
-.important-identity{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px;color:var(--muted);font-size:11px}.important-contract{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.important-status{color:var(--accent);background:var(--accent-soft);border-radius:4px;padding:2px 6px;font-size:12px}.important-status.is-unverified{color:var(--warning)}
+.important-identity{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px;color:var(--muted);font-size:12px}.important-contract{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .important-fact{color:var(--muted);font-size:12px;line-height:1.5;margin-top:7px}
-.important-record{margin-top:6px;color:var(--muted);font-size:11px}.important-record summary,.important-explainer summary{cursor:pointer;width:fit-content}
+.important-record{margin-top:6px;color:var(--muted);font-size:12px}.important-record summary,.important-explainer summary{cursor:pointer;width:fit-content}
 .important-record dl{display:flex;flex-wrap:wrap;gap:8px 20px;padding-top:8px}.important-record dt{color:var(--muted)}.important-record dd{color:var(--text);margin:2px 0 0;font-variant-numeric:tabular-nums}
-.important-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:12px;align-content:start;padding-top:3px}
-.important-actions a,.important-actions button{color:var(--accent);font:inherit;font-size:11px;text-decoration:none;white-space:nowrap}
+.important-actions{grid-column:2;display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:12px;align-content:start;padding-top:3px}
+.important-actions a,.important-actions button{color:var(--accent);font:inherit;font-size:12px;text-decoration:none;white-space:nowrap}
 .important-actions a:nth-child(2),.important-actions button{color:var(--muted)}.important-actions button{border:0;background:none;padding:0;cursor:pointer}.important-actions button[aria-pressed=true]{color:var(--accent)}
-.important-footer{display:flex;align-items:start;justify-content:space-between;gap:24px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);color:var(--muted);font-size:11px}
+.important-footer{display:flex;align-items:start;justify-content:space-between;gap:24px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);color:var(--muted);font-size:12px}
 .important-footer>a{color:var(--accent);text-decoration:none;white-space:nowrap}.important-explainer p{max-width:640px;margin:8px 0 0;line-height:1.6}
 .important-changes :is(button,a,summary):focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 @media(max-width:1000px){.important-item{grid-template-columns:100px minmax(0,1fr);gap:4px 16px}.important-actions{grid-column:2;justify-content:flex-start;padding-top:8px}}
-@media(max-width:600px){.important-changes{padding:16px}.important-item{grid-template-columns:76px minmax(0,1fr);gap:4px 12px;padding:16px 0}.important-time{font-size:10px;gap:2px 6px}.important-heading h2{font-size:17px}.important-asset-line{gap:5px 8px}.important-record dl{flex-direction:column}.important-actions{gap:12px}.important-tab-switch{gap:16px}.important-tab-switch button{font-size:11px}}
+@media(max-width:600px){.important-changes{padding:16px}.important-item{grid-template-columns:76px minmax(0,1fr);gap:4px 12px;padding:16px 0}.important-time{font-size:12px;gap:2px 6px}.important-heading h2{font-size:17px}.important-asset-line{gap:5px 8px}.important-record dl{flex-direction:column}.important-actions{gap:12px}.important-tab-switch{gap:16px}.important-tab-switch button{font-size:12px}}
 </style>

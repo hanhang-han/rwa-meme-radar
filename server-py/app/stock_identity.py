@@ -200,6 +200,8 @@ def _match_name_cached(symbol: str, name: str) -> tuple[str, str, str, str] | No
 
 def match_name(symbol: str | None, name: str | None) -> dict | None:
     """Curated exact terms only; prefixes, substrings and BTC are excluded."""
+    if classify_derivative(symbol, name):
+        return None
     hit = _match_name_cached(str(symbol or "").strip(), str(name or ""))
     if not hit:
         return None
@@ -207,3 +209,32 @@ def match_name(symbol: str | None, name: str | None) -> dict | None:
     return {"level": "B", "ticker": ticker, "matchType": match_type,
             "keyword": term, "ruleVersion": version,
             "evidenceStatus": "name-only"}
+
+
+@lru_cache(maxsize=4096)
+def _derivative_kind(symbol: str, name: str):
+    # These describe a name, never prove leverage, reserves or a wrapper's
+    # issuer. Do not confuse a prefixed meme (e.g. xTeslaCat) with a wrapper.
+    text = f"{symbol} {name}"
+    rules = (
+        ('leverage', r'(?<![A-Za-z0-9])(?:leveraged?|[2-9](?:0)?\s*[xX](?:\s+(?:long|short|bull|bear))?|(?:long|short)\s+[2-9][xX])(?![A-Za-z0-9])|杠杆|[两三四五六七八九十]倍'),
+        ('wrapper', r'(?<![A-Za-z0-9])(?:wrapped|wrapper|bridged)(?![A-Za-z0-9])|包装代币|跨链封装'),
+        ('index', r'(?<![A-Za-z0-9])(?:index|ETF|ETN)(?![A-Za-z0-9])|指数|交易所交易基金'),
+    )
+    # Exchange-style compact leverage codes: TSLA3L / NVDA2S / GME3X.
+    compact = re.fullmatch(r'[A-Za-z][A-Za-z0-9._-]{1,20}[2-9](?:0)?(?:L|S|X)', symbol, re.I)
+    if compact:
+        return 'leverage', compact.group(0)
+    for kind, pattern in rules:
+        hit = re.search(pattern, text, re.I)
+        if hit:
+            return kind, hit.group(0)
+    return None
+
+
+def classify_derivative(symbol: str | None, name: str | None) -> dict | None:
+    hit = _derivative_kind(str(symbol or '').strip(), str(name or '').strip())
+    if not hit:
+        return None
+    return {'category': 'derivative', 'kind': hit[0], 'keyword': hit[1],
+            'evidenceStatus': 'name-only', 'ruleVersion': 'derivative-name-v1'}
