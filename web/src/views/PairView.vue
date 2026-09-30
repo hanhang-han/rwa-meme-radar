@@ -3,10 +3,10 @@
     <section v-if="!stock" class="panel">
       <h2>{{ tr('股票配对池', 'Stock pair pools') }}</h2>
       <form id="v2Search" @submit.prevent="goSearch">
-        <input v-model="q" :placeholder="tr('输入股票或 CA', 'Enter ticker or CA')" required>
+        <input v-model="q" :placeholder="tr('搜索股票或合约地址', 'Search ticker or contract address')" required>
         <button>{{ tr('搜索', 'Search') }}</button>
       </form>
-      <p v-if="!relationsReady" role="status" :class="verifiedRelations.length ? 'hint' : 'x-empty'">{{ store.error ? tr('完整配对列表读取失败，已显示可用数据。', 'The full pair list failed to load; available data remains visible.') : tr('完整配对列表正在同步，已显示可用数据。', 'The full pair list is syncing; available data is shown.') }} <button v-if="store.error" type="button" @click="store.poll()">{{ tr('重试', 'Retry') }}</button></p>
+      <p v-if="!relationsReady" role="status" :class="verifiedRelations.length ? 'hint' : 'x-empty'">{{ store.error ? tr('部分配对加载失败。', 'Some pairs could not be loaded.') : tr('正在加载更多配对…', 'Loading more pairs…') }} <button v-if="store.error" type="button" @click="store.poll()">{{ tr('重试', 'Retry') }}</button></p>
       <div v-if="verifiedRelations.length">
         <div v-for="r in verifiedRelations.slice(0, 30)" :key="r.id" class="x-signal">
           <RouterLink class="v2-pair-row-link" :to="pairLink(r)"><span>{{ r.ticker }} · {{ chainName(r) }} · {{ short(r.token) }}</span><span>{{ usd(r.liquidityUsd) }}</span></RouterLink>
@@ -18,11 +18,11 @@
     <section v-else class="panel">
       <h2>{{ tr('池子', 'Pools') }}</h2>
       <form id="v2Search" @submit.prevent="goSearch">
-        <input v-model="q" :placeholder="tr('输入股票或 CA', 'Enter ticker or CA')" required>
+        <input v-model="q" :placeholder="tr('搜索股票或合约地址', 'Search ticker or contract address')" required>
         <button>{{ tr('搜索', 'Search') }}</button>
       </form>
-      <p v-if="!relationsReady" role="status" class="x-empty">{{ store.error ? tr('配对数据读取失败，请重试。', 'Failed to load pairs. Please retry.') : tr('正在读取配对证据…', 'Loading pair evidence…') }} <button v-if="store.error" type="button" @click="store.poll()">{{ tr('重试', 'Retry') }}</button></p>
-      <p v-if="stockError" role="alert">{{ tr('资产详情暂时无法读取，配对证据仍可查看。', 'Asset details unavailable; pair evidence remains available.') }} <button @click="loadStock">{{ tr('重试', 'Retry') }}</button></p>
+      <p v-if="!relationsReady" role="status" class="x-empty">{{ store.error ? tr('配对数据读取失败，请重试。', 'Failed to load pairs. Please retry.') : tr('正在加载配对…', 'Loading pairs…') }} <button v-if="store.error" type="button" @click="store.poll()">{{ tr('重试', 'Retry') }}</button></p>
+      <p v-if="stockError" role="alert">{{ tr('资产详情加载失败，仍可查看配对信息。', 'Asset details unavailable. Pair information is still available.') }} <button @click="loadStock">{{ tr('重试', 'Retry') }}</button></p>
       <p v-if="memeError" role="alert">{{ tr('流动性池分布读取失败，请重试。', 'Pool distribution unavailable. Please retry.') }} <button @click="loadMeme">{{ tr('重试', 'Retry') }}</button></p>
       <p v-if="stockLoading" role="status">{{ tr('正在读取资产详情…', 'Loading asset details…') }}</p>
       <div v-if="stockDetail" class="kpis">
@@ -49,8 +49,8 @@
           <section v-if="selected" class="panel v3-evidence-panel">
             <div class="panel-head">
               <div>
-                <h2>{{ tr('关系证据路径', 'Relationship evidence path') }}</h2>
-                <p class="hint">{{ tr('这条路径只说明链上配对关系已经核验，不代表公司授权、价格因果或资金流向。', 'This path confirms an on-chain pair relationship only; it does not imply company authorization, price causality or fund flow.') }}</p>
+                <h2>{{ tr('配对关系', 'Pairing') }}</h2>
+                <p class="hint">{{ tr('链上配对已核验，不代表公司授权、价格因果或资金流向。', 'Verified on-chain pairing does not imply company authorization, price causality or fund flow.') }}</p>
               </div>
               <span class="v3-state" :class="selected.level === 'A' ? 'is-fresh' : 'is-historical'">{{ selected.level === 'A' ? tr('池配对', 'Paired') : tr('身份待核验', 'Identity unverified') }}</span>
             </div>
@@ -87,13 +87,13 @@
           </section>
           <section v-if="selected" class="panel">
             <div class="panel-head">
-              <h2>{{ tr('核心事实', 'Key facts') }}</h2>
+              <h2>{{ tr('池信息', 'Pool information') }}</h2>
             </div>
             <div class="x-coverage">
               <span>{{ tr('池流动性', 'Pool liquidity') }} {{ usd(selected.liquidityUsd) }}</span>
               <span>{{ selected.protocol }}</span>
-              <span>{{ tr('流动性采样时间', 'Liquidity sampled at') }} {{ date(selected.liquidityAt) }}</span>
-              <span v-if="!selected.liquidityAt || now - selected.liquidityAt > 900000">{{ tr('历史快照，非实时流动性', 'Historical snapshot, not live liquidity') }}</span>
+              <span>{{ tr('流动性更新', 'Liquidity updated') }} {{ date(selected.liquidityAt) }}</span>
+              <span v-if="!selected.liquidityAt || now - selected.liquidityAt > 900000">{{ tr('历史流动性', 'Historical liquidity') }}</span>
               <span v-if="selected.feePct != null">{{ selected.feePct }}%</span>
             </div>
           </section>
@@ -102,7 +102,7 @@
               <h2>{{ tr('关联资产行情', 'Related asset market') }}</h2>
               <QuoteStatus :row="memeAsset" />
             </div>
-            <p class="hint">{{ tr('图表为该代币的同市场聚合行情；池地址用于关系与流动性证据。', 'The chart is the token’s same-venue aggregate market; the pool address is used for relationship and liquidity evidence.') }}</p>
+            <p class="hint">{{ tr('图表显示代币的市场聚合行情，可能与单个配对池价格不同。', 'The chart shows aggregate token quotes, which may differ from an individual pool.') }}</p>
             <CandleChart :asset="memeAsset" :samples="memeDetail?.samples ?? []" :pool="selected.pool" />
           </section>
           <section v-if="memeDetail && (memeDetail.pools ?? []).length" class="panel">
@@ -118,7 +118,7 @@
           </section>
           <article v-if="selected" class="x-proof v3-raw-proof">
             <div class="panel-head">
-              <h3>{{ tr('原始核验信息', 'Raw verification details') }}</h3>
+              <h3>{{ tr('链上核验', 'On-chain verification') }}</h3>
               <RegistryBadge :relation="selected" />
             </div>
             <p>{{ chainName(selected) }} · {{ selected.protocol }} · {{ tr('核验区块', 'Verified block') }} {{ num(selected.block) }} · {{ date(selected.checkedAt) }}</p>
@@ -136,7 +136,7 @@
       </div>
       <div v-else-if="relationsReady" class="x-empty">
         {{ tr('当前资产尚无已核验配对，已有行情仍可查看。', 'This asset has no verified pairs yet. Available market history is shown above.') }}
-        <RouterLink to="/stock">{{ tr('返回股票雷达', 'Back to Stock Radar') }}</RouterLink>
+        <RouterLink to="/stock">{{ tr('返回股票', 'Back to stocks') }}</RouterLink>
       </div>
     </section>
   </div>

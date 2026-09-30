@@ -2,16 +2,16 @@
   <div>
     <div class="hero x-hero">
       <div class="v2-hero-copy">
-        <h2>{{ tr('探索股票主题与链上资产', 'Explore stock themes and onchain assets') }}</h2>
-        <p>{{ tr('已核验配对与未核验名称线索分层展示，行情和证据均可追溯。', 'Verified pairs and unverified name clues are shown separately, with traceable market data and evidence.') }}</p>
+        <h2>{{ tr('市场概览', 'Market overview') }}</h2>
+        <p>{{ tr('股票主题、关联 Meme 与链上成交', 'Stock themes, related memes and onchain trades') }}</p>
       </div>
     </div>
 
     <div class="kpis">
-      <KpiCard kpi-key="actionableAssets" :title="tr('数据达标的活跃 Meme', 'Qualified active memes')" :value="num(scopeMetrics.active)" :note="activeNote" href="#/meme" />
-      <KpiCard kpi-key="verifiedPools" :title="tr('股票配对池', 'Stock pairs')" :value="num(scopeMetrics.pools)" :note="deltaNote('pools') || tr('当前合格池，按链和池地址去重', 'Current qualifying pools, deduplicated by chain and pool')" href="#/pair" />
-      <KpiCard kpi-key="pairedLiquidityUsd" :title="tr('配对池总流动性', 'Pair liquidity')" :value="usd(scopeMetrics.liquidity)" :note="deltaNote('liquidity') || tr('仅配对池，不等于 Meme 总流动性', 'Pair pools only, not total meme liquidity')" href="#/pair" />
-      <KpiCard kpi-key="newRelations24h" :title="tr('24h 新增配对', 'New pairs (24h)')" :value="num(scopeMetrics.newPairs)" :note="scopeMetrics.newPairs == null ? tr('新池创建时间待采集','Pool creation time pending') : deltaNote('newPairs')" href="#/events" />
+      <KpiCard kpi-key="actionableAssets" :title="tr('活跃 Meme', 'Active memes')" :value="num(scopeMetrics.active)" :note="activeNote" href="#/meme" />
+      <KpiCard kpi-key="verifiedPools" :title="tr('股票配对池', 'Stock pairs')" :value="num(scopeMetrics.pools)" :note="deltaNote('pools') || tr('已核验配对池', 'Verified pair pools')" href="#/pair" />
+      <KpiCard kpi-key="pairedLiquidityUsd" :title="tr('配对池总流动性', 'Pair liquidity')" :value="usd(scopeMetrics.liquidity)" :note="deltaNote('liquidity') || tr('仅统计股票配对池', 'Stock pair pools only')" href="#/pair" />
+      <KpiCard kpi-key="newRelations24h" :title="tr('24h 新增配对', 'New pairs (24h)')" :value="num(scopeMetrics.newPairs)" :note="scopeMetrics.newPairs == null ? tr('创建时间未知','Creation time unknown') : deltaNote('newPairs')" href="#/events" />
     </div>
 
     <ThemeMarketMap :theme-map="themeMap" :name-clues="nameClues" :name-clues-loading="!fullSnapshotReady" :stock-tokens="store.stockTokens" :scope="scope" :loading="!themeMapReady" />
@@ -29,7 +29,7 @@
       <div v-else-if="briefing?.items?.length" class="v2-ai-text">{{ tr('当前范围暂无符合条件的异动。', 'No qualifying changes in this scope.') }}</div>
       <div v-else-if="briefing?.text && scope === 'all'" class="v2-ai-text">{{ briefing.text }}</div>
       <div v-else class="v2-ai-text" role="status">{{ briefingMessage }}</div>
-      <p v-if="briefing && (briefing.stale || briefingError)" class="hint">{{ tr('当前展示上一份简报，后台更新后自动替换。', 'Showing the last report; it will be replaced after the next successful update.') }}</p>
+      <p v-if="briefing && (briefing.stale || briefingError)" class="hint">{{ tr('上次简报 · 更新暂不可用', 'Previous briefing · update unavailable') }}</p>
     </section>
 
     <section class="panel">
@@ -68,8 +68,8 @@
         </div>
       </section>
       <section class="panel">
-        <div class="panel-head"><h2>{{ tr('关系收录记录', 'Relationship discoveries') }}</h2><RouterLink to="/events">{{ tr('全部', 'All') }} →</RouterLink></div>
-        <p class="hint">{{ tr('按本站首次收录时间展示；旧记录仍可查看，不代表池刚创建。', 'Ordered by first indexing; older records remain visible and do not imply a newly created pool.') }}</p>
+        <div class="panel-head"><h2>{{ tr('新收录关联', 'Recent discoveries') }}</h2><RouterLink to="/events">{{ tr('全部', 'All') }} →</RouterLink></div>
+        <p class="hint">{{ tr('按首次收录时间排列', 'Ordered by first indexing time') }}</p>
         <div v-if="discoveries.length">
           <RouterLink v-for="row in discoveries" :key="row.id" class="home-new-row" :to="{path:'/detail/' + row.chainId + '/' + row.token,query:{chain:scope}}">
             <strong>{{ row.name }}</strong><small>{{ row.label }} · {{ chainName(row) }}</small><time :title="date(row.at)">{{ row.timeKind === 'created' ? tr('创建于','Created') : tr('收录于','Indexed') }} {{ age(row.at) }}</time>
@@ -90,12 +90,12 @@
     </section>
 
     <section v-if="scope === 'all'" class="panel">
-      <h2>{{ tr('各链对照', 'By chain') }}</h2>
+      <h2>{{ tr('链上分布', 'Chain distribution') }}</h2>
       <RouterLink v-for="d in distribution" :key="d.chainId" class="v2-distribution" :to="{ path: '/meme', query: { chain: d.chainId } }">
         <strong>{{ d.name }}</strong>
-        <span>{{ num(d.assets) }} {{ tr('个 Meme', 'memes') }}</span>
-        <span>{{ tr('24h 成交', '24h volume') }} {{ usd(d.volume?.value) }}<small> · {{ tr('有新鲜值', 'Fresh values') }} {{ num(d.volume?.known) }}/{{ num(d.volume?.total) }}</small></span>
-        <span>{{ tr('池流动性', 'Pool liquidity') }} {{ usd(d.liquidity?.value) }}<small> · {{ tr('有值池', 'Known pools') }} {{ num(d.liquidity?.known) }}/{{ num(d.liquidity?.total) }}</small></span>
+        <span>{{ num(d.assets) }} {{ tr('个 Meme', 'memes') }}<span class="chain-share" aria-hidden="true"><i :style="{width: distributionMax ? (Number(d.assets || 0) / distributionMax * 100) + '%' : '0%'}"></i></span></span>
+        <span>{{ tr('24h 成交', '24h volume') }} {{ usd(d.volume?.value) }}<small> · {{ tr('近期数据', 'Current data') }} {{ num(d.volume?.known) }}/{{ num(d.volume?.total) }}</small></span>
+        <span>{{ tr('池流动性', 'Pool liquidity') }} {{ usd(d.liquidity?.value) }}<small> · {{ tr('数据覆盖', 'Coverage') }} {{ num(d.liquidity?.known) }}/{{ num(d.liquidity?.total) }}</small></span>
       </RouterLink>
     </section>
 
@@ -141,14 +141,15 @@ const importantChanges = computed(() => {
 });
 const scopeMetrics = computed(() => metricsForScope(store.snapshot?.unified, scope.value));
 const activeNote = computed(() => scopeMetrics.value.active === 0
-  ? tr('0 表示暂无同时满足新鲜价格与总流动性门槛的币，不代表没有成交', 'Zero means no token meets both fresh-price and total-liquidity rules; trades may still exist')
-  : deltaNote('active') || tr('需有新鲜报价与资产总流动性', 'Requires a fresh quote and asset-wide liquidity'));
+  ? tr('暂无同时满足报价与流动性条件的资产', 'No assets meet both quote and liquidity criteria')
+  : deltaNote('active') || tr('报价与总流动性达标', 'Meets quote and total liquidity criteria'));
 const hotStocks = computed(() => topStockCards(store.stockTokens, store.relations, store.assets, scope.value));
 const minTrade = ref(100);
 const direction = ref('all');
 const displayedTrades = computed(() => filteredTrades(feed.trades, scope.value, minTrade.value, direction.value));
 const feedScroll = ref(null);
 const distribution = computed(() => store.snapshot?.unified?.distribution ?? []);
+const distributionMax = computed(() => Math.max(0, ...distribution.value.map(row => Number(row.assets) || 0)));
 const eligibleRelations = computed(() => store.relations.filter(r => r.level === 'A'));
 const related = computed(() => store.assets.filter(a => a.kind === 'candidate' && inChainScope(a,scope.value) && eligibleRelations.value.some(r => relationMatchesAsset(r,a)))
   .sort((a,b) => Number(assetVolumeState(b)==='current')-Number(assetVolumeState(a)==='current') || Number(b.volume24h ?? -1) - Number(a.volume24h ?? -1)).slice(0,10));
@@ -174,9 +175,9 @@ const briefingItems = computed(() => (briefing.value?.items ?? []).filter(item =
 const briefingMessage = computed(() => {
   if (briefingLoading.value) return tr('正在读取简报…', 'Loading briefing…');
   if (briefingError.value) return tr('简报读取失败，稍后自动重试。', 'Could not load the briefing. Retrying shortly.');
-  if (briefingStatus.value === 'disabled') return tr('自动简报暂未启用。', 'Automatic briefings are not enabled.');
-  if (briefingStatus.value === 'upstream_failed') return tr('本轮生成失败，等待后台重试。', 'Generation failed; waiting for a background retry.');
-  return tr('暂无简报，等待后台定时生成。', 'No briefing yet; waiting for the scheduled run.');
+  if (briefingStatus.value === 'disabled') return tr('简报暂不可用。', 'Briefing unavailable.');
+  if (briefingStatus.value === 'upstream_failed') return tr('简报暂不可用。', 'Briefing unavailable.');
+  return tr('暂无简报。', 'No briefing yet.');
 });
 function briefingMessageFor(item) {
   const f = item.fields ?? {};
@@ -184,10 +185,10 @@ function briefingMessageFor(item) {
     ? tr('总流动性待核验', 'total liquidity unverified')
     : tr('总流动性 ' + usd(f.totalLiquidityUsd), 'total liquidity ' + usd(f.totalLiquidityUsd));
   if (item.type === 'wash_suspect') {
-    if (f.volumeLiquidityRatio != null) return tr('24h 成交是已观测流动性的 ' + Math.round(f.volumeLiquidityRatio) + ' 倍，建议核查成交结构',
-      '24h volume is ' + Math.round(f.volumeLiquidityRatio) + 'x observed liquidity; review trade activity');
-    if (f.transactionsPerHolder != null) return tr('成交笔数与持币地址数之比 ' + Math.round(f.transactionsPerHolder) + '，建议核查成交结构',
-      'Trades-to-holder-address ratio ' + Math.round(f.transactionsPerHolder) + '; review trade activity');
+    if (f.volumeLiquidityRatio != null) return tr('24h 成交 / 已观测流动性：' + Math.round(f.volumeLiquidityRatio) + ' 倍',
+      '24h volume / observed liquidity: ' + Math.round(f.volumeLiquidityRatio) + 'x');
+    if (f.transactionsPerHolder != null) return tr('成交笔数 / 持币地址数：' + Math.round(f.transactionsPerHolder),
+      'Trades / holder addresses: ' + Math.round(f.transactionsPerHolder));
   }
   if (item.type === 'thin_spike') return tr('24h 涨幅 ' + pct(f.change24hPercent) + ' · ' + observedLiquidity,
     '24h change ' + pct(f.change24hPercent) + ' · ' + observedLiquidity);
@@ -262,3 +263,9 @@ onUnmounted(() => { window.removeEventListener('resource-change',onResourceChang
 watch(() => lang.lang, () => { briefing.value = briefingCache.get(lang.lang) ?? null; briefingError.value = false; loadBriefing(); });
 watch(scope,loadFeed);
 </script>
+
+<style scoped>
+.radar-workspace .x-hero { padding: 10px 0 18px; }
+.chain-share { display:block;height:4px;margin-top:9px;background:var(--surface-raised);border-radius:2px;overflow:hidden; }
+.chain-share i { display:block;height:100%;background:var(--accent);opacity:.7; }
+</style>

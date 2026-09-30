@@ -13,7 +13,7 @@
         <a :href="explorer(asset.token, 'address', chain(asset))" target="_blank" rel="noopener">{{ tr('区块浏览器', 'Block explorer') }} ↗</a>
         <a :href="okxUrl" target="_blank" rel="noopener">{{ tr('在 OKX 查看资产', 'View asset on OKX') }} ↗</a>
       </div>
-      <p>{{ tr('行情来源', 'Quote source') }} {{ asset.provider ?? 'OKX' }} · {{ age(asset.quoteAt ?? asset.fieldTimes?.price ?? asset.updatedAt) }}{{ asset.error ? ' · ' + tr('部分采集失败，历史保留', 'Partial collection failure; history retained') : '' }}</p>
+      <p>{{ tr('行情来源', 'Quote source') }} {{ asset.provider ?? 'OKX' }} · {{ age(asset.quoteAt ?? asset.fieldTimes?.price ?? asset.updatedAt) }}{{ asset.error ? ' · ' + tr('部分数据更新失败', 'Some data failed to update') : '' }}</p>
     </section>
 
     <SpreadPanel v-if="asset.kind === 'stock'" :chain="String(asset.chainId)" :token="asset.token" />
@@ -38,24 +38,24 @@
           <RegistryBadge v-if="r.pool" :relation="r" />
         </article>
       </div>
-      <div v-else class="x-empty">{{ tr('尚未完成配对池核验。', 'Pair-pool verification is not complete yet.') }}</div>
+      <div v-else class="x-empty">{{ tr('暂无已核验配对。', 'No verified pairs yet.') }}</div>
     </section>
 
     <div class="kpis">
       <div v-if="selectedPoolId" class="kpi" data-kpi-key="pool-price">
         <span class="kpi-label">{{ tr('所选池最近成交价', 'Selected pool last trade price') }}</span>
         <strong class="kpi-value mono"><LiveNumber :value="selectedPoolQuote?.price" :currency="marketSelection.pool.priceCurrency" :format="marketSelection.pool.priceCurrency === 'USD' ? 'price' : 'money'" /></strong>
-        <span class="kpi-note">{{ short(selectedPoolId) }} · {{ marketSelection.pool.priceCurrency ?? tr('币种未知', 'Currency unknown') }} · {{ selectedPoolQuote ? `${selectedPoolQuote.source} · ${date(selectedPoolQuote.at)} · ${poolQuoteAge}` : tr('等待该池真实成交', 'Waiting for a real trade in this pool') }}</span>
+        <span class="kpi-note">{{ short(selectedPoolId) }} · {{ marketSelection.pool.priceCurrency ?? tr('币种未知', 'Currency unknown') }} · {{ selectedPoolQuote ? `${selectedPoolQuote.source} · ${date(selectedPoolQuote.at)} · ${poolQuoteAge}` : tr('暂无该池成交报价', 'No trade quote for this pool yet') }}</span>
       </div>
       <div class="kpi" data-kpi-key="price">
-        <span class="kpi-label">{{ selectedPoolId ? tr('资产整体最新价格', 'Asset-wide latest price') : tr('最新价格', 'Latest price') }}</span>
+        <span class="kpi-label">{{ selectedPoolId ? tr('资产市场价', 'Asset market price') : tr('最新价格', 'Latest price') }}</span>
         <strong class="kpi-value mono" :class="{ 'kpi-flash': priceFlash }"><LiveNumber :value="asset.price" :currency="asset.priceCurrency" format="price" /></strong>
         <span class="kpi-note">{{ asset.fieldSources?.price ?? asset.provider ?? asset.venue ?? tr('来源待核实', 'Source unverified') }} · {{ pct(asset.change24h) }} · 24h</span><QuoteStatus :row="asset" />
       </div>
       <div class="kpi"><span class="kpi-label">{{ tr('24h 成交额', '24h volume') }}</span><strong class="kpi-value mono"><LiveNumber :value="asset.volume24h" :currency="asset.volumeCurrency ?? asset.priceCurrency" /></strong><span class="kpi-note">{{ volumeScopeLabel }}</span></div>
       <div class="kpi"><span class="kpi-label">{{ tr('24h 交易', '24h trades') }}</span><strong class="kpi-value mono">{{ num(asset.priceScope === 'exchange' ? asset.exchangeTrades24h : asset.txs24h) }}</strong><span class="kpi-note">{{ asset.priceScope === 'exchange' ? tr('交易所成交总数；未提供买卖方向', 'Exchange trades; buy/sell split unavailable') : `${num(asset.buys24h)} / ${num(asset.sells24h)}` }}</span></div>
       <div class="kpi"><span class="kpi-label">{{ tr('持币地址数', 'Holder addresses') }}</span><strong class="kpi-value mono"><LiveNumber :value="asset.holders" format="number" /></strong><span class="kpi-note">{{ age(asset.fieldTimes?.holders) }}</span></div>
-      <div class="kpi"><span class="kpi-label">{{ tr('总流动性','Total liquidity') }}</span><strong class="kpi-value mono"><LiveNumber :value="asset.totalLiquidityUsd" /></strong><span class="kpi-note">{{ asset.totalLiquidityUsd == null ? tr('总量待核实','Total pending verification') : age(asset.fieldTimes?.totalLiquidityUsd ?? asset.totalLiquidityAt) }}</span></div>
+      <div class="kpi"><span class="kpi-label">{{ tr('总流动性','Total liquidity') }}</span><strong class="kpi-value mono"><LiveNumber :value="asset.totalLiquidityUsd" /></strong><span class="kpi-note">{{ asset.totalLiquidityUsd == null ? tr('暂无总流动性','Total liquidity unavailable') : age(asset.fieldTimes?.totalLiquidityUsd ?? asset.totalLiquidityAt) }}</span></div>
     </div>
 
     <div class="x-grid">
@@ -74,10 +74,10 @@
       </section>
       <section class="panel">
         <div class="panel-head">
-          <h2>{{ tr('最新市场成交', 'Recent market trades') }}</h2>
+          <h2>{{ tr('最新成交', 'Latest trades') }}</h2>
           <span class="hint">{{ marketFreshnessLabel }}</span>
         </div>
-        <p class="hint">{{ selectedPoolId ? tr('仅展示所选池的已采集逐笔成交；其它池交易不代表这张 K 线变化。时间为实际成交时间。', 'Only collected trades from the selected pool are shown; trades in other pools do not move this chart. Times are trade times.') : tr('仅展示已接入市场的逐笔记录；新成交到达时自动插入，不代表全部市场成交。时间为实际成交时间。', 'Per-trade records from connected markets only; new trades appear automatically. This is not all market activity. Times are trade times.') }}</p>
+        <p class="hint">{{ selectedPoolId ? tr('所选池的已收录成交，时间为实际成交时间。', 'Recorded trades from the selected pool, shown at their trade time.') : tr('已接入市场的成交记录，可能不含全部交易。时间为实际成交时间。', 'Trades from connected markets; coverage may be incomplete. Times are trade times.') }}</p>
         <div v-if="marketTrades.length" class="scroll" data-market-trades>
           <table class="tbl">
             <thead><tr><th>{{ tr('时间', 'Time') }}</th><th>{{ tr('来源 / 市场', 'Source / market') }}</th><th>{{ tr('方向', 'Side') }}</th><th>{{ tr('成交价', 'Price') }}</th><th>{{ tr('成交额', 'Quote amount') }}</th></tr></thead>
@@ -98,13 +98,13 @@
 
     <section class="panel">
       <div class="panel-head">
-        <h2>{{ tr('链上成交采集记录', 'Collected on-chain trades') }}</h2>
-        <span class="hint">{{ tr('按后台采集和历史回补进度更新', 'Updated as collection and historical backfill progress') }}</span>
+        <h2>{{ tr('链上成交记录', 'On-chain trades') }}</h2>
+        <span class="hint">{{ tr('已收录交易 · 含历史记录', 'Recorded trades · includes history') }}</span>
       </div>
       <p class="hint">{{ statText }}</p>
       <div v-if="bucketSummary.length" class="v3-bucket-strip">
         <div v-for="bucket in bucketSummary" :key="bucket.bar">
-          <span>{{ bucket.bar }} {{ tr('真实成交桶', 'observed bucket') }}</span>
+          <span>{{ bucket.bar }} {{ tr('成交汇总', 'trade summary') }}</span>
           <strong>{{ usd(bucket.volumeUsd) }}</strong>
           <small>{{ num(bucket.tradeCount) }} {{ tr('笔', 'trades') }} · {{ bucket.complete ? tr('覆盖完整', 'complete') : `${coveragePct(bucket.coverageRatio)} ${tr('覆盖', 'covered')}` }} · {{ age(bucket.closeTime) }}</small>
         </div>
@@ -123,7 +123,7 @@
           </tbody>
         </table>
       </div>
-      <div v-else class="x-empty">{{ tr('当前保存范围内暂无成交记录。', 'No trades in the saved coverage.') }}</div>
+      <div v-else class="x-empty">{{ tr('暂无已收录的成交记录。', 'No recorded trades yet.') }}</div>
     </section>
 
     <section class="panel">
@@ -133,12 +133,12 @@
         <progress max="100" :value="Math.max(0, Math.min(100, asset.risk.top10))"></progress>
         <p>{{ date(asset.risk.checkedAt) }} · {{ asset.risk.provider ?? asset.fieldSources?.holderTop10 ?? tr('来源待核实', 'Source unverified') }}</p>
       </template>
-      <div v-else class="x-empty">{{ tr('上游尚未提供集中度数据。', 'Holder concentration is not available from the source yet.') }}</div>
+      <div v-else class="x-empty">{{ tr('暂无持仓集中度数据。', 'Holder concentration data unavailable.') }}</div>
     </section>
 
     <section class="panel x-ai">
-      <h2>{{ tr('数据解读', 'Data readout') }}</h2>
-      <p class="hint">{{ tr('由 DeepSeek 基于本站已采集字段生成，只解读已有数据，不预测价格。', 'Generated by DeepSeek from collected fields only; no price forecasts.') }}</p>
+      <h2>{{ tr('行情摘要', 'Market summary') }}</h2>
+      <p class="hint">{{ tr('DeepSeek 生成 · 基于已收录数据，无价格预测。', 'Generated by DeepSeek from recorded data · no price forecasts.') }}</p>
       <div class="v2-ai-text">{{ insight ?? insightPlaceholder }}</div>
     </section>
 
@@ -151,12 +151,12 @@
       <section class="panel">
         <h2>{{ tr('关系时间线', 'Relationship timeline') }}</h2>
         <EventRow v-for="ev in events" :key="ev.id" :ev="ev" />
-        <p v-if="!events.length">{{ tr('等待首条关系核验事件。', 'Waiting for the first relationship-verification event.') }}</p>
+        <p v-if="!events.length">{{ tr('暂无核验记录。', 'No verification records yet.') }}</p>
       </section>
     </div>
   </div>
   <section v-else-if="error" class="panel x-empty">{{ error }}</section>
-  <section v-else class="panel x-empty">{{ tr('正在读取已保存的数据…', 'Loading saved data…') }}</section>
+  <section v-else class="panel x-empty">{{ tr('正在加载资产详情…', 'Loading asset details…') }}</section>
 </template>
 
 <script setup>
@@ -294,13 +294,13 @@ const verdictTitle = computed(() =>
 );
 const statText = computed(() =>
   asset.value.tradeAt
-    ? tr('此处仅展示链上交易池成交；可能存在分页缺口，不包含交易所成交。', 'Only on-chain pool trades are shown here; pagination gaps may exist. Exchange trades are not included.')
-    : tr('成交采集排队中，缺失不表示零成交。', 'Trade collection is queued; missing data does not mean zero trades.'),
+    ? tr('链上池成交记录，可能不完整；不含中心化交易所成交。', 'On-chain pool trades; coverage may be incomplete. Centralized exchange trades are excluded.')
+    : tr('暂无成交数据，不代表没有交易。', 'Trade data unavailable; this does not mean there were no trades.'),
 );
 const insightPlaceholder = computed(() => {
-  if (insightStatus.value === 'disabled') return tr('AI 解读暂未启用。', 'AI readouts are not enabled.');
-  if (insightStatus.value === 'upstream_failed') return tr('解读生成失败，后台稍后会重试。', 'Readout generation failed; the worker will retry.');
-  return tr('解读已排队，生成后会自动显示。', 'Readout queued and will appear automatically.');
+  if (insightStatus.value === 'disabled') return tr('行情摘要暂未启用。', 'Market summaries are not enabled.');
+  if (insightStatus.value === 'upstream_failed') return tr('摘要暂时无法更新。', 'The summary could not be updated.');
+  return tr('摘要准备中…', 'Preparing summary…');
 });
 const volumeScopeLabel = computed(() => {
   if (asset.value.volumeScope === 'exchange' || asset.value.priceScope === 'exchange') {
@@ -377,7 +377,7 @@ async function load(force = false) {
   } catch (e) {
     if (disposed || request !== loadRequest || !isCurrentAsset(chainId, address)) return;
     unwatchCurrent();
-    error.value = tr('该资产尚未进入可用索引，或暂时读取失败。', 'This asset is not yet indexed or could not be loaded.');
+    error.value = tr('资产未收录或暂时无法加载。', 'Asset not listed or temporarily unavailable.');
   }
 }
 

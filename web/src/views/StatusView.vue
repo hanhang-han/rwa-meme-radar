@@ -6,16 +6,16 @@
     </div>
     <p v-if="error" role="alert" class="panel">{{ tr('状态读取失败。', 'Could not load status.') }} <button @click="load">{{ tr('重试', 'Retry') }}</button></p>
     <div class="status-summary">
-      <div class="panel"><span>{{ tr('整体数据状态', 'Overall data status') }}</span><strong :class="healthTone">{{ overallLabel }}</strong><small>{{ tr('分别检查进程、任务和数据覆盖', 'Processes, jobs and coverage are checked separately') }}</small></div>
-      <div class="panel"><span>{{ tr('采集进程', 'Collection process') }}</span><strong :class="processTone(health?.collector)">{{ processLabel(health?.collector) }}</strong><small v-if="health" :class="collectorDegraded ? 'down' : ''">{{ collectorDegraded ? tr('有采集任务异常', 'A collection job needs attention') : tr('采集任务无异常报告', 'No collection job failure reported') }}</small><small>{{ tr('上次资产更新', 'Last asset update') }} {{ age(health?.latestAssetAt) }}</small></div>
-      <div class="panel"><span>{{ tr('统计进程', 'Projection process') }}</span><strong :class="processTone(health?.projection)">{{ processLabel(health?.projection) }}</strong><small v-if="health" :class="projectionDegraded ? 'down' : ''">{{ projectionDegraded ? tr('有统计任务异常', 'A projection job needs attention') : tr('统计任务无异常报告', 'No projection job failure reported') }}</small></div>
+      <div class="panel"><span>{{ tr('整体数据状态', 'Overall data status') }}</span><strong :class="healthTone">{{ overallLabel }}</strong><small>{{ tr('服务运行与数据覆盖', 'Service health and data coverage') }}</small></div>
+      <div class="panel"><span>{{ tr('行情采集', 'Data collection') }}</span><strong :class="processTone(health?.collector)">{{ processLabel(health?.collector) }}</strong><small v-if="health" :class="collectorDegraded ? 'down' : ''">{{ collectorDegraded ? tr('部分采集异常', 'Collection errors reported') : tr('未报告采集异常', 'No collection errors reported') }}</small><small>{{ tr('上次资产更新', 'Last asset update') }} {{ age(health?.latestAssetAt) }}</small></div>
+      <div class="panel"><span>{{ tr('数据统计', 'Data processing') }}</span><strong :class="processTone(health?.projection)">{{ processLabel(health?.projection) }}</strong><small v-if="health" :class="projectionDegraded ? 'down' : ''">{{ projectionDegraded ? tr('部分统计异常', 'Processing errors reported') : tr('未报告统计异常', 'No processing errors reported') }}</small></div>
       <div class="panel"><span>{{ tr('磁盘剩余', 'Disk free') }}</span><strong :class="diskTone">{{ health?.disk?.freePercent == null ? '—' : `${health.disk.freePercent}%` }}</strong><small>{{ bytes(health?.disk?.freeBytes) }} {{ tr('可用', 'available') }}</small><small>{{ diskTrend }}</small></div>
     </div>
 
     <section v-if="health?.issues?.length || health?.warnings?.length" class="panel status-alerts">
       <h3>{{ tr('需要关注', 'Needs attention') }}</h3>
       <p v-if="health?.issues?.length" class="down">{{ tr('故障或数据未达标', 'Failures or data below target') }}：{{ health.issues.map(issueLabel).join(' · ') }}</p>
-      <p v-if="health?.warnings?.length" class="warn">{{ tr('能力限制', 'Capability limits') }}：{{ health.warnings.map(issueLabel).join(' · ') }}</p>
+      <p v-if="health?.warnings?.length" class="warn">{{ tr('数据限制', 'Data limitations') }}：{{ health.warnings.map(issueLabel).join(' · ') }}</p>
     </section>
 
     <section class="panel">
@@ -26,7 +26,7 @@
       <p v-if="!visibleSources.length" class="x-empty">{{ tr('尚无来源状态', 'Source status unavailable') }}</p>
       <p v-if="okxSource?.budget" class="hint">OKX {{ tr('当日额度', 'daily budget') }}：{{ num(okxSource.budget.daily) }} / {{ num(okxSource.budget.dailyLimit) }}；{{ tr('剩余', 'Remaining') }} {{ num(okxSource.budget.remaining) }}</p>
       <p v-if="okxSource?.budget?.lanes?.length" class="hint">{{ okxSource.budget.lanes.map(lane => `${lane.name} ${num(lane.used)}/${num(lane.limit)}`).join(' · ') }}</p>
-      <p class="hint">{{ tr('这里的更新时间是来源级状态时间。每个价格、成交额和流动性字段仍须分别核对其观测时间与来源。', 'These are source-level status times. Price, volume and liquidity each need their own observation time and source.') }}</p>
+      <p class="hint">{{ tr('上表为数据源检查时间；各项行情的更新时间见对应数据。', 'Times above refer to source checks. Each market metric shows its own update time.') }}</p>
     </section>
 
     <section class="panel">
@@ -35,14 +35,14 @@
         <tbody><tr v-for="row in coverageRows" :key="row.key"><td>{{ row.label }} <small>{{ row.window }}</small></td><td>{{ num(row.known) }}</td><td>{{ num(row.fresh) }}</td><td>{{ num(row.total) }}</td><td :class="row.total && row.fresh / row.total < .9 ? 'down' : 'up'">{{ percent(row.fresh, row.total) }}</td></tr></tbody>
       </table></div>
       <p v-for="row in unavailableQuoteRows" :key="`unavailable-${row.key}`" class="hint">{{ row.label }}：{{ tr('已发现', 'Discovered') }} {{ num(row.total) }} · {{ tr('可报价', 'Quotable') }} {{ num(row.quotableTotal) }} · {{ tr('暂无可验证报价', 'No verifiable quote') }} {{ num(row.quoteUnavailable) }} · {{ tr('可报价部分达标', 'Quotable within target') }} {{ percent(row.quotableWithinTarget, row.quotableTotal) }}</p>
-      <p v-if="unavailableQuoteRows.length" class="hint">{{ tr('表中达标率以全部已发现资产为分母；可报价部分单独计算，无法报价的资产继续保留在总数中。', 'The table rate uses all discovered assets; quotable coverage is shown separately, and unquotable assets remain in the total.') }}</p>
-      <p v-if="liquidityCoverage.total" class="hint">{{ tr('代币总流动性证据', 'Token-wide liquidity evidence') }}：{{ tr('当前', 'Current') }} {{ num(liquidityCoverage.fresh) }} · {{ tr('过期', 'Stale') }} {{ num(liquidityCoverage.stale) }} · {{ tr('证据待核实', 'Evidence unverified') }} {{ num(liquidityCoverage.unverified) }} · {{ tr('时间不明', 'Unknown time') }} {{ num(liquidityCoverage.unknownTime) }} · {{ tr('无数值', 'No value') }} {{ num(liquidityCoverage.missing) }}</p>
-      <p class="hint">{{ tr('来源提供行情时间时，以该时间判断新鲜度；未提供时使用收到报价的时间，并标明为来源观测，不能视为最新成交时间。发出请求本身不算新报价。', 'When a source provides market time, freshness uses that timestamp. Otherwise the received quote is labeled as a source observation, not a latest trade. A request alone does not count as a new quote.') }}</p>
+      <p v-if="unavailableQuoteRows.length" class="hint">{{ tr('达标率包含全部已发现资产；有报价资产的覆盖率另列。', 'Coverage includes all discovered assets. Coverage among quotable assets is listed separately.') }}</p>
+      <p v-if="liquidityCoverage.total" class="hint">{{ tr('总流动性数据', 'Total liquidity data') }}：{{ tr('当前', 'Current') }} {{ num(liquidityCoverage.fresh) }} · {{ tr('过期', 'Stale') }} {{ num(liquidityCoverage.stale) }} · {{ tr('证据待核实', 'Evidence unverified') }} {{ num(liquidityCoverage.unverified) }} · {{ tr('时间不明', 'Unknown time') }} {{ num(liquidityCoverage.unknownTime) }} · {{ tr('无数值', 'No value') }} {{ num(liquidityCoverage.missing) }}</p>
+      <p class="hint">{{ tr('时效以来源的行情时间为准；未提供时标记报价接收时间，不等同于成交时间。', 'Freshness uses the source timestamp, or the quote receipt time when unavailable. Receipt time is not trade time.') }}</p>
     </section>
 
     <details v-if="chainStreams.length" :open="health?.issues?.includes('chain-stream-degraded') ? true : undefined" class="panel status-tasks">
       <summary>{{ tr('链上成交与 K 线覆盖', 'On-chain trades and candle coverage') }}</summary>
-      <p class="hint">{{ tr('实时交易与历史回补分别检查。历史缺口尚未扫完时，池图只代表已覆盖的区间。', 'Live trades and historical backfill are checked separately. With a historical gap, pool charts cover only verified intervals.') }}</p>
+      <p class="hint">{{ tr('实时成交和历史记录分别统计。存在历史缺口时，K 线只覆盖已收录区间。', 'Live and historical coverage are listed separately. Candles cover recorded intervals only.') }}</p>
       <div class="scroll"><table class="tbl status-table"><thead><tr><th>{{ tr('链', 'Chain') }}</th><th>{{ tr('实时流', 'Live stream') }}</th><th>{{ tr('近端落后', 'Recent gap') }}</th><th>{{ tr('历史缺口', 'Historical gap') }}</th><th>{{ tr('待处理', 'Queued') }}</th></tr></thead>
         <tbody><tr v-for="row in chainStreams" :key="row.chainId"><td>{{ chainName(row.chainId) }}</td><td :class="row.degraded ? 'down' : row.status === 'live' ? 'up' : 'warn'">{{ sourceStatus(row.status) }}<span v-if="row.degraded"> · {{ tr('延迟', 'Delayed') }}</span> <small>{{ lag(row.sourceLagMs) }}<span v-if="row.updatedAt"> · {{ tr('状态采样', 'Status sampled') }} {{ age(row.updatedAt) }}</span></small></td><td :class="row.degraded ? 'down' : ''">{{ blocks(row.nearTipLagBlocks) }}</td><td :class="row.historicalGapBlocks > 0 ? 'warn' : ''">{{ blocks(row.historicalGapBlocks ?? (row.lastHead != null && row.lastProcessedBlock != null ? row.lastHead - row.lastProcessedBlock : null)) }}<small v-if="row.historicalScan?.lastSuccessAt">{{ tr('上次历史进展', 'Last history progress') }} {{ age(row.historicalScan.lastSuccessAt) }}</small><small v-if="row.historicalScan?.lastErrorAt > (row.historicalScan?.lastSuccessAt ?? 0)" class="warn">{{ tr('最近扫描失败', 'Recent scan failed') }}</small></td><td :class="row.degraded ? 'down' : row.queueDepth >= 1024 ? 'warn' : ''">{{ num(row.queueDepth) }} <small>/ 4,096</small></td></tr></tbody>
       </table></div>
@@ -52,7 +52,7 @@
       <h3>{{ tr('股票标的参考价', 'Underlying stock reference prices') }}</h3>
       <p><strong :class="reference?.status === 'available' ? 'up' : 'warn'">{{ capabilityStatus(reference?.status) }}</strong> · {{ tr('独立交易所参考价', 'Independent exchange references') }} {{ num(reference?.independent) }} / {{ num(reference?.total) }}（{{ percent(reference?.independent, reference?.total) }}）</p>
       <p class="hint">{{ tr('发行方参考价', 'Issuer references') }} {{ num(reference?.issuer) }}；{{ tr('有任意参考价', 'Any reference') }} {{ num(reference?.known) }}。{{ tr('缺少独立参考价时，真实股票与代币的价差不可计算。', 'Without an independent reference, the underlying stock-to-token spread cannot be calculated.') }}</p>
-      <p v-if="reference?.reason === 'entitlement-required'" class="warn">{{ tr('EODHD 当前账号没有网站所需的盘中报价授权；此能力暂不可完整提供。', 'The current EODHD account lacks the intraday quote entitlement needed for this site, so this capability is limited.') }}</p>
+      <p v-if="reference?.reason === 'entitlement-required'" class="warn">{{ tr('EODHD 盘中报价授权不足，部分股票参考价不可用。', 'EODHD intraday access is limited. Some stock reference prices are unavailable.') }}</p>
     </section>
 
     <details class="panel status-tasks"><summary>{{ tr('查看采集与统计任务', 'View collection and projection jobs') }}</summary>
@@ -72,7 +72,7 @@
       </dl>
     </section>
 
-    <section class="panel"><h3>{{ tr('公开快照存证', 'Public snapshot proofs') }}</h3><p class="hint">{{ tr('尚未接入公开存证。当前快照版本可用于核对页面数据。', 'Public anchoring is not available yet. The current snapshot revision identifies displayed data.') }} {{ tr('快照时间', 'Snapshot time') }} {{ date(snapshotAt) }} · Revision {{ store.revision || '—' }} · {{ tr('白名单版本', 'Identity list') }} {{ identityVersion }}</p></section>
+    <section class="panel"><h3>{{ tr('数据版本', 'Data version') }}</h3><p class="hint">{{ tr('公开存证未启用。', 'Public anchoring is not enabled.') }} {{ tr('快照时间', 'Snapshot time') }} {{ date(snapshotAt) }} · Revision {{ store.revision || '—' }} · {{ tr('白名单版本', 'Identity list') }} {{ identityVersion }}</p></section>
   </div>
 </template>
 

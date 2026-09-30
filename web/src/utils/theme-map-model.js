@@ -42,6 +42,12 @@ export function bubbleTone(bubble, now = Date.now()) {
   return change == null ? 'unknown' : change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
 }
 
+export function changeBreadth(rows, now = Date.now()) {
+  const result = { up:0, down:0, flat:0, unknown:0 };
+  for (const row of rows) result[bubbleTone(row, now)] += 1;
+  return result;
+}
+
 export function bubbleDiameter(bubble, maxVolume, now = Date.now()) {
   const value = currentUsdVolume(bubble, now);
   if (value == null || !maxVolume) return 58;
@@ -70,6 +76,7 @@ export function buildThemeMap(themeMap, scope = 'all', limits = {}, now = Date.n
       ticker,
       rows: rows.slice(0, maxPerTheme),
       totalRows: rows.length,
+      mapBreadth: changeBreadth(rows, now),
       knownVolume: rows.reduce((sum, bubble) => sum + (currentUsdVolume(bubble, now) ?? 0), 0),
       volumeKnownCount: rows.filter(bubble => currentUsdVolume(bubble, now) != null).length,
     };

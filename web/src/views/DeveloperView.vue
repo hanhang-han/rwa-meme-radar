@@ -3,8 +3,8 @@
     <div class="developer-heading">
       <div>
         <p class="developer-eyebrow">CLIPERX API · {{ tr('邀请试用', 'Invited trial') }}</p>
-        <h2>{{ tr('把关系证据接入你的产品', 'Bring relationship evidence into your product') }}</h2>
-        <p>{{ tr('通过只读接口查询股票与 Meme 的关系、代币风险及最新公开快照。受邀试用免费，使用统一邀请码注册。', 'Read stock–Meme relationships, token risk checks, and the latest public snapshot. Invited users can register for free with the shared trial invitation code.') }}</p>
+        <h2>{{ tr('股票与 Meme 数据 API', 'Stock and Meme data API') }}</h2>
+        <p>{{ tr('查询股票与 Meme 配对、代币风险及数据快照。使用邀请码注册，免费试用。', 'Query stock–Meme pairs, token risks and data snapshots. Register with an invitation code for a free trial.') }}</p>
       </div>
       <span class="developer-beta">{{ tr('邀请试用', 'Invited trial') }}</span>
     </div>
@@ -24,9 +24,9 @@
       </div>
       <form class="developer-form" @submit.prevent="submitAccount">
         <label>{{ tr('邮箱', 'Email') }}<input v-model.trim="email" type="email" autocomplete="email" required maxlength="254" :placeholder="tr('你的邮箱', 'Your email')"></label>
-        <label v-if="mode === 'register'">{{ tr('统一试用邀请码', 'Shared trial invitation code') }}<input v-model.trim="inviteCode" autocomplete="off" required maxlength="128" :placeholder="tr('请输入邀请码', 'Enter the invitation code')"></label>
+        <label v-if="mode === 'register'">{{ tr('邀请码', 'Invitation code') }}<input v-model.trim="inviteCode" autocomplete="off" required maxlength="128" :placeholder="tr('请输入邀请码', 'Enter the invitation code')"></label>
         <label>{{ tr('密码', 'Password') }}<input v-model="password" type="password" :autocomplete="mode === 'register' ? 'new-password' : 'current-password'" required :minlength="mode === 'register' ? 12 : undefined"></label>
-        <p v-if="mode === 'register'" class="developer-help">{{ tr('统一试用邀请码可供多位受邀者重复使用；密码至少 12 位。', 'The shared trial invitation code can be reused by multiple invitees. Use a password of at least 12 characters.') }}</p>
+        <p v-if="mode === 'register'" class="developer-help">{{ tr('密码至少 12 位。', 'Use a password of at least 12 characters.') }}</p>
         <p v-if="error" class="developer-error" role="alert">{{ error }}</p>
         <button class="developer-button developer-primary" type="submit" :disabled="busy">{{ busy ? tr('请稍候…', 'Please wait…') : mode === 'register' ? tr('注册并进入', 'Create account') : tr('登录', 'Sign in') }}</button>
       </form>
@@ -40,8 +40,8 @@
         </div>
         <p v-if="error" class="developer-error" role="alert">{{ error }}</p>
         <div class="developer-usage">
-          <div><span>{{ tr('本 UTC 日调用', 'Calls today (UTC)') }}</span><strong>{{ usage?.used ?? '—' }} <small>/ {{ usage?.limit ?? session?.limits?.perDay ?? '—' }}</small></strong></div>
-          <div><span>{{ tr('本 UTC 日剩余', 'Remaining today (UTC)') }}</span><strong>{{ usage?.remaining ?? '—' }}</strong></div>
+          <div><span>{{ tr('今日调用（UTC）', 'Calls today (UTC)') }}</span><strong>{{ usage?.used ?? '—' }} <small>/ {{ usage?.limit ?? session?.limits?.perDay ?? '—' }}</small></strong></div>
+          <div><span>{{ tr('今日剩余（UTC）', 'Remaining today (UTC)') }}</span><strong>{{ usage?.remaining ?? '—' }}</strong></div>
           <div><span>{{ tr('速率上限', 'Rate limit') }}</span><strong>{{ session?.limits?.perMinute ?? '—' }} <small>{{ tr('次/分钟', 'req/min') }}</small></strong></div>
         </div>
         <p class="developer-help">{{ tr('试用配额按账号计算，每天 UTC 00:00（北京时间 08:00）重置。触及上限时接口返回 429 与 Retry-After。', 'Trial quotas are per account and reset daily at 00:00 UTC (08:00 China Standard Time). Exceeding a limit returns 429 with Retry-After.') }} <button class="developer-link-button" type="button" :disabled="busy" @click="refreshAccount">{{ tr('刷新用量', 'Refresh usage') }}</button></p>
@@ -70,7 +70,7 @@
     </template>
 
     <section class="panel developer-docs">
-      <div class="developer-account-head"><div><p class="developer-eyebrow">{{ tr('快速开始', 'Quick start') }}</p><h3>{{ tr('三个只读接口', 'Three read-only endpoints') }}</h3></div><span class="developer-version">v1</span></div>
+      <div class="developer-account-head"><div><p class="developer-eyebrow">{{ tr('快速开始', 'Quick start') }}</p><h3>{{ tr('接口文档', 'API reference') }}</h3></div><span class="developer-version">v1</span></div>
       <p class="developer-help">{{ tr('使用 Authorization: Bearer API_KEY 请求。以下命令可复制到终端，把 YOUR_API_KEY 换成创建时保存的 Key。', 'Send Authorization: Bearer API_KEY. Copy a command below and replace YOUR_API_KEY with the key you saved.') }}</p>
       <div v-for="endpoint in endpoints" :key="endpoint.id" class="developer-endpoint">
         <div class="developer-endpoint-head"><span class="developer-method">GET</span><code>{{ endpoint.path }}</code></div>
@@ -78,7 +78,7 @@
         <p>{{ tr(endpoint.descriptionZh, endpoint.descriptionEn) }}</p>
         <div class="developer-code"><code>{{ command(endpoint.path) }}</code><button type="button" :aria-label="tr('复制请求命令', 'Copy request command')" @click="copyText(command(endpoint.path), endpoint.id)">{{ copied === endpoint.id ? tr('已复制', 'Copied') : tr('复制', 'Copy') }}</button></div>
       </div>
-      <p class="developer-help">{{ tr('关系结果区分已核验与名称线索；缺失数据为 null，不把未知写成零。行情和风险数据带有采集时间，可能延迟。', 'Relationships distinguish verified evidence from name candidates. Missing data is null, not zero. Market and risk data include observation times and may be delayed.') }}</p>
+      <p class="developer-help">{{ tr('关系分为已核验配对和名称线索。缺失值为 null；行情与风险数据附更新时间，可能存在延迟。', 'Relationships distinguish verified pairs from name matches. Missing values are null. Quotes and risk data include timestamps and may be delayed.') }}</p>
       <p class="developer-help">{{ tr('常见状态：401 Key 无效、429 触及限流、503 暂时不可用。试用接口可能调整字段，正式接入前请以返回内容为准。', 'Common statuses: 401 invalid key, 429 rate limit, 503 temporarily unavailable. Trial fields may change; inspect responses before production integration.') }}</p>
     </section>
   </div>

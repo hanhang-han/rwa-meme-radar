@@ -1,13 +1,13 @@
 <template>
   <section class="panel spread-panel" aria-live="off">
     <div class="panel-head">
-      <div><h2>{{ tr('价格比较', 'Price comparison') }}</h2><p class="hint">{{ tr('比较同一时间、同一单位的真实报价；价差不等于扣费后的交易收益。', 'Compare observed prices with aligned times and units. Spreads are not trading returns after costs.') }}</p></div>
-      <span v-if="error" role="status">{{ tr('更新失败，保留历史', 'Update failed; history retained') }} <button @click="load">{{ tr('重试', 'Retry') }}</button></span>
+      <div><h2>{{ tr('价格比较', 'Price comparison') }}</h2><p class="hint">{{ tr('同一时间、同一单位的报价对比。价差未扣除交易费用。', 'Prices compared at the same time and in the same units. Spreads exclude trading costs.') }}</p></div>
+      <span v-if="error" role="status">{{ tr('更新失败 · 显示历史数据', 'Update failed · showing history') }} <button @click="load">{{ tr('重试', 'Retry') }}</button></span>
     </div>
     <div class="spread-cards">
-      <article><small>{{ tr('股票代币溢价', 'Stock-token premium') }}</small><ComparisonMetric :value="current?.premium" /><p>{{ tr('代币市场价相对每枚对应股票价值的偏离。', 'Token market price versus the stock value represented by one token.') }}</p></article>
-      <article v-if="pool"><small>{{ tr('配对池价差', 'Pair-pool spread') }}</small><ComparisonMetric :value="pair?.spread" /><p>{{ tr('池内兑换报价相对独立市场报价的偏离。', 'Pool-implied quote versus independent market price.') }}</p></article>
-      <article v-if="pool"><small>{{ tr('Meme 相对涨幅', 'Meme relative performance') }} · {{ windowLabel }}</small><ComparisonMetric :value="pair?.relative?.[windowSize]" unit="pp" /><p>{{ tr('Meme 涨幅减股票涨幅；不代表应当回归。', 'Meme return minus stock return; no convergence is implied.') }}</p></article>
+      <article><small>{{ tr('股票代币溢价', 'Stock-token premium') }}</small><ComparisonMetric :value="current?.premium" /><p>{{ tr('每枚代币相对其对应股票价值的溢价。', 'Token premium over its underlying stock value.') }}</p></article>
+      <article v-if="pool"><small>{{ tr('配对池价差', 'Pair-pool spread') }}</small><ComparisonMetric :value="pair?.spread" /><p>{{ tr('池内报价与独立市场报价之差。', 'Difference between pool and independent market quotes.') }}</p></article>
+      <article v-if="pool"><small>{{ tr('Meme 相对涨幅', 'Meme relative performance') }} · {{ windowLabel }}</small><ComparisonMetric :value="pair?.relative?.[windowSize]" unit="pp" /><p>{{ tr('Meme 涨幅减去股票涨幅，不预示未来走势。', 'Meme return minus stock return; not a forecast.') }}</p></article>
     </div>
     <div class="spread-controls">
       <label>{{ tr('比较窗口', 'Comparison window') }} <select v-model="windowSize"><option value="1h">{{ tr('1 小时', '1 hour') }}</option><option value="24h">{{ tr('24 小时', '24 hours') }}</option></select></label>
@@ -18,17 +18,17 @@
       <p>{{ tr('股票参考价', 'Stock reference') }}: {{ amount(current?.premium?.inputs?.stockPrice, current?.premium?.inputs?.referenceCurrency) }} · {{ current?.premium?.inputs?.referenceProvider || '—' }} · {{ date(current?.premium?.inputs?.referenceAt) }}</p>
       <p>{{ tr('每枚对应股数', 'Shares per token') }}: {{ current?.premium?.inputs?.tokenToAssetRatio ?? '—' }} · {{ current?.premium?.inputs?.ratioSource || tr('来源待核实', 'Source unverified') }}</p>
       <p>{{ tr('交易时段', 'Market session') }}: {{ sessionLabel }} · {{ tr('方法版本', 'Method') }} {{ current?.method || '—' }}</p>
-      <p v-if="pool">{{ tr('Meme 对照报价（独立性通过后才参与计算）', 'Meme comparison quote (used only after independence checks)') }}: {{ amount(pair?.spread?.inputs?.meme?.price, pair?.spread?.inputs?.meme?.currency) }} · {{ pair?.spread?.inputs?.meme?.provider || '—' }} · {{ date(pair?.spread?.inputs?.meme?.at) }}</p>
-      <p v-if="pool">{{ tr('股票侧对照报价（独立性通过后才参与计算）', 'Stock-side comparison quote (used only after independence checks)') }}: {{ amount(pair?.spread?.inputs?.stock?.price, pair?.spread?.inputs?.stock?.currency) }} · {{ pair?.spread?.inputs?.stock?.provider || '—' }} · {{ date(pair?.spread?.inputs?.stock?.at) }}</p>
+      <p v-if="pool">{{ tr('Meme 对照报价', 'Meme comparison quote') }}: {{ amount(pair?.spread?.inputs?.meme?.price, pair?.spread?.inputs?.meme?.currency) }} · {{ pair?.spread?.inputs?.meme?.provider || '—' }} · {{ date(pair?.spread?.inputs?.meme?.at) }}</p>
+      <p v-if="pool">{{ tr('股票侧对照报价', 'Stock-side comparison quote') }}: {{ amount(pair?.spread?.inputs?.stock?.price, pair?.spread?.inputs?.stock?.currency) }} · {{ pair?.spread?.inputs?.stock?.provider || '—' }} · {{ date(pair?.spread?.inputs?.stock?.at) }}</p>
     </details>
     <div class="spread-controls"><label>{{ tr('走势图', 'Chart') }} <select v-model="chart"><option value="spread">{{ pool ? tr('配对池价差历史', 'Pair spread history') : tr('股票代币溢价历史', 'Stock-token premium history') }}</option><option v-if="pool" value="relative">{{ tr('股票与 Meme 走势对比', 'Stock and meme comparison') }}</option></select></label></div>
-    <p v-if="chart === 'relative'" class="hint">{{ tr('共同起点为 100，仅比较涨跌。来源、证券调整版本或计价单位变化后重新建立基准；不表示相关性。', 'Common baseline of 100 compares performance only. A source, corporate-action version or unit change starts a new baseline; this is not evidence of correlation.') }}</p>
-    <p v-if="chart === 'relative' && relative.some(p => !p.adjustmentVersion)" class="hint">{{ tr('部分股票报价缺少拆股等公司行动版本，暂不将其连成收益曲线。', 'Some equity observations lack corporate-action versions and are excluded from return curves.') }}</p>
+    <p v-if="chart === 'relative'" class="hint">{{ tr('起点归一为 100，比较同期涨跌。数据口径变化时重新计起。', 'Both start at 100 to compare performance. A change in source, adjustment or units resets the baseline.') }}</p>
+    <p v-if="chart === 'relative' && relative.some(p => !p.adjustmentVersion)" class="hint">{{ tr('部分报价缺少拆股等调整信息，未纳入走势。', 'Quotes without corporate-action adjustments are excluded from the chart.') }}</p>
     <ComparisonChart :rows="chartRows" :series="series" :label="chart === 'relative' ? tr('股票与 Meme 走势对比', 'Stock and meme comparison') : tr('价差历史', 'Spread history')" />
-    <details class="spread-evidence"><summary>{{ tr('价差观察记录', 'Spread observations') }} · {{ alerts.length }}</summary>
+    <details class="spread-evidence"><summary>{{ tr('价差提醒记录', 'Spread alert history') }} · {{ alerts.length }}</summary>
       <p class="hint">{{ tr('仅实时对齐报价触发：溢价 2%、池价差 3%，持续 30 秒且至少 3 次新报价；恢复阈值为触发阈值的 60%。池价差还需新鲜流动性至少 1 万美元。', 'Live aligned quotes only: 2% premium or 3% pool spread for 30 seconds and at least 3 new observations. Recovery uses 60% of the trigger threshold. Pool spreads also need fresh liquidity of at least $10,000.') }}</p>
-      <p v-if="!alerts.length">{{ tr('尚无符合条件的观察记录。', 'No qualifying observations yet.') }}</p>
-      <p v-for="event in alerts" :key="event.id">{{ date(event.t) }} · {{ event.pool ? tr('配对池价差', 'Pair-pool spread') : tr('股票代币溢价', 'Stock-token premium') }} · {{ event.kind === 'spread-expanded' ? tr('持续超出观察阈值', 'Persistently above observation threshold') : tr('回到观察阈值内', 'Returned within observation threshold') }} · {{ event.value.toFixed(2) }}%</p>
+      <p v-if="!alerts.length">{{ tr('暂无价差提醒。', 'No spread alerts yet.') }}</p>
+      <p v-for="event in alerts" :key="event.id">{{ date(event.t) }} · {{ event.pool ? tr('配对池价差', 'Pair-pool spread') : tr('股票代币溢价', 'Stock-token premium') }} · {{ event.kind === 'spread-expanded' ? tr('价差扩大', 'Spread widened') : tr('价差回落', 'Spread narrowed') }} · {{ event.value.toFixed(2) }}%</p>
     </details>
   </section>
 </template>
@@ -54,7 +54,7 @@ const ratio = computed(() => Number(pair.value?.poolQuote?.memePerStock).toLocal
 const windowLabel = computed(() => windowSize.value === '1h' ? tr('1 小时', '1 hour') : tr('24 小时', '24 hours'));
 const sessionLabel = computed(() => {
   const s = current.value?.premium?.inputs?.marketSession;
-  return s === 'regular' ? tr('盘中', 'Regular') : s === 'extended' ? tr('盘前 / 盘后', 'Extended') : s === 'closed' ? tr('休市', 'Closed') : s === 'halted' ? tr('停牌', 'Halted') : tr('待核实，按快照处理', 'Unverified; treated as snapshot');
+  return s === 'regular' ? tr('盘中', 'Regular') : s === 'extended' ? tr('盘前 / 盘后', 'Extended') : s === 'closed' ? tr('休市', 'Closed') : s === 'halted' ? tr('停牌', 'Halted') : tr('时段未核实 · 快照报价', 'Session unverified · snapshot quote');
 });
 const amount = (v, currency) => {
   if (v == null) return '—';

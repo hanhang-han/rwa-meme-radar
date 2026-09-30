@@ -59,20 +59,20 @@ const candleStatusLabel = computed(() => {
   // A recent, persisted pool trade is useful even while the historical
   // scanner is behind. Keep the gap visible without calling its live tail old.
   if(info?.coverageStatus==='backfilling' && info.lastTradeAt && now.value-Number(info.lastTradeAt)>=0 && now.value-Number(info.lastTradeAt)<=30000)
-    return tr('刚收到真实成交；较早历史仍在回补', 'Recent real trade received; older history is still being backfilled');
-  if(info?.coverageStatus==='backfilling' && info.marketStatus==='live' && !info.stale)return tr('实时成交已接入，历史回补中', 'Live trades connected; historical data is being backfilled');
-  if(info?.marketStatus==='quiet' && !info.stale && now.value-Number(info.scanAt||0)<=20000)return tr('采集正常，观测范围内暂无新成交', 'Collection healthy; no new trades in the observed range');
+    return tr('刚有新成交 · 较早历史不完整', 'New trade · earlier history incomplete');
+  if(info?.coverageStatus==='backfilling' && info.marketStatus==='live' && !info.stale)return tr('实时成交 · 历史记录补充中', 'Live trades · loading earlier history');
+  if(info?.marketStatus==='quiet' && !info.stale && now.value-Number(info.scanAt||0)<=20000)return tr('观测范围内暂无新成交', 'No new trades in the observed range');
   const declared = info?.status;
   const state = declared === 'current' && candleTail.value === 'quiet' ? 'quiet' : declared ?? candleTail.value;
   return ({
-    collecting: tr('已加入采集队列，等待可用行情', 'Queued for collection; waiting for available market data'),
-    partial: tr('部分历史已保存，缺口回补中', 'Partial history saved; gaps are being backfilled'),
+    collecting: tr('暂无行情，等待更新', 'Waiting for market data'),
+    partial: tr('历史记录不完整，正在补充', 'Incomplete history; more data is loading'),
     stale: tr('更新受阻，当前为历史 K 线', 'Update unavailable; historical candles shown'),
-    quiet: tr('当前只返回较早的 K 线，不能据此确认没有成交', 'Only older candles are available; this does not prove there were no trades'),
+    quiet: tr('当前仅有历史 K 线，最新成交未知', 'Historical candles only; latest trade unknown'),
     missing: tr('此市场暂无可用 K 线', 'No candles are available for this market'),
     unsupported: tr('行情源暂不支持此市场 K 线', 'The source does not support candles for this market'),
-    current: tr('已同步可用行情', 'Available market data synced'),
-    unavailable: tr('上游暂未返回该市场的可用 K 线', 'The source has not returned usable candles for this market'),
+    current: tr('行情已更新', 'Market data updated'),
+    unavailable: tr('此市场 K 线暂不可用', 'Candles temporarily unavailable for this market'),
   })[state] ?? tr('行情采集状态待核实', 'Market collection status unknown');
 });
 const lastCandleAt = computed(() => candleInfo.value?.rows?.at(-1)?.t);
@@ -102,6 +102,30 @@ function lw() {
   return window.LightweightCharts;
 }
 
+// Canvas colors must be resolved values; CSS variables cannot be passed to the chart.
+function chartPalette() {
+  const styles = window.getComputedStyle(el.value);
+  const token = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
+  const alpha = (color, opacity) => {
+    const rgb = color.match(/^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i);
+    return rgb ? `rgba(${rgb.slice(1).map(part => parseInt(part, 16)).join(',')},${opacity})` : color;
+  };
+  const up = token('--up', '#58bda0');
+  const down = token('--down', '#e37c85');
+  const accent = token('--accent', '#79a8f2');
+  const border = token('--border', '#303640');
+  return {
+    up, down, accent, border,
+    muted: token('--muted', '#98a2b1'),
+    surface: token('--surface-raised', '#20242c'),
+    grid: alpha(border, .45),
+    upVolume: alpha(up, .36),
+    downVolume: alpha(down, .36),
+    areaTop: alpha(accent, .12),
+    areaBottom: alpha(accent, .01),
+  };
+}
+
 function killChart() {
   if (chart) {
     try { chart.remove(); } catch { /* disposed */ }
@@ -115,15 +139,20 @@ function killChart() {
 function ensureChart() {
   if (!lw() || !el.value) return null;
   if (!chart) {
+    const colors = chartPalette();
     chart = lw().createChart(el.value, {
       width: el.value.clientWidth || 600,
       height: el.value.clientHeight || 380,
-      layout: { background: { type: lw().ColorType.Solid, color: 'transparent' }, textColor: '#91a0b5', fontSize: 11 },
-      grid: { vertLines: { color: 'rgba(37,48,68,.45)' }, horzLines: { color: 'rgba(37,48,68,.45)' } },
-      rightPriceScale: { borderColor: 'rgba(37,48,68,.7)' },
-      timeScale: { borderColor: 'rgba(37,48,68,.7)', timeVisible: true, secondsVisible: false, rightOffset: 3, tickMarkFormatter: (time, type) => chartTime(time, type) },
+      layout: { background: { type: lw().ColorType.Solid, color: 'transparent' }, textColor: colors.muted, fontSize: 11 },
+      grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
+      rightPriceScale: { borderColor: colors.border },
+      timeScale: { borderColor: colors.border, timeVisible: true, secondsVisible: false, rightOffset: 3, tickMarkFormatter: (time, type) => chartTime(time, type) },
       localization: { timeFormatter: time => chartDateTime(time) },
-      crosshair: { mode: lw().CrosshairMode.Normal },
+      crosshair: {
+        mode: lw().CrosshairMode.Normal,
+        vertLine: { color: colors.muted, labelBackgroundColor: colors.surface },
+        horzLine: { color: colors.muted, labelBackgroundColor: colors.surface },
+      },
     });
   }
   return chart;
@@ -198,6 +227,7 @@ async function paint(reset = false, force = false) {
     lastPaintKey = paintKey;
   }
   const a = props.asset;
+  const colors = chartPalette();
   if (mode.value === 'candle') {
     const info = await loadCandles(a.token, bar.value, 500, force);
     if (sequence !== paintSequence || !el.value) return;
@@ -213,7 +243,7 @@ async function paint(reset = false, force = false) {
       if (!reset && candleSeries && volumeSeries && candleLen <= barsData.length) {
         const previous=new Map(renderedRows.map(r=>[r.t,r]));
         const correction=rows.some(r=>Math.floor(r.t/1000)<lastCandleTime && JSON.stringify(previous.get(r.t))!==JSON.stringify(r));
-        const volume=r=>({time:Math.floor(r.t/1000),value:r.vu??r.v??0,color:r.c>=r.o?'rgba(45,212,167,.45)':'rgba(255,93,93,.45)'});
+        const volume=r=>({time:Math.floor(r.t/1000),value:r.vu??r.v??0,color:r.c>=r.o?colors.upVolume:colors.downVolume});
         if(correction){candleSeries.setData(barsData);volumeSeries.setData(rows.map(volume));}
         else for(const r of rows){if(Math.floor(r.t/1000)>=lastCandleTime){candleSeries.update({time:Math.floor(r.t/1000),open:r.o,high:r.h,low:r.l,close:r.c});volumeSeries.update(volume(r));}}
         renderedRows=rows.map(r=>({...r}));
@@ -228,16 +258,16 @@ async function paint(reset = false, force = false) {
       const last = barsData[barsData.length - 1].close;
       const dec = decOf(last);
       candleSeries = ch.addCandlestickSeries({
-        upColor: '#2dd4a7', downColor: '#ff5d5d',
-        borderUpColor: '#2dd4a7', borderDownColor: '#ff5d5d',
-        wickUpColor: '#2dd4a7', wickDownColor: '#ff5d5d',
+        upColor: colors.up, downColor: colors.down,
+        borderUpColor: colors.up, borderDownColor: colors.down,
+        wickUpColor: colors.up, wickDownColor: colors.down,
         priceFormat: { type: 'price', precision: dec, minMove: 10 ** -dec },
       });
       candleSeries.setData(barsData);
       volumeSeries = ch.addHistogramSeries({ priceScaleId: '', priceFormat: { type: 'volume' } });
       volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-      volumeSeries.setData(rows.map((r) => ({ time: Math.floor(r.t / 1000), value: r.vu ?? r.v ?? 0, color: 'rgba(96,125,159,.5)' })));
-      priceLine = candleSeries.createPriceLine({ ...priceLineOptions(info, a, last), color: '#b9fa6a', lineWidth: 1, lineStyle: lw().LineStyle.Dashed, axisLabelVisible: true });
+      volumeSeries.setData(rows.map((r) => ({ time: Math.floor(r.t / 1000), value: r.vu ?? r.v ?? 0, color: r.c >= r.o ? colors.upVolume : colors.downVolume })));
+      priceLine = candleSeries.createPriceLine({ ...priceLineOptions(info, a, last), color: colors.accent, lineWidth: 1, lineStyle: lw().LineStyle.Dashed, axisLabelVisible: true });
       renderedRows=rows.map(r=>({...r}));
       candleLen = barsData.length;
       lastCandleTime = barsData.at(-1).time;
@@ -258,9 +288,9 @@ async function paint(reset = false, force = false) {
   killChart();
   const ch = ensureChart();
   if (!ch) return;
-  lineSeries = ch.addAreaSeries({ lineColor: '#b9fa6a', topColor: 'rgba(185,250,106,.16)', bottomColor: 'rgba(185,250,106,.02)', lineWidth: 2 });
+  lineSeries = ch.addAreaSeries({ lineColor: colors.accent, topColor: colors.areaTop, bottomColor: colors.areaBottom, lineWidth: 2 });
   lineSeries.setData(pts);
-  priceLine = lineSeries.createPriceLine({ price: pts[pts.length - 1].value, color: '#b9fa6a', lineWidth: 1, lineStyle: lw().LineStyle.Dashed, axisLabelVisible: true, title: '' });
+  priceLine = lineSeries.createPriceLine({ price: pts[pts.length - 1].value, color: colors.accent, lineWidth: 1, lineStyle: lw().LineStyle.Dashed, axisLabelVisible: true, title: '' });
 }
 
 function setMode(m) {

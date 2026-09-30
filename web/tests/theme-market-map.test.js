@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  bubbleDiameter, bubbleTone, buildNameClues, buildThemeMap, currentUsdVolume,
+  bubbleDiameter, bubbleTone, buildNameClues, buildThemeMap, changeBreadth, currentUsdVolume,
   fallbackRelationEvents, fallbackThemeMap, metricStatus,
   themeEventTime, visibleRecentObservations, visibleThemeEvents,
 } from '../src/utils/theme-map-model.js';
@@ -39,6 +39,26 @@ test('map keeps chain and contract identities separate and expires only the affe
   assert.equal(currentUsdVolume(current,NOW+901_000),null);
   assert.equal(bubbleTone(current,NOW+901_000),'unknown');
   assert.equal(metricStatus(current.change24h,NOW+901_000),'stale');
+});
+
+test('breadth counts zero as flat and never colors stale or unavailable changes as current', () => {
+  const row = (value, extra = {}) => ({change24h:{value,status:'current',observedAt:NOW-1000,...extra}});
+  assert.deepEqual(changeBreadth([
+    row(5), row(-3), row(0), row(null), row(8,{observedAt:NOW-901000}),
+    row(-5,{status:'unsupported-scope'}), row(9,{observedAt:NOW+120000}),
+  ],NOW), {up:1,down:1,flat:1,unknown:4});
+});
+
+test('breadth uses all scoped unique assets, including those beyond the visible bubble limit', () => {
+  const row = (token, chainId, value) => ({token,chainId,primaryTicker:'NVDA',
+    change24h:{value,status:'current',observedAt:NOW-1000}});
+  const dto = {themes:[{ticker:'NVDA'}],bubbles:[
+    row('0xa','196',2),row('0xa','196',2),row('0xb','196',-1),row('0xc','196',0),row('0xa','56',2),
+  ]};
+  const model = buildThemeMap(dto,'196',{maxPerTheme:1},NOW);
+  assert.equal(model.rows.length,1);
+  assert.equal(model.themes[0].totalRows,3);
+  assert.deepEqual(model.themes[0].mapBreadth,{up:1,down:1,flat:1,unknown:0});
 });
 
 test('legacy full snapshot forms bubbles only from current official A relations with comparable fields', () => {

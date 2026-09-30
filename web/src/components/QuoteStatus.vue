@@ -22,8 +22,8 @@ const label = computed(() => ({
   'issuer-reference': tr('发行方参考', 'Issuer reference'),
   'entitlement-required': tr('行情授权不足', 'Market data entitlement required'),
   'identity-unverified': tr('证券身份待核实', 'Security identity unverified'),
-  'quota-exhausted': tr('采集额度已用尽', 'Collection quota exhausted'),
-  'budget-exhausted': tr('采集额度已用尽', 'Collection quota exhausted'),
+  'quota-exhausted': tr('数据源额度用尽', 'Source quota exhausted'),
+  'budget-exhausted': tr('数据源额度用尽', 'Source quota exhausted'),
 })[freshness.value.state] ?? tr('行情状态未知', 'Quote status unknown'));
 const currency = computed(() => props.reference ? props.row.referenceCurrency : props.row.priceCurrency);
 const stamp = computed(() => `${props.reference ? props.row.referenceProvider ?? '' : props.row.fieldSources?.price ?? props.row.provider ?? ''} · ${date(at.value)}`);

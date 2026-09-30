@@ -7,7 +7,7 @@
       <div class="v2-help-dialog" role="dialog" aria-modal="true">
         <div class="panel-head">
           <h2>{{ title }}</h2>
-          <button ref="closeBtn" data-help-close aria-label="close" @click="close">×</button>
+          <button ref="closeBtn" data-help-close :aria-label="tr('关闭', 'Close')" @click="close">×</button>
         </div>
         <p>{{ body }}</p>
       </div>
@@ -17,6 +17,7 @@
 
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { tr } from '../i18n';
 
 defineProps({
   title: { type: String, default: '' },

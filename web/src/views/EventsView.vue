@@ -2,10 +2,10 @@
   <section class="panel">
     <div class="panel-head">
       <h2>{{ tr('发现记录', 'Discovery log') }}</h2>
-      <button id="v2NewEvents" :disabled="busy" @click="loadFresh">{{ tr('获取最新记录', 'Load latest records') }}</button>
+      <button id="v2NewEvents" :disabled="busy" @click="loadFresh">{{ tr('刷新', 'Refresh') }}</button>
     </div>
-    <p>{{ tr('历史持续保存，重复轮询不会生成重复线索。时间表示本站发现时间。', 'History persists; repeated polling does not duplicate leads. Times represent detection by this product.') }}</p>
-    <div v-if="error" class="x-empty">{{ tr('部分或全部网络读取失败，已保留现有数据；可重试。', 'Some or all networks failed; existing data was kept. Retry when ready.') }}</div>
+    <p>{{ tr('按本站发现时间排序。', 'Ordered by discovery time on CliperX.') }}</p>
+    <div v-if="error" class="x-empty">{{ tr('部分记录加载失败，请刷新重试。', 'Some records could not be loaded. Refresh to retry.') }}</div>
     <div v-if="busy && !items.length" class="x-empty">{{ tr('正在读取历史…', 'Loading history…') }}</div>
     <div v-else-if="!busy && !items.length && !error" class="x-empty">{{ tr('暂无发现记录。', 'No discovery records yet.') }}</div>
     <EventRow v-for="item in items" :key="eventKey(item)" :ev="item" />

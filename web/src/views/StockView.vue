@@ -11,27 +11,27 @@
         <option value="poolLiquidity">{{ tr('按配对池规模', 'Pair-pool size') }}</option>
         <option value="volume24h">{{ tr('按资产 24h 成交额', 'Asset 24h volume') }}</option>
         <option value="change24h">{{ tr('按资产 24h 涨跌', 'Asset 24h change') }}</option>
-        <option value="firstSeen">{{ tr('按关系首次发现', 'First relationship detection') }}</option>
+        <option value="firstSeen">{{ tr('按发现时间', 'Discovery time') }}</option>
       </select>
       <label class="v3-check"><input v-model="includeHistorical" type="checkbox"> {{ tr('展示历史池估值', 'Include historical pool estimates') }}</label>
     </div>
 
     <div id="xStockRows" class="v3-theme-list">
-      <div v-if="!cards.length" class="x-empty">{{ !store.snapshot ? tr('正在加载股票行情…', 'Loading stock quotes…') : store.snapshot.unified?.snapshotScope === 'overview' ? tr('股票列表仍在同步。', 'The stock list is still syncing.') : tr('暂无匹配股票主题。', 'No matching stock themes.') }}</div>
+      <div v-if="!cards.length" class="x-empty">{{ !store.snapshot ? tr('正在加载股票行情…', 'Loading stock quotes…') : store.snapshot.unified?.snapshotScope === 'overview' ? tr('正在加载更多股票…', 'Loading more stocks…') : tr('暂无匹配股票主题。', 'No matching stock themes.') }}</div>
       <div v-else-if="!detailMode" class="stock-summary-head"><span>{{ tr('股票','Stock') }}</span><span>{{ tr('价格','Price') }}</span><span>24h</span><span>Meme</span><span>{{ tr('Meme 24h 成交','Meme volume') }}</span><span>{{ tr('配对池流动性','Pair liquidity') }}</span></div>
       <details v-for="card in cards" :key="card.ticker" class="x-stock v3-theme-card" :open="detailMode || autoOpen(card.ticker)">
         <summary class="stock-summary-row" :aria-label="detailMode ? undefined : tr('查看股票详情', 'View stock detail') + ' ' + card.ticker" @click="onStockSummary($event, card)">
           <strong>{{ companyTitle(card.ticker, card.list[0]) }}</strong>
           <span><small class="stock-mobile-label">{{ tr('价格','Price') }}</small><LiveNumber :value="officialStock(card)?.price" :currency="officialStock(card)?.priceCurrency ?? ''" format="price" /><small v-if="officialStock(card)" class="stock-quote-source">{{ chainName(officialStock(card)) }} · {{ officialStock(card)?.fieldSources?.price ?? officialStock(card)?.provider ?? tr('来源待核验','Source unverified') }}</small><QuoteStatus v-if="officialStock(card)" :row="officialStock(card)" /></span>
           <span :class="Number(officialStock(card)?.change24h)>0?'up':Number(officialStock(card)?.change24h)<0?'down':''"><small class="stock-mobile-label">24h</small><LiveNumber :value="officialStock(card)?.change24h" format="percent" /><small v-if="officialStock(card)" class="stock-quote-source" :title="date(stockFieldAt(officialStock(card), 'change24h'))">{{ stockFieldLabel(officialStock(card), 'change24h') }}</small></span>
-          <span><small class="stock-mobile-label">Meme</small>{{ card.themeRows.length }} Meme</span><span><small class="stock-mobile-label">{{ tr('Meme 24h 成交','Meme volume') }}</small>{{ usd(cardMemeVolume(card)) }}<small class="stock-quote-source">{{ cardMemeVolume(card) == null ? tr('数据不全或过期', 'Incomplete or stale') : tr('全部资产新鲜美元口径', 'All assets fresh in USD') }}</small></span><span><small class="stock-mobile-label">{{ tr('配对池流动性','Pair liquidity') }}</small>{{ usd(cardPoolLiquidity(card)) }}<small class="stock-quote-source">{{ cardPoolLiquidity(card) == null ? tr('池估值不全或过期', 'Pool values incomplete or stale') : tr('当前池估值合计', 'Current pool estimates') }}</small></span>
+          <span><small class="stock-mobile-label">Meme</small>{{ card.themeRows.length }} Meme</span><span><small class="stock-mobile-label">{{ tr('Meme 24h 成交','Meme volume') }}</small>{{ usd(cardMemeVolume(card)) }}<small class="stock-quote-source">{{ cardMemeVolume(card) == null ? tr('数据不全或过期', 'Incomplete or stale') : tr('近期数据 · 美元合计', 'Recent data · USD total') }}</small></span><span><small class="stock-mobile-label">{{ tr('配对池流动性','Pair liquidity') }}</small>{{ usd(cardPoolLiquidity(card)) }}<small class="stock-quote-source">{{ cardPoolLiquidity(card) == null ? tr('池估值不全或过期', 'Pool values incomplete or stale') : tr('近期估值合计', 'Recent pool estimates') }}</small></span>
         </summary>
 
         <section class="v3-theme-body">
           <div class="panel-head v3-theme-head">
             <div>
               <h3>{{ tr('关联资产比较', 'Related asset comparison') }}</h3>
-              <p class="hint">{{ tr('每个资产选择一个代表池：优先新鲜估值，再按规模选择。资产成交额不等于这个配对池的成交额。', 'One representative pool per asset: fresh estimates first, then size. Asset-wide volume is not this pair pool’s volume.') }}</p>
+              <p class="hint">{{ tr('每个资产展示一个代表池，优先近期估值，再按规模选择。成交额为资产整体数据。', 'One pool per asset, selected by quote recency then size. Volume is asset-wide.') }}</p>
             </div>
             <div class="v3-theme-stats">
               <span>{{ card.themeRows.length }} {{ tr('资产', 'assets') }}</span>
@@ -44,7 +44,7 @@
               <thead>
                 <tr>
                   <th>{{ tr('关联资产', 'Related asset') }}</th>
-                  <th>{{ tr('关系证据', 'Relationship evidence') }}</th>
+                  <th>{{ tr('配对关系', 'Pairing') }}</th>
                   <th>{{ tr('股票配对池规模', 'Stock pair-pool size') }}</th>
                   <th>{{ tr('资产 24h 成交额', 'Asset 24h volume') }}</th>
                   <th>{{ tr('资产 24h 涨跌', 'Asset 24h change') }}</th>
@@ -77,12 +77,12 @@
                     <small :title="date(assetFieldAt(row.asset, 'change24h'))">{{ assetFieldLabel(row.asset, 'change24h') }}</small>
                   </td>
                   <td><ComparisonMetric :value="relativeMetric(row.relation)" unit="pp" /></td>
-                  <td><RouterLink class="v3-action" :to="pairLink(row.relation)">{{ tr('价格与配对分析', 'Price and pair analysis') }} →</RouterLink></td>
+                  <td><RouterLink class="v3-action" :to="pairLink(row.relation)">{{ tr('查看配对', 'View pair') }} →</RouterLink></td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <div v-else-if="card.themeRows.length" class="x-empty">{{ tr('这个主题目前没有 15 分钟内的配对池估值。勾选“展示历史池估值”可以查看已有证据。', 'This theme has no pair-pool estimate from the last 15 minutes. Include historical estimates to view existing evidence.') }}</div>
+          <div v-else-if="card.themeRows.length" class="x-empty">{{ tr('暂无 15 分钟内的池估值，可勾选“展示历史池估值”。', 'No pool estimates within 15 minutes. Select “Include historical pool estimates” to see older values.') }}</div>
           <div v-else class="x-empty">{{ tr('尚未发现已核验配对。', 'No verified pairs discovered yet.') }}</div>
 
           <details class="v2-versions v3-versions">
@@ -113,7 +113,7 @@
       <span>{{ safePage + 1 }} / {{ pages }} · {{ allRows.length }} {{ tr('个股票主题', 'stock themes') }}</span>
       <button :disabled="(safePage + 1) >= pages" @click="setPage(safePage + 1)">{{ tr('下一页', 'Next') }}</button>
     </div>
-    <section v-if="!detailMode" class="panel stock-themes-index"><h2>{{ tr('主题指数','Theme indexes') }}</h2><p v-if="sectors.length" class="hint">{{ tr('当前可发布', 'Currently publishable') }} {{ num(currentSectorCount) }}/{{ num(sectors.length) }}。{{ tr('暂停的指数仍保留成分与上次有效时间，不将历史值当作实时指数。', 'Paused indexes retain constituents and the last valid time; historical values are not shown as live indexes.') }}</p><div class="v2-baskets"><details v-for="sector in sectors" :key="sector.chainId+':'+sector.sector+':'+sector.basketVersion" class="x-basket"><summary class="stock-basket-summary"><strong>{{ themeLabel(sector.sector, lang.lang) }} <small>{{ sector.scopeLabel || chainName(sector) }}</small><small v-if="sector.dataStatus !== 'current'" class="basket-reason">{{ tr(sector.reason || '指数暂停，等待有效行情', 'Paused: qualifying assets or current quotes are insufficient') }}</small></strong><span :class="{ 'is-stale':sector.dataStatus !== 'current' }">{{ sector.dataStatus === 'current' && sector.value != null ? num(sector.value) : '—' }}</span><small>{{ tr('有效行情','Current quotes') }} {{ num(sector.quoteCoverage?.fresh) }} / {{ num(sector.quoteCoverage?.total) }}<br>{{ tr('最后有效','Last valid') }} {{ date(sector.dataStatus === 'current' ? sector.at : sector.lastAt) }}</small></summary><div class="stock-basket-meta">{{ tr('基期','Base') }} {{ date(sector.baseAt) }} · {{ num(sector.members) }} {{ tr('个成分','constituents') }} · {{ tr('篮子版本','Basket version') }} {{ sector.basketVersion ?? '—' }} · {{ tr('方法版本','Method version') }} {{ sector.methodVersion ?? '—' }}</div><p v-for="part in sector.components??[]" :key="part.token"><RouterLink :to="'/detail/'+sector.chainId+'/'+part.token">{{ part.symbol }}</RouterLink> {{ part.weight!=null?pct(part.weight*100):'' }}</p></details></div><p v-if="!sectors.length" class="x-empty">{{ tr('暂无可发布主题指数；成分证据或有效行情不足时不会显示指数值。','No publishable theme indexes; values remain unavailable without qualifying constituents and current quotes.') }}</p></section>
+    <section v-if="!detailMode" class="panel stock-themes-index"><h2>{{ tr('主题指数','Theme indexes') }}</h2><p v-if="sectors.length" class="hint">{{ tr('行情可用', 'Available') }} {{ num(currentSectorCount) }}/{{ num(sectors.length) }}。{{ tr('暂停更新的指数可查看成分和最后有效时间。', 'Paused indexes show their constituents and last valid time.') }}</p><div class="v2-baskets"><details v-for="sector in sectors" :key="sector.chainId+':'+sector.sector+':'+sector.basketVersion" class="x-basket"><summary class="stock-basket-summary"><strong>{{ themeLabel(sector.sector, lang.lang) }} <small>{{ sector.scopeLabel || chainName(sector) }}</small><small v-if="sector.dataStatus !== 'current'" class="basket-reason">{{ tr(sector.reason || '指数暂停，等待有效行情', 'Paused: qualifying assets or current quotes are insufficient') }}</small></strong><span :class="{ 'is-stale':sector.dataStatus !== 'current' }">{{ sector.dataStatus === 'current' && sector.value != null ? num(sector.value) : '—' }}</span><small>{{ tr('有效行情','Current quotes') }} {{ num(sector.quoteCoverage?.fresh) }} / {{ num(sector.quoteCoverage?.total) }}<br>{{ tr('最后有效','Last valid') }} {{ date(sector.dataStatus === 'current' ? sector.at : sector.lastAt) }}</small></summary><div class="stock-basket-meta">{{ tr('基期','Base') }} {{ date(sector.baseAt) }} · {{ num(sector.members) }} {{ tr('个成分','constituents') }} · {{ tr('篮子版本','Basket version') }} {{ sector.basketVersion ?? '—' }} · {{ tr('方法版本','Method version') }} {{ sector.methodVersion ?? '—' }}</div><p v-for="part in sector.components??[]" :key="part.token"><RouterLink :to="'/detail/'+sector.chainId+'/'+part.token">{{ part.symbol }}</RouterLink> {{ part.weight!=null?pct(part.weight*100):'' }}</p></details></div><p v-if="!sectors.length" class="x-empty">{{ tr('暂无可用指数：成分或近期行情不足。','Indexes unavailable: insufficient constituents or recent quotes.') }}</p></section>
   </div>
 </template>
 
@@ -244,7 +244,7 @@ function poolStateLabel(row) {
 }
 
 function relationType(relation) {
-  return relation.wrapper ? tr('包装股票配对已核验', 'Verified wrapped-stock pair') : tr('股票直接配对已核验', 'Verified direct-stock pair');
+  return relation.wrapper ? tr('包装代币配对 · 已核验', 'Wrapped-token pair · verified') : tr('直接配对 · 已核验', 'Direct pair · verified');
 }
 
 function companyTitle(ticker, first) {
