@@ -14,6 +14,9 @@ from ..db import ResearchStore, store
 
 BAR_MS = {'1m':60000,'5m':300000,'15m':900000,'1H':3600000,'4H':14400000,
           '6H':21600000,'12H':43200000,'1D':86400000,'1W':604800000}
+RETAINED_TRADES = 10000
+RETENTION_SELECT_LIMIT = 1000
+RETENTION_DELETE_BATCH = 200
 
 
 def now_ms():
@@ -293,6 +296,55 @@ class MarketStreamProcessor:
         ordered.sort(key=lambda entry:entry[0])
         return [item for _,item in ordered]
 
+    async def _prune_market_trades(self, s, storage, cutoff):
+        """Select retention candidates without reserving SQLite's only writer.
+
+        Every deletion rechecks the selected row's identity. The 10,000th most
+        recent row is also re-read inside each short transaction: another
+        writer may have removed newer trades after the candidate read.
+        """
+        asset = s.key(storage)
+        expired = await s.fetchall('''SELECT rowid,id,t FROM trades INDEXED BY trades_time
+            WHERE asset=? AND t<? ORDER BY t,rowid LIMIT ?''',
+            (asset, cutoff, RETENTION_SELECT_LIMIT))
+        for offset in range(0, len(expired), RETENTION_DELETE_BATCH):
+            async with s._guard_write():
+                await s.db.execute('BEGIN IMMEDIATE')
+                try:
+                    await s.db.executemany('''DELETE FROM trades
+                        WHERE rowid=? AND asset=? AND id=? AND t=? AND t<?''',
+                        [(row[0], asset, row[1], row[2], cutoff)
+                         for row in expired[offset:offset + RETENTION_DELETE_BATCH]])
+                    await s.db.commit()
+                except BaseException:
+                    await s.db.rollback()
+                    raise
+            await asyncio.sleep(0)
+
+        excess = await s.fetchall('''SELECT rowid,id,t FROM trades INDEXED BY trades_time
+            WHERE asset=? ORDER BY t DESC,rowid DESC LIMIT ? OFFSET ?''',
+            (asset, RETENTION_SELECT_LIMIT, RETAINED_TRADES))
+        for offset in range(0, len(excess), RETENTION_DELETE_BATCH):
+            async with s._guard_write():
+                await s.db.execute('BEGIN IMMEDIATE')
+                try:
+                    boundary = await s.db.execute_fetchall('''SELECT t,rowid FROM trades INDEXED BY trades_time
+                        WHERE asset=? ORDER BY t DESC,rowid DESC LIMIT 1 OFFSET ?''',
+                        (asset, RETAINED_TRADES - 1))
+                    if boundary:
+                        boundary_t, boundary_rowid = boundary[0]
+                        await s.db.executemany('''DELETE FROM trades
+                            WHERE rowid=? AND asset=? AND id=? AND t=?
+                              AND (t<? OR (t=? AND rowid<?))''',
+                            [(row[0], asset, row[1], row[2], boundary_t,
+                              boundary_t, boundary_rowid)
+                             for row in excess[offset:offset + RETENTION_DELETE_BATCH]])
+                    await s.db.commit()
+                except BaseException:
+                    await s.db.rollback()
+                    raise
+            await asyncio.sleep(0)
+
     async def flush(self, messages):
         from ..realtime_schema import enqueue_events
         # Replay pages contain up to 1,000 trades. A 128-event transaction
@@ -438,15 +490,15 @@ class MarketStreamProcessor:
             if self.last_persisted_at-self._last_prune.get(chain,0)>60000:
                 # Preserve a bounded recent tape, independently per market. An
                 # outage exceeding retention stays explicitly incomplete.
-                async with s._guard_write():
+                # A failed maintenance pass must not replay a committed quote
+                # batch or delay the stream by retrying on every tick.
+                self._last_prune[chain]=self.last_persisted_at
+                try:
                     cutoff=self.last_persisted_at-86400000
                     for storage in {item[1].storage for item in items}:
-                        await s.db.execute('DELETE FROM trades WHERE rowid IN (SELECT rowid FROM trades WHERE asset=? AND t<? LIMIT 1000)',(s.key(storage),cutoff))
-                        await s.db.execute('''DELETE FROM trades WHERE asset=? AND rowid IN
-                            (SELECT rowid FROM trades WHERE asset=? ORDER BY t DESC LIMIT 1000 OFFSET 10000)''',
-                            (s.key(storage),s.key(storage)))
-                    await s.db.commit()
-                self._last_prune[chain]=self.last_persisted_at
+                        await self._prune_market_trades(s,storage,cutoff)
+                except Exception as error:
+                    print(f'[market-stream] retention failed for {chain}: {type(error).__name__}',flush=True)
 
     @staticmethod
     async def _fact(s,kind,key,value):

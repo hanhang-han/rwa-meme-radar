@@ -175,6 +175,7 @@ class ChainPoolStream:
         self.status_task = None
         self.status_pending = None
         self.status_lock = asyncio.Lock()
+        self.replay_task = None
         self.watch_task = None
         self.bar_close_task = None
         self.pools = {}
@@ -294,9 +295,10 @@ class ChainPoolStream:
     async def close(self):
         task, self.status_task = self.status_task, None
         self.status_pending = None
+        replay_task, self.replay_task = self.replay_task, None
         watch_task, self.watch_task = self.watch_task, None
         bar_task, self.bar_close_task = self.bar_close_task, None
-        tasks = [work for work in (task, watch_task, bar_task) if work is not None]
+        tasks = [work for work in (task, replay_task, watch_task, bar_task) if work is not None]
         for work in tasks:
             work.cancel()
         if tasks:
@@ -446,7 +448,11 @@ class ChainPoolStream:
                     # Keep chain identity and subscriptions on WSS. Read RPC
                     # uses HTTP so replay cannot flood the live socket.
                     public_ws = self.ws is not None and self.chain in ("56", "4663")
-                    if public_ws and (method == "eth_chainId" or not self.http_reads_enabled
+                    bnb_http_logs = (self.chain == "56" and self.http_reads_enabled
+                                     and method == "eth_getLogs")
+                    if bnb_http_logs and self.http is None:
+                        raise RuntimeError("bnb-http-replay-unavailable")
+                    if public_ws and not bnb_http_logs and (method == "eth_chainId" or not self.http_reads_enabled
                                       or self.http is None
                                       or time.monotonic() < self.http_fallback_until):
                         result = await self.ws_call(self.ws, method, params)
@@ -475,7 +481,11 @@ class ChainPoolStream:
                                         or status in (403, 404, 408)
                                         or (status is not None and 500 <= status < 600)
                                         or str(http_error) == "wrong-http-chain-id")
-                            if not public_ws or not fallback:
+                            if bnb_http_logs:
+                                # Reverify the HTTP endpoint on the next
+                                # replay attempt after a transport failure.
+                                self.http_chain_verified = False
+                            if not public_ws or not fallback or bnb_http_logs:
                                 raise
                             self.http_chain_verified = False
                             self.http_fallback_until = time.monotonic() + 60
@@ -1891,7 +1901,8 @@ class ChainPoolStream:
     async def run(self):
         await self.init()
         attempt = 0
-        async with httpx.AsyncClient(timeout=12) as self.http:
+        self.http = httpx.AsyncClient(timeout=12)
+        try:
             while True:
                 reader = replay = None
                 connected_at = None
@@ -1915,7 +1926,14 @@ class ChainPoolStream:
                         connected_at = time.monotonic()
                         self.status = "catching-up"
                         self.schedule_status_fact(force=True)
-                        replay = asyncio.create_task(self.reconcile())
+                        if self.chain == "56" and self.http_reads_enabled:
+                            # BNB replay uses HTTP. A WSS 1013 or a catalogue
+                            # resubscription must not cancel a verified range
+                            # halfway through its many getLogs address pages.
+                            if self.replay_task is None or self.replay_task.done():
+                                self.replay_task = asyncio.create_task(self.reconcile())
+                        else:
+                            replay = asyncio.create_task(self.reconcile())
                         while not reader.done():
                             try:
                                 if self.queue.empty():
@@ -1952,6 +1970,13 @@ class ChainPoolStream:
                     attempt = 0
                 attempt += 1
                 await asyncio.sleep(min(30, 2 ** min(attempt, 5)))
+        finally:
+            replay, self.replay_task = self.replay_task, None
+            if replay is not None:
+                replay.cancel()
+                await asyncio.gather(replay, return_exceptions=True)
+            await self.http.aclose()
+            self.http = None
 
 
 async def prepare_streams():

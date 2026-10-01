@@ -1,8 +1,10 @@
 """Official Binance payload fixtures plus real SQLite commit/replay semantics."""
 import asyncio
+from contextlib import closing
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -148,7 +150,8 @@ class StreamPersistenceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store.db,'execute_fetchall',wraps=self.store.db.execute_fetchall) as write, \
              patch.object(self.store.db,'executemany',wraps=self.store.db.executemany) as bulk:
             await self.processor.flush(messages)
-        trade_sql=[call.args[0] for call in write.call_args_list if 'trades' in call.args[0]]
+        trade_sql=[call.args[0] for call in write.call_args_list
+                   if 'INSERT OR IGNORE INTO trades' in call.args[0]]
         self.assertEqual(len(trade_sql),1)
         self.assertIn('RETURNING asset,id',trade_sql[0])
         self.assertNotIn('SELECT asset,id',trade_sql[0])
@@ -398,6 +401,86 @@ class StreamPersistenceTests(unittest.IsolatedAsyncioTestCase):
         await self.processor.flush(messages)
         events=await (await self.store.db.execute("SELECT COUNT(*) FROM realtime_events WHERE event='trade'")).fetchone()
         self.assertEqual(events[0],300)
+
+    async def test_retention_keeps_recent_trades_per_market_in_short_batches(self):
+        from app.collectors import market_streams
+        other=Market('56',TOKEN,'binance-alpha','ALPHA_OTHERUSDT','USDT','OTHER')
+        cutoff=1790317783000-86400000
+        rows=[(self.store.key(MARKET.storage),'expired',cutoff-1,'{}'),
+              (self.store.key(MARKET.storage),'edge',cutoff,'{}')]
+        rows.extend((self.store.key(MARKET.storage),f'recent:{index}',cutoff+index+1,'{}')
+                    for index in range(7))
+        rows.extend(((self.store.key(other.storage),'other-old',cutoff-1,'{}'),
+                     (self.store.key(other.storage),'other-edge',cutoff,'{}')))
+        await self.store.db.executemany('INSERT INTO trades VALUES (?,?,?,?)',rows)
+        await self.store.db.commit()
+        with patch.object(market_streams,'RETAINED_TRADES',5), \
+             patch.object(market_streams,'RETENTION_DELETE_BATCH',2), \
+             patch.object(self.store.db,'executemany',wraps=self.store.db.executemany) as bulk:
+            await self.processor._prune_market_trades(self.store,MARKET.storage,cutoff)
+            await self.processor._prune_market_trades(self.store,other.storage,cutoff)
+        kept=await self.store.fetchall('SELECT id FROM trades WHERE asset=? ORDER BY t',
+                                       (self.store.key(MARKET.storage),))
+        other_kept=await self.store.fetchall('SELECT id FROM trades WHERE asset=? ORDER BY t',
+                                             (self.store.key(other.storage),))
+        self.assertEqual([row[0] for row in kept],[f'recent:{index}' for index in range(2,7)])
+        self.assertEqual([row[0] for row in other_kept],['other-edge'])
+        deletes=[call for call in bulk.call_args_list if call.args[0].startswith('DELETE FROM trades')]
+        self.assertGreaterEqual(len(deletes),3)
+        self.assertTrue(all(0<len(call.args[1])<=2 for call in deletes))
+
+    async def test_retention_rechecks_count_after_other_writer_removes_recent_rows(self):
+        from app.collectors import market_streams
+        asset=self.store.key(MARKET.storage)
+        await self.store.db.executemany('INSERT INTO trades VALUES (?,?,?,?)',
+            [(asset,f'trade:{index}',index,'{}') for index in range(1,8)])
+        await self.store.db.commit()
+        fetchall=self.store.fetchall
+        changed=False
+        async def concurrent_delete(query,parameters=()):
+            nonlocal changed
+            rows=await fetchall(query,parameters)
+            if 'ORDER BY t DESC,rowid DESC LIMIT ? OFFSET ?' in query and not changed:
+                changed=True
+                with closing(sqlite3.connect(self.store.path)) as writer, writer:
+                    writer.execute('DELETE FROM trades WHERE asset=? AND id IN (?,?)',
+                                   (asset,'trade:6','trade:7'))
+            return rows
+        with patch.object(market_streams,'RETAINED_TRADES',5), \
+             patch.object(self.store,'fetchall',side_effect=concurrent_delete):
+            await self.processor._prune_market_trades(self.store,MARKET.storage,0)
+        self.assertTrue(changed)
+        kept=await fetchall('SELECT id FROM trades WHERE asset=? ORDER BY t',(asset,))
+        self.assertEqual([row[0] for row in kept],[f'trade:{index}' for index in range(1,6)])
+
+    async def test_retention_never_deletes_a_reused_rowid(self):
+        asset=self.store.key(MARKET.storage)
+        await self.store.db.execute('INSERT INTO trades VALUES (?,?,?,?)',(asset,'expired',1,'{}'))
+        await self.store.db.commit()
+        fetchall=self.store.fetchall
+        changed=False
+        async def replace_selected_row(query,parameters=()):
+            nonlocal changed
+            rows=await fetchall(query,parameters)
+            if 'WHERE asset=? AND t<?' in query and not changed:
+                changed=True
+                with closing(sqlite3.connect(self.store.path)) as writer, writer:
+                    writer.execute('DELETE FROM trades WHERE asset=? AND id=?',(asset,'expired'))
+                    writer.execute('INSERT INTO trades(rowid,asset,id,t,body) VALUES (?,?,?,?,?)',
+                                   (rows[0][0],asset,'fresh',100,'{}'))
+            return rows
+        with patch.object(self.store,'fetchall',side_effect=replace_selected_row):
+            await self.processor._prune_market_trades(self.store,MARKET.storage,50)
+        self.assertTrue(changed)
+        self.assertTrue(await self.store.has_trade(MARKET.storage,'fresh'))
+
+    async def test_retention_failure_does_not_replay_committed_quote(self):
+        with patch.object(self.processor,'_prune_market_trades',AsyncMock(side_effect=RuntimeError('cleanup'))), \
+             patch('builtins.print'):
+            await self.processor.flush([('quote',MARKET,{'price':1,'sourceEventAt':100})])
+        self.assertEqual(len(await self.events('price')),1)
+        self.assertEqual((await self.store.get('market-quote',MARKET.storage))['price'],1)
+        self.assertEqual(self.processor._last_prune['56'],1790317783000)
 
     async def test_pool_history_never_calls_token_usd_provider(self):
         from app.api import candles

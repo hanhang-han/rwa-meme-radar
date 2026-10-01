@@ -87,7 +87,7 @@ class RpcTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await collector.rpc('eth_getLogs', [{}]), [])
         collector.ws_call.assert_awaited_once_with(collector.ws, 'eth_getLogs', [{}])
 
-    async def test_wrong_http_chain_never_supplies_replay_logs(self):
+    async def test_wrong_bnb_http_chain_fails_replay_without_using_live_wss(self):
         methods = []
 
         def respond(request):
@@ -100,10 +100,32 @@ class RpcTransportTests(unittest.IsolatedAsyncioTestCase):
         collector.ws = object()
         collector.ws_call = AsyncMock(return_value=[])
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as collector.http:
-            self.assertEqual(await collector.rpc('eth_getLogs', [{}]), [])
-            self.assertEqual(await collector.rpc('eth_getLogs', [{}]), [])
+            with self.assertRaisesRegex(ValueError, 'wrong-http-chain-id'):
+                await collector.rpc('eth_getLogs', [{}])
         self.assertEqual(methods, ['eth_chainId'])
-        self.assertEqual(collector.ws_call.await_count, 2)
+        collector.ws_call.assert_not_awaited()
+        self.assertFalse(collector.http_chain_verified)
+
+    async def test_bnb_http_log_failure_never_falls_back_to_live_wss(self):
+        methods = []
+
+        def respond(request):
+            method = json.loads(request.content)['method']
+            methods.append(method)
+            if method == 'eth_getLogs':
+                return httpx.Response(503)
+            return httpx.Response(200, json={'result': '0x38'})
+
+        collector = ChainPoolStream('56')
+        collector.rpc_interval = 0
+        collector.ws = object()
+        collector.ws_call = AsyncMock(return_value=[])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as collector.http:
+            with self.assertRaises(httpx.HTTPStatusError):
+                await collector.rpc('eth_getLogs', [{}])
+        self.assertEqual(methods, ['eth_chainId', 'eth_getLogs'])
+        collector.ws_call.assert_not_awaited()
+        self.assertFalse(collector.http_fallback_until)
         self.assertFalse(collector.http_chain_verified)
 
     async def test_wrong_http_chain_without_wss_fails_closed(self):
@@ -1165,6 +1187,138 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(delays, [2, 4, 2])
         self.assertEqual(self.collector.reconnects, 3)
+
+    async def test_bnb_http_replay_survives_wss_reconnect_and_stops_on_shutdown(self):
+        collector = ChainPoolStream('56')
+        collector.s = self.store
+        collector.pools = {POOL: {'pool': POOL}}
+        collector.last_prune = self.at
+        collector.init = AsyncMock()
+        collector.catalogue = AsyncMock(return_value=False)
+        collector.schedule_status_fact = lambda *_, **__: None
+        await self.store.db.execute('''CREATE TABLE chain_stream_logs (
+            chain TEXT NOT NULL, id TEXT NOT NULL, pool TEXT NOT NULL,
+            block INTEGER NOT NULL, hash TEXT NOT NULL, at INTEGER NOT NULL,
+            body TEXT NOT NULL, processed INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(chain,id))''')
+        await self.store.db.commit()
+        await self.store.put('chain-stream-cursor', 'pools', {
+            'block': 100, 'hash': hex(100)})
+        await self.store.put('chain-stream-cursor', 'pools-live', {
+            'block': 199, 'hash': hex(199), 'coverageFrom': 199})
+        replay_started = asyncio.Event()
+        allow_replay = asyncio.Event()
+        first_closed = asyncio.Event()
+        second_connected = asyncio.Event()
+
+        async def rpc(method, params):
+            if method == 'eth_getLogs':
+                replay_started.set()
+                await allow_replay.wait()
+                return []
+            block = 1000 if params[0] == 'latest' else int(params[0], 16)
+            return {'number': hex(block), 'hash': hex(block),
+                    'timestamp': hex(self.at // 1000)}
+
+        async def reader(ws):
+            if ws == 'first':
+                await first_closed.wait()
+                raise RuntimeError('WSS 1013')
+            await asyncio.Future()
+
+        async def ws_call(_ws, method, _params):
+            return hex(56) if method == 'eth_chainId' else 'subscription'
+
+        class SocketContext:
+            def __init__(self, name):
+                self.name = name
+
+            async def __aenter__(self):
+                if self.name == 'second':
+                    second_connected.set()
+                return self.name
+
+            async def __aexit__(self, *_):
+                return False
+
+        collector.rpc = rpc
+        collector.reader = reader
+        collector.ws_call = ws_call
+        collector.recover_live_queue = AsyncMock()
+        with patch('app.collectors.chain_stream.websockets.connect', side_effect=[
+                SocketContext('first'), SocketContext('second')]):
+            run_task = asyncio.create_task(collector.run())
+            replay_task = None
+            try:
+                await asyncio.wait_for(replay_started.wait(), 3)
+                replay_task = collector.replay_task
+                self.assertIsNotNone(replay_task)
+                first_closed.set()
+                await asyncio.wait_for(second_connected.wait(), 4)
+                self.assertIs(collector.replay_task, replay_task)
+                self.assertFalse(replay_task.done())
+                self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 199)
+                allow_replay.set()
+
+                async def wait_for_verified_range():
+                    while True:
+                        row = await self.store.get('chain-stream-cursor', 'pools-live')
+                        if row['block'] == 499:
+                            return
+                        await asyncio.sleep(.01)
+
+                await asyncio.wait_for(wait_for_verified_range(), 3)
+            finally:
+                allow_replay.set()
+                run_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(run_task, 3)
+                await collector.close()
+            self.assertIsNone(collector.replay_task)
+            self.assertIsNotNone(replay_task)
+            self.assertTrue(replay_task.done())
+
+    async def test_bnb_shutdown_cancels_inflight_http_replay(self):
+        collector = ChainPoolStream('56')
+        collector.init = AsyncMock()
+        collector.catalogue = AsyncMock(return_value=False)
+        collector.schedule_status_fact = lambda *_, **__: None
+        collector.recover_live_queue = AsyncMock()
+        started = asyncio.Event()
+
+        async def replay():
+            started.set()
+            await asyncio.Future()
+
+        async def reader(_):
+            await asyncio.Future()
+
+        async def ws_call(_ws, method, _params):
+            return hex(56) if method == 'eth_chainId' else 'subscription'
+
+        class SocketContext:
+            async def __aenter__(self):
+                return object()
+
+            async def __aexit__(self, *_):
+                return False
+
+        collector.reconcile = replay
+        collector.reader = reader
+        collector.ws_call = ws_call
+        with patch('app.collectors.chain_stream.websockets.connect', return_value=SocketContext()):
+            run_task = asyncio.create_task(collector.run())
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                replay_task = collector.replay_task
+                self.assertIsNotNone(replay_task)
+            finally:
+                run_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(run_task, 3)
+        self.assertTrue(replay_task.cancelled())
+        self.assertIsNone(collector.replay_task)
+        self.assertIsNone(collector.http)
 
     async def test_long_recovery_publishes_queue_progress_before_resubscription(self):
         self.collector.queue = asyncio.Queue(maxsize=65)

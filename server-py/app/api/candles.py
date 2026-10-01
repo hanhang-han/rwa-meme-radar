@@ -13,7 +13,7 @@ import httpx
 
 from fastapi import APIRouter, HTTPException, Query
 
-from ..db import store, ResearchStore
+from ..db import store, ResearchStore, CANDLE_UPDATE_WHERE
 from ..okx_client import okx_get, QuotaExceeded
 from ..gecko_candles import fetch_candles as gecko_candles
 
@@ -182,11 +182,11 @@ async def _put_exchange_history(s,storage,bar,rows,key,request_started):
             if latest.get('lastSourceEventAt',0)>request_started:
                 rows=[row for row in rows if row.get('confirmed')]
             if rows:
-                await s.db.executemany('''INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
+                await s.db.executemany(f'''INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(asset,bar,openTime) DO UPDATE SET
                     open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,
                     volume=excluded.volume,volumeUsd=excluded.volumeUsd,confirmed=excluded.confirmed
-                    WHERE candles.confirmed=0 OR excluded.confirmed=1''',
+                    WHERE {CANDLE_UPDATE_WHERE}''',
                     [(s.key(storage),bar,row['t'],row['o'],row['h'],row['l'],row['c'],row.get('v'),row.get('vu'),int(bool(row.get('confirmed')))) for row in rows])
                 latest.update(lastHistoryRequestAt=request_started,
                               lastHistoryFrom=min(row['t'] for row in rows),

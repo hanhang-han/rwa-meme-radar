@@ -51,6 +51,16 @@ CREATE TABLE IF NOT EXISTS comparison_samples (
 CREATE INDEX IF NOT EXISTS comparison_samples_time ON comparison_samples(scope,subject,t);
 """
 
+# A replayed REST window often contains hundreds of unchanged closed bars.
+# NULL-safe comparisons suppress those updates and their SQLite write work.
+# An unconfirmed response must never downgrade a confirmed live bar; a later
+# confirmed correction can still replace it.
+CANDLE_UPDATE_WHERE = """(candles.confirmed=0 OR excluded.confirmed=1) AND (
+    candles.open IS NOT excluded.open OR candles.high IS NOT excluded.high OR
+    candles.low IS NOT excluded.low OR candles.close IS NOT excluded.close OR
+    candles.volume IS NOT excluded.volume OR candles.volumeUsd IS NOT excluded.volumeUsd OR
+    candles.confirmed IS NOT excluded.confirmed)"""
+
 # All chain scopes share one SQLite file. A per-connection lock still allows
 # 196/56/4663 writers in this process to collide with each other, especially
 # when every scheduled task starts at boot. Serialize writes process-wide;
@@ -918,12 +928,15 @@ class ResearchStore:
         }
 
     async def put_candles(self, asset: str, bar: str, rows: list) -> None:
+        if not rows:
+            return
         async with self._guard_write():
             await self.db.executemany(
-                """INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
+                f"""INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(asset,bar,openTime) DO UPDATE SET
                    open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,
-                   volume=excluded.volume,volumeUsd=excluded.volumeUsd,confirmed=excluded.confirmed""",
+                   volume=excluded.volume,volumeUsd=excluded.volumeUsd,confirmed=excluded.confirmed
+                   WHERE {CANDLE_UPDATE_WHERE}""",
                 [
                     (self.key(asset), bar, r["t"], r["o"], r["h"], r["l"], r["c"],
                      r.get("v"), r.get("vu"), 1 if r.get("confirmed") else 0)
