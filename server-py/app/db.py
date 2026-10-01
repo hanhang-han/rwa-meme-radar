@@ -9,6 +9,8 @@ import sqlite3
 import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Callable
 
 from .realtime_schema import REALTIME_SCHEMA, trigger_schema
 
@@ -152,6 +154,28 @@ def write_lock_snapshot():
 
 
 _MISSING = object()
+
+
+@dataclass(frozen=True)
+class ObservationCheckpoint:
+    """A collector result decided from the asset actually committed."""
+
+    domain: str
+    key: str
+    now: int | Callable[[], int]
+    decide: Callable[[dict, int], tuple[bool, str | None]]
+
+
+def _checkpoint_value(previous: dict, domain: str, key: str, *, success: bool,
+                      reason: str | None, now: int, retry_ms: int | None) -> dict:
+    ident = f'{domain}:{key}'
+    failures = 0 if success else min(10, (previous.get('failureCount') or 0) + 1)
+    return {**previous, 'id': ident, 'domain': domain, 'key': key,
+            'lastAttemptAt': now,
+            'lastSuccessAt': now if success else previous.get('lastSuccessAt'),
+            'failureCount': failures, 'reason': reason,
+            'nextRetryAt': 0 if success else now + (
+                retry_ms or min(3_600_000, 60_000 * 2 ** failures))}
 
 
 def _same_market_field(value, field, field_value, observed, field_sources, maps,
@@ -350,31 +374,35 @@ class ResearchStore:
         concurrent success. The private connection keeps unrelated reads off
         this transaction's queue; contention is retried outside the lock.
         """
-        ident = f'{domain}:{key}'
         connection = await self._checkpoint_connection()
         async def write():
             async with self._guard_write(connection):
                 await connection.execute('BEGIN IMMEDIATE')
-                rows = await connection.execute_fetchall(
-                    'SELECT body FROM facts WHERE kind=? AND id=?',
-                    (self.key('collector-job'), ident),
-                )
-                row = rows[0] if rows else None
-                previous = json.loads(row[0]) if row else {}
-                failures = 0 if success else min(10, (previous.get('failureCount') or 0) + 1)
-                value = {**previous, 'id': ident, 'domain': domain, 'key': key,
-                         'lastAttemptAt': now,
-                         'lastSuccessAt': now if success else previous.get('lastSuccessAt'),
-                         'failureCount': failures, 'reason': reason,
-                         'nextRetryAt': 0 if success else now + (
-                             retry_ms or min(3_600_000, 60_000 * 2 ** failures))}
-                await connection.execute(
-                    'INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body',
-                    (self.key('collector-job'), ident, json.dumps(value, ensure_ascii=False)),
-                )
+                value = await self._write_checkpoint_in_transaction(
+                    connection, domain, key, success=success, reason=reason,
+                    now=now, retry_ms=retry_ms)
                 await connection.commit()
                 return value
         return await retry_busy_write(write)
+
+    async def _write_checkpoint_in_transaction(self, connection, domain: str,
+                                               key: str, *, success: bool,
+                                               reason: str | None, now: int,
+                                               retry_ms: int | None = None) -> dict:
+        """Caller owns the writer transaction and its rollback/commit."""
+        ident = f'{domain}:{key}'
+        rows = await connection.execute_fetchall(
+            'SELECT body FROM facts WHERE kind=? AND id=?',
+            (self.key('collector-job'), ident),
+        )
+        previous = json.loads(rows[0][0]) if rows else {}
+        value = _checkpoint_value(previous, domain, key, success=success,
+                                  reason=reason, now=now, retry_ms=retry_ms)
+        await connection.execute(
+            'INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body',
+            (self.key('collector-job'), ident, json.dumps(value, ensure_ascii=False)),
+        )
+        return value
 
     async def patch_fact(self, kind: str, id: str, patch: dict) -> dict:
         """Merge selected fields atomically without rewriting unrelated data.
@@ -403,7 +431,7 @@ class ResearchStore:
     async def merge_asset_observation(
         self, id: str, base_patch: dict, timed_fields: dict[str, tuple[object, float]],
         sample: tuple[float, float | None, float] | None = None,
-        *, return_changed: bool = False,
+        *, return_changed: bool = False, checkpoint: ObservationCheckpoint | None = None,
     ) -> dict | tuple[dict, bool]:
         """Atomically merge a quote and its optional five-minute sample.
 
@@ -414,12 +442,13 @@ class ResearchStore:
         """
         return await retry_busy_write(
             lambda: self._merge_asset_observation_once(
-                id, base_patch, timed_fields, sample, return_changed=return_changed))
+                id, base_patch, timed_fields, sample, return_changed=return_changed,
+                checkpoint=checkpoint))
 
     async def _merge_asset_observation_once(
         self, id: str, base_patch: dict, timed_fields: dict[str, tuple[object, float]],
         sample: tuple[float, float | None, float] | None = None,
-        *, return_changed: bool = False,
+        *, return_changed: bool = False, checkpoint: ObservationCheckpoint | None = None,
     ) -> dict | tuple[dict, bool]:
         async with self._guard_write():
             await self.db.execute("BEGIN IMMEDIATE")
@@ -495,6 +524,12 @@ class ResearchStore:
                                               (self.key(id),bucket,json.dumps({**evidence,'currency':value.get('priceCurrency') or 'USD'})))
                     else:
                         await self.db.execute('DELETE FROM sample_evidence WHERE asset=? AND t=?',(self.key(id),bucket))
+                if checkpoint is not None:
+                    checkpoint_at = checkpoint.now() if callable(checkpoint.now) else checkpoint.now
+                    success, reason = checkpoint.decide(value, checkpoint_at)
+                    await self._write_checkpoint_in_transaction(
+                        self.db, checkpoint.domain, checkpoint.key,
+                        success=success, reason=reason, now=checkpoint_at)
                 await self.db.commit()
                 return (value, asset_changed or sample_changed) if return_changed else value
             except BaseException:

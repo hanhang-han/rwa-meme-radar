@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock,patch
 
 from app.db import ResearchStore
 from app.state import DashboardData
-from app.comparison_service import ComparisonBatch,refresh_comparisons
+from app.comparison_service import ComparisonBatch,new_history_rows,refresh_comparisons
 from app.collectors.baskets import refresh_baskets
 from tests.test_comparisons import stock,NOW
 
@@ -116,6 +116,61 @@ class DerivationBatchingTests(unittest.IsolatedAsyncioTestCase):
         row=('subject','fingerprint',NOW,{'at':NOW,'value':5})
         self.assertEqual(await self.s.comparison_samples_batch([row]),1)
         self.assertEqual(await self.s.comparison_samples_batch([row]),0)
+
+    async def test_history_prefilter_keeps_only_missing_fingerprints(self):
+        existing=('subject','existing',NOW,{'at':NOW,'value':5})
+        fresh=('subject','fresh',NOW+1,{'at':NOW+1,'value':6})
+        other=('other','existing',NOW+1,{'at':NOW+1,'value':7})
+        await self.s.comparison_samples_batch([existing])
+        batch=ComparisonBatch(self.s,{})
+        self.assertEqual(await new_history_rows(batch,[existing,fresh,fresh,other]),[fresh,other])
+        self.assertEqual(await self.s.comparison_samples_batch(
+            await new_history_rows(batch,[existing,fresh,fresh,other])),2)
+        self.assertEqual(await new_history_rows(batch,[existing,fresh,other]),[])
+        many=[('bulk',str(i),NOW+i,{'at':NOW+i}) for i in range(401)]
+        self.assertEqual(await new_history_rows(batch,many),many)
+        self.assertEqual(await self.s.comparison_samples_batch(many),401)
+        self.assertEqual(await new_history_rows(batch,many),[])
+
+    async def test_history_prefilter_does_not_trust_uncommitted_row(self):
+        row=('subject','pending',NOW,{'at':NOW,'value':5})
+        batch=ComparisonBatch(self.s,{})
+        async with self.s._guard_write():
+            await self.s.db.execute('BEGIN IMMEDIATE')
+            await self.s.db.execute('INSERT INTO comparison_samples VALUES (?,?,?,?,?)',
+                                    (self.s.scope,row[0],row[1],row[2],json.dumps(row[3])))
+            # A separate read connection must not see this pending insert.
+            self.assertEqual(await new_history_rows(batch,[row]),[row])
+            await self.s.db.rollback()
+        self.assertEqual(await new_history_rows(batch,[row]),[row])
+
+    async def test_memory_store_keeps_idempotent_insert_fallback(self):
+        memory=await ResearchStore(':memory:','196').connect()
+        row=('subject','fingerprint',NOW,{'at':NOW})
+        try:
+            self.assertEqual(await new_history_rows(memory,[row]),[row])
+            self.assertEqual(await memory.comparison_samples_batch([row]),1)
+            self.assertEqual(await new_history_rows(memory,[row]),[row])
+            self.assertEqual(await memory.comparison_samples_batch([row]),0)
+        finally:
+            await memory.close()
+
+    async def test_unchanged_full_refresh_does_not_request_history_writer(self):
+        class Data:
+            assets=[]
+            relations=[]
+            def stock_views(self,include_comparisons=True):
+                return [stock()]
+        with patch('app.comparison_service.store',AsyncMock(return_value=self.s)), \
+             patch('app.comparison_service.time.time',return_value=NOW/1000), \
+             patch('app.comparison_service.broadcast'), \
+             patch.object(self.s,'comparison_samples_batch',wraps=self.s.comparison_samples_batch) as write:
+            first=await refresh_comparisons(data=Data())
+            initial_calls=write.await_count
+            second=await refresh_comparisons(data=Data())
+        self.assertGreater(first['observations'],0)
+        self.assertEqual(second['observations'],0)
+        self.assertEqual(write.await_count,initial_calls)
 
     async def test_comparison_history_chunks_release_writer_and_replay_safely(self):
         rows=[('subject',str(i),NOW+i,{'at':NOW+i,'value':i})for i in range(520)]

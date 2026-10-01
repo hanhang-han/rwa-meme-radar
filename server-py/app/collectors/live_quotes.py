@@ -12,7 +12,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..db import store
+from ..db import ObservationCheckpoint, store
 from ..demand_leases import all_leases
 from ..okx_client import okx_post, request_lane, QuotaExceeded
 from ..stream_hub import broadcast
@@ -52,6 +52,24 @@ def quote_due(asset, job, now, interval):
     return not fresh_price(asset, now, interval) or due(job, now, interval)
 
 
+def _is_busy(error):
+    code = getattr(error, 'sqlite_errorcode', None)
+    return code == sqlite3.SQLITE_BUSY or (
+        code is None and 'database is locked' in str(error).lower())
+
+
+async def _checkpoint_failure(s, token, reason, totals, *, count_failure=True):
+    try:
+        await checkpoint(s, 'quote', token, success=False, reason=reason)
+    except sqlite3.OperationalError as error:
+        if not _is_busy(error):
+            raise
+        # The prior checkpoint is still durable and due; other assets in the
+        # same provider response can continue independently.
+        if count_failure:
+            totals['failed'] += 1
+
+
 async def _fetch_entries(entries, lane, priority='background'):
     """Batch across chains, accepting only requested chain/address identities."""
     totals = result()
@@ -73,7 +91,8 @@ async def _fetch_entries(entries, lane, priority='background'):
         except Exception as error:
             totals['failed'] += len(batch)
             for c, t in batch:
-                await checkpoint(stores[c], 'quote', t, success=False, reason=type(error).__name__)
+                await _checkpoint_failure(stores[c], t, type(error).__name__, totals,
+                                          count_failure=False)
             continue
         answered = set()
         for row in rows:
@@ -85,16 +104,34 @@ async def _fetch_entries(entries, lane, priority='background'):
                 usable = float(row.get('price')) > 0 and float(row.get('price')) < float('inf')
             except (TypeError, ValueError):
                 usable = False
-            updated, changed = await save_asset(stores[c], row, return_changed=True)
-            if not updated or not usable:
-                continue
-            if baseline_age is not None and not fresh_price(updated, now_ms(), baseline_age):
+            decision = [None]
+
+            def decide(asset, attempted_at):
+                if not usable:
+                    decision[0] = False, 'missing-price-row'
+                elif baseline_age is not None and not fresh_price(asset, attempted_at, baseline_age):
+                    decision[0] = False, 'stale-price-observation'
+                else:
+                    decision[0] = True, None
+                return decision[0]
+
+            try:
+                updated, changed = await save_asset(
+                    stores[c], row, return_changed=True,
+                    checkpoint=ObservationCheckpoint('quote', t, now_ms, decide))
+            except sqlite3.OperationalError as error:
+                # A busy row must not abandon every later asset in this API
+                # batch. No checkpoint was committed, so it remains due.
+                if not _is_busy(error):
+                    raise
+                totals['failed'] += 1
                 answered.add((c, t))
-                totals['unsupported'] += 1
-                await checkpoint(stores[c], 'quote', t, success=False, reason='stale-price-observation')
                 continue
             answered.add((c, t))
-            await checkpoint(stores[c], 'quote', t, success=True)
+            success, _reason = decision[0]
+            if not success:
+                totals['unsupported'] += 1
+                continue
             totals['accepted'] += 1
             if not changed:
                 continue
@@ -108,7 +145,7 @@ async def _fetch_entries(entries, lane, priority='background'):
             })
         for c, t in expected - answered:
             totals['unsupported'] += 1
-            await checkpoint(stores[c], 'quote', t, success=False, reason='missing-price-row')
+            await _checkpoint_failure(stores[c], t, 'missing-price-row', totals)
     return totals
 
 

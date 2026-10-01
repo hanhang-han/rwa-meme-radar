@@ -1,5 +1,6 @@
 """Repeated OKX market observations should not create quote write traffic."""
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -8,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 os.environ['NODE_ENV'] = 'test'
 
 from app.collectors import assets, live_quotes
-from app.db import ResearchStore
+from app.db import ObservationCheckpoint, ResearchStore
 
 
 class QuoteWriteDedupTests(unittest.IsolatedAsyncioTestCase):
@@ -126,26 +127,99 @@ class QuoteWriteDedupTests(unittest.IsolatedAsyncioTestCase):
             return [self.quote(item['tokenContractAddress']) for item in request]
 
         post = AsyncMock(side_effect=fetch)
+        transactions = []
+        await self.store.db.set_trace_callback(
+            lambda sql: transactions.append(sql) if sql == 'BEGIN IMMEDIATE' else None)
         with patch.object(live_quotes, 'store', scoped_store), \
              patch.object(live_quotes, 'okx_post', post), \
              patch('app.collectors.queue.now_ms', side_effect=lambda: clock[0]), \
+             patch.object(live_quotes, 'now_ms', side_effect=lambda: clock[0]), \
              patch.object(live_quotes, 'broadcast') as broadcast:
             first = await live_quotes._fetch_entries(entries, 'base-stocks')
             initial_outbox = await self.outbox_count()
             initial_changes = self.store.db.total_changes
-            initial_checkpoint_changes = self.store._checkpoint_db.total_changes
+            initial_transactions = len(transactions)
             clock[0] += 300_000
             second = await live_quotes._fetch_entries(entries, 'base-stocks')
 
         self.assertEqual((first['requested'], first['accepted'], first['updated']), (6, 300, 300))
         self.assertEqual((second['requested'], second['accepted'], second['updated']), (6, 300, 0))
         self.assertEqual(await self.outbox_count(), initial_outbox)
-        self.assertEqual(self.store.db.total_changes - initial_changes, 0)
-        self.assertEqual(self.store._checkpoint_db.total_changes - initial_checkpoint_changes, 300)
+        self.assertEqual(self.store.db.total_changes - initial_changes, 300)
+        self.assertEqual(len(transactions) - initial_transactions, 300)
+        self.assertIsNone(self.store._checkpoint_db)
         self.assertEqual(broadcast.call_count, 300)
         self.assertEqual(post.await_count, 12)
         self.assertEqual((await self.store.get('collector-job', 'quote:' + tokens[0]))['lastSuccessAt'],
                          clock[0])
+
+    async def test_checkpoint_failure_rolls_back_quote_sample_and_outbox(self):
+        token = '0x' + '5' * 40
+        original = self.store._write_checkpoint_in_transaction
+
+        async def fail_after_checkpoint(*args, **kwargs):
+            await original(*args, **kwargs)
+            raise RuntimeError('checkpoint failed before commit')
+
+        checkpoint = ObservationCheckpoint(
+            'quote', token, self.at, lambda _asset, _at: (True, None))
+        with patch.object(self.store, '_write_checkpoint_in_transaction', fail_after_checkpoint):
+            with self.assertRaisesRegex(RuntimeError, 'checkpoint failed before commit'):
+                await assets.save_asset(self.store, self.quote(token), checkpoint=checkpoint)
+        self.assertIsNone(await self.store.get('asset', token))
+        self.assertIsNone(await self.store.get('collector-job', 'quote:' + token))
+        self.assertEqual(await self.store.samples(token), [])
+        self.assertEqual(await self.outbox_count(), 0)
+        self.assertFalse(self.store.db.in_transaction)
+
+    async def test_missing_quote_preserves_prior_success_and_records_failure(self):
+        token = '0x' + '6' * 40
+        await assets.save_asset(self.store, self.quote(token))
+        await self.store.checkpoint_job('quote', token, success=True, now=self.at)
+        row = self.quote(token, price='0', tokenName='Renamed')
+
+        async def scoped_store(_chain):
+            return self.store
+
+        with patch.object(live_quotes, 'store', scoped_store), \
+             patch.object(live_quotes, 'okx_post', AsyncMock(return_value=[row])), \
+             patch.object(live_quotes, 'broadcast') as broadcast:
+            result = await live_quotes._fetch_entries([('196', token)], 'base-stocks')
+
+        self.assertEqual((result['accepted'], result['unsupported']), (0, 1))
+        saved = await self.store.get('asset', token)
+        job = await self.store.get('collector-job', 'quote:' + token)
+        self.assertEqual(saved['price'], 2)
+        self.assertEqual(saved['name'], 'Renamed')
+        self.assertEqual(job['lastSuccessAt'], self.at)
+        self.assertEqual(job['reason'], 'missing-price-row')
+        self.assertEqual(job['failureCount'], 1)
+        broadcast.assert_not_called()
+
+    async def test_one_busy_asset_does_not_interrupt_rest_of_batch(self):
+        first = '0x' + '7' * 40
+        second = '0x' + '8' * 40
+        real_save = assets.save_asset
+
+        async def save_with_one_busy(store, row, **kwargs):
+            if row['tokenContractAddress'] == first:
+                raise sqlite3.OperationalError('database is locked')
+            return await real_save(store, row, **kwargs)
+
+        async def scoped_store(_chain):
+            return self.store
+
+        with patch.object(live_quotes, 'store', scoped_store), \
+             patch.object(live_quotes, 'okx_post', AsyncMock(return_value=[
+                 self.quote(first), self.quote(second)])), \
+             patch.object(live_quotes, 'save_asset', save_with_one_busy), \
+             patch.object(live_quotes, 'broadcast'):
+            result = await live_quotes._fetch_entries(
+                [('196', first), ('196', second)], 'base-stocks')
+
+        self.assertEqual((result['accepted'], result['failed'], result['unsupported']), (1, 1, 0))
+        self.assertIsNone(await self.store.get('collector-job', 'quote:' + first))
+        self.assertIsNotNone(await self.store.get('collector-job', 'quote:' + second))
 
 
 if __name__ == '__main__':

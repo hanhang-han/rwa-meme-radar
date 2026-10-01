@@ -34,7 +34,7 @@ def _num(value):
         return None
 
 
-async def save_asset(s, row: dict, *, return_changed: bool = False):
+async def save_asset(s, row: dict, *, return_changed: bool = False, checkpoint=None):
     """Merge an OKX quote row, optionally reporting a durable data change."""
     token = (row.get("tokenContractAddress") or "").lower()
     if not token.startswith("0x") or len(token) != 42:
@@ -90,8 +90,11 @@ async def save_asset(s, row: dict, *, return_changed: bool = False):
     price = timed_fields.get("price", (None, observed))[0]
     cap = timed_fields.get("marketCap", (old.get("marketCap"), observed))[0]
     sample = (price, cap, observed) if price is not None else None
+    options = {'return_changed': return_changed}
+    if checkpoint is not None:
+        options['checkpoint'] = checkpoint
     return await s.merge_asset_observation(token, base_patch, timed_fields, sample,
-                                           return_changed=return_changed)
+                                           **options)
 
 
 def price_changed(old: dict | None, new: dict | None) -> bool:

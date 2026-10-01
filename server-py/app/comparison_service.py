@@ -4,6 +4,9 @@ import asyncio
 import json
 import time
 import copy
+from pathlib import Path
+
+import aiosqlite
 
 from .comparisons import (VERSION, MAX_AGE, MAX_SKEW, independent_quote, pool_spread,
                           relative_point, relative_return, stock_premium, unavailable, independent_stock_row)
@@ -216,6 +219,44 @@ class ComparisonBatch:
         await asyncio.sleep(0)
 
 
+async def new_history_rows(s, rows):
+    """Avoid acquiring SQLite's writer for observations already persisted.
+
+    The primary key remains the final arbiter if another process inserts a
+    sample after this read. A covering-index lookup keeps the read bounded to
+    the candidate fingerprints instead of loading a subject's full history.
+    """
+    unique = {}
+    for row in rows:
+        if row:
+            unique.setdefault((row[0], row[1]), row)
+    if not unique:
+        return []
+    base = s.store if isinstance(s, ComparisonBatch) else s
+    if not isinstance(base, ResearchStore):
+        return list(unique.values())
+    if base.path == ':memory:' or base.path.startswith('file::memory:'):
+        # An independent reader cannot see this connection's in-memory DB.
+        # Keep the original idempotent insert path for this rare store type.
+        return list(unique.values())
+    keys = list(unique)
+    existing = set()
+    # A separate read-only connection sees only committed rows. Reading the
+    # shared store connection could see another task's row before rollback.
+    uri = Path(base.path).resolve().as_uri() + '?mode=ro'
+    async with aiosqlite.connect(uri, uri=True,
+                                 timeout=base.busy_timeout_ms / 1000) as reader:
+        # 400 pairs plus the scope fit SQLite's older 999-variable limit.
+        for offset in range(0, len(keys), 400):
+            chunk = keys[offset:offset + 400]
+            query = ('SELECT subject,fingerprint FROM comparison_samples WHERE scope=? '
+                     'AND (subject,fingerprint) IN (VALUES ' + ','.join('(?,?)' for _ in chunk) + ')')
+            params = (base.scope, *(value for key in chunk for value in key))
+            found = await reader.execute_fetchall(query, params)
+            existing.update((row[0], row[1]) for row in found)
+    return [row for key, row in unique.items() if key not in existing]
+
+
 async def refresh_comparisons(affected=None, data=None):
     # Full calibration and event-driven subsets share one writer; an older
     # full run cannot overwrite a more recent incremental result.
@@ -292,7 +333,9 @@ async def _refresh_comparisons(affected=None, data=None):
             batches[chain].append(row)
     accepted_observations = 0
     for chain, s in stores.items():
-        accepted_observations += await s.comparison_samples_batch(batches[chain]) or 0
+        new_rows = await new_history_rows(s, batches[chain])
+        if new_rows:
+            accepted_observations += await s.comparison_samples_batch(new_rows) or 0
         batches[chain] = []
     for stock in stocks:
         chain, token = str(stock.get("chainId")), str(stock.get("tokenContractAddress") or "").lower()
@@ -366,7 +409,9 @@ async def _refresh_comparisons(affected=None, data=None):
         s.finish_subject(packet)
     for chain, s in stores.items():
         await s.flush()
-        accepted_observations += await s.comparison_samples_batch([row for row in batches[chain] if row]) or 0
+        new_rows = await new_history_rows(s, batches[chain])
+        if new_rows:
+            accepted_observations += await s.comparison_samples_batch(new_rows) or 0
     accepted = accepted_observations + changed
     return {"requested": len(stocks), "processed": processed, "changed": changed,
             "unavailable": unavailable_count, "skipped": skipped, "accepted": accepted,

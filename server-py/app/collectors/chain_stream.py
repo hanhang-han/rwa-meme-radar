@@ -830,18 +830,23 @@ class ChainPoolStream:
                         (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log)))
                 self.unsupported += 1
                 return
-            # Store unprocessed input first; a crash is safely retried by the watermark.
-            with self._measure_live_stage("rawInsert"):
-                await self._write_stream_log("INSERT OR IGNORE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,0)",
-                    (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log)))
+            raw_log = (self.chain, ident, pool["pool"], height, block_hash, at, json.dumps(log))
             topic = str((log.get("topics") or [""])[0]).lower()
             reserves = words(log.get("data"), 2) if topic == SYNC_V2.lower() else None
             sqrt = None
             accepted = False
+            swaps = []
             for token in self.bases(pool):
                 decoded = decode_swap(log, pool["token0"], token, d0, d1)
-                if not decoded:
-                    continue
+                if decoded:
+                    swaps.append((token, decoded))
+            if not swaps:
+                # Sync and unsupported logs can still mutate quotes. Keep a
+                # durable pending log before any of those separate writes.
+                with self._measure_live_stage("rawInsert"):
+                    await self._write_stream_log("INSERT OR IGNORE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,0)",
+                                                 raw_log)
+            for index, (token, decoded) in enumerate(swaps):
                 market = self.market(pool, token)
                 sqrt = int(decoded["sqrtPriceX96"]) if decoded["sqrtPriceX96"] else None
                 with self._measure_live_stage("tradeCommit"):
@@ -853,7 +858,7 @@ class ChainPoolStream:
                         "logIndex": number(log.get("logIndex", "0x0")), "pool": pool["pool"],
                         "source": "Chain RPC", "finality": "provisional", "provider": "Chain RPC",
                         "receivedAt": log.get('_receivedAt') or now_ms(),
-                    })
+                    }, raw_log=raw_log if index == 0 else None)
                 with self._measure_live_stage("assetQuote"):
                     await self.pool_asset_quote(pool, token, decoded, at, height, ident)
                 accepted = True
@@ -962,10 +967,10 @@ class ChainPoolStream:
                 "valuationOrder": order,
             })
 
-    async def commit_trade(self, market, trade):
-        return await retry_busy_write(lambda: self._commit_trade_once(market, trade))
+    async def commit_trade(self, market, trade, *, raw_log=None):
+        return await retry_busy_write(lambda: self._commit_trade_once(market, trade, raw_log=raw_log))
 
-    async def _commit_trade_once(self, market, trade):
+    async def _commit_trade_once(self, market, trade, *, raw_log=None):
         from .market_streams import BAR_MS, trade_to_candle
         from .trade_valuation import dated_usd_volume
         from ..realtime_schema import enqueue_events
@@ -1025,10 +1030,25 @@ class ChainPoolStream:
                 if _live_log_collector.get() is self:
                     self.live_trade_begin_ms.append(round(
                         (time.perf_counter() - begin_started) * 1000, 1))
+                raw_inserted = False
+                if raw_log is not None:
+                    # The first decoded Swap commits its replay input together
+                    # with the first trade/candles/outbox. A crash cannot leave
+                    # an untracked trade or a processed log missing effects.
+                    with self._measure_live_stage("rawInsert"):
+                        raw = await db.execute(
+                            "INSERT OR IGNORE INTO chain_stream_logs VALUES (?,?,?,?,?,?,?,0)", raw_log)
+                    raw_inserted = bool(raw.rowcount)
                 insert = await db.execute("INSERT OR IGNORE INTO trades VALUES (?,?,?,?)",
                     (s.key(market.storage), trade["id"], trade["t"], trade_body))
                 if not insert.rowcount:
-                    await db.rollback()
+                    # Legacy/replayed trades can exist without their raw log.
+                    # Persist that input even when the trade is a duplicate so
+                    # a later reorg can still retract it.
+                    if raw_inserted:
+                        await db.commit()
+                    else:
+                        await db.rollback()
                     return False
                 # Catalogue persists known definitions before subscription.
                 # The same registry JSON need not be rewritten for each trade.

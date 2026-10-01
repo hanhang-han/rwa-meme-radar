@@ -369,6 +369,80 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(body['volume'])
         self.assertNotIn('wallet', body)
 
+    async def test_first_swap_raw_and_derived_rows_roll_back_together(self):
+        swap = await self.prepare_logs()
+        await self.store.db.execute("""CREATE TRIGGER fail_stream_candle BEFORE INSERT ON candles
+            WHEN NEW.bar='1m' BEGIN SELECT RAISE(ABORT, 'failed-stream-candle'); END""")
+        await self.store.db.commit()
+
+        with self.assertRaisesRegex(Exception, 'failed-stream-candle'):
+            await self.collector.process_log(swap)
+        for table in ('chain_stream_logs', 'trades', 'candles', 'realtime_events'):
+            self.assertEqual((await self.store.fetchone(f'SELECT COUNT(*) FROM {table}'))[0], 0, table)
+        self.assertEqual(self.collector.processed, 0)
+        self.assertFalse(self.store._write_lock.locked())
+
+        await self.store.db.execute('DROP TRIGGER fail_stream_candle')
+        await self.store.db.commit()
+        await self.collector.process_log(swap)
+        self.assertEqual((await self.store.fetchone('SELECT processed FROM chain_stream_logs'))[0], 1)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
+
+    async def test_duplicate_trade_repairs_missing_raw_log_for_later_reorg(self):
+        swap = await self.prepare_logs()
+        await self.collector.process_log(swap)
+        event_count = (await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0]
+        await self.store.db.execute('DELETE FROM chain_stream_logs')
+        await self.store.db.commit()
+
+        await self.collector.process_log(swap)
+        self.assertEqual((await self.store.fetchone('SELECT processed FROM chain_stream_logs'))[0], 1)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0], event_count)
+
+        await self.collector.process_log({**swap, 'removed': True})
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 0)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM chain_stream_logs'))[0], 0)
+
+    async def test_post_trade_failure_leaves_pending_raw_for_idempotent_replay(self):
+        swap = await self.prepare_logs()
+        with patch.object(self.collector, 'pool_asset_quote', side_effect=RuntimeError('quote-failed')):
+            with self.assertRaisesRegex(RuntimeError, 'quote-failed'):
+                await self.collector.process_log(swap)
+        self.assertEqual((await self.store.fetchone('SELECT processed FROM chain_stream_logs'))[0], 0)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
+        event_count = (await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0]
+
+        await self.collector.process_log(swap)
+        self.assertEqual((await self.store.fetchone('SELECT processed FROM chain_stream_logs'))[0], 1)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0], event_count)
+
+    async def test_second_market_failure_replays_without_losing_first_market(self):
+        swap = await self.prepare_logs()
+        self.collector.assets = {TOKEN0: {'symbol': 'MEME'}, TOKEN1: {'symbol': 'USDG'}}
+        actual_commit = self.collector.commit_trade
+        calls = 0
+
+        async def fail_second(market, trade, *, raw_log=None):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError('second-market-failed')
+            return await actual_commit(market, trade, raw_log=raw_log)
+
+        with patch.object(self.collector, 'commit_trade', new=fail_second):
+            with self.assertRaisesRegex(RuntimeError, 'second-market-failed'):
+                await self.collector.process_log(swap)
+        self.assertEqual((await self.store.fetchone('SELECT processed FROM chain_stream_logs'))[0], 0)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
+
+        await self.collector.process_log(swap)
+        self.assertEqual((await self.store.fetchone('SELECT processed FROM chain_stream_logs'))[0], 1)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 2)
+        await self.collector.process_log({**swap, 'removed': True})
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 0)
+
     async def test_usd_anchor_merge_bypasses_busy_shared_connection(self):
         log = await self.prepare_logs()
         await self.collector._open_trade_db()
@@ -1437,16 +1511,20 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(await asyncio.to_thread(started.wait, 1))
             return result
 
-        async def observe_raw_before_trade(market, trade):
+        real_commit_trade = self.collector.commit_trade
+
+        async def observe_atomic_raw_trade(market, trade, *, raw_log=None):
+            self.assertEqual(raw_log[:2], (self.collector.chain, event_key(log)))
+            # The first Swap has no standalone raw-log commit.
             rows = await self.collector.trade_db.execute_fetchall(
                 'SELECT processed FROM chain_stream_logs WHERE chain=? AND id=?',
                 (self.collector.chain, event_key(log)))
-            self.assertEqual(rows[0][0], 0)
-            return True
+            self.assertEqual(rows, [])
+            return await real_commit_trade(market, trade, raw_log=raw_log)
 
         await self.store.db.create_function('hold_shared_reader', 0, hold_shared_reader)
         with patch.object(self.store, 'fetchone', new=intercept_fetchone), \
-             patch.object(self.collector, 'commit_trade', new=observe_raw_before_trade), \
+             patch.object(self.collector, 'commit_trade', new=observe_atomic_raw_trade), \
              patch.object(self.collector, 'pool_asset_quote', new=AsyncMock()):
             task = asyncio.create_task(self.collector.process_log(log))
             completed_while_blocked = False
@@ -2057,17 +2135,29 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_live_raw_insert_is_timed_and_retained_for_retry(self):
         log = await self.prepare_logs()
-        self.collector._write_stream_log = AsyncMock(
-            side_effect=sqlite3.OperationalError('database is locked'))
-        with self.assertRaisesRegex(sqlite3.OperationalError, 'database is locked'):
-            await self.collector.process_queued(log)
+        await self.collector._open_trade_db()
+        actual_execute = self.collector.trade_db.execute
+        attempts = 0
+
+        async def busy_raw_insert(query, *args):
+            nonlocal attempts
+            if query.startswith('INSERT OR IGNORE INTO chain_stream_logs'):
+                attempts += 1
+                raise sqlite3.OperationalError('database is locked')
+            return await actual_execute(query, *args)
+
+        with patch.object(self.collector.trade_db, 'execute', new=busy_raw_insert), \
+             patch('app.db.asyncio.sleep', new_callable=AsyncMock):
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'database is locked'):
+                await self.collector.process_queued(log)
         await self.collector.status_fact(force=True)
         status = await self.store.get('chain-stream', 'pools')
-        self.assertEqual(self.collector._write_stream_log.await_count, 4)
-        self.assertEqual(status['liveStageTimingsRecentMs']['rawInsert']['count'], 4)
+        self.assertEqual(attempts, 12)
+        self.assertEqual(status['liveStageTimingsRecentMs']['rawInsert']['count'], 12)
         self.assertNotIn('rawMarkProcessed', status['liveStageTimingsRecentMs'])
         self.assertIs(self.collector.retry_event, log)
         self.assertEqual(status['liveLogProcessingSamplesRecent'], 1)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM chain_stream_logs'))[0], 0)
 
     async def test_live_diagnostic_window_is_bounded_and_excludes_replay_lookups(self):
         cached = {'number': '0xc8', 'hash': '0xabc', 'timestamp': hex(self.at // 1000)}
