@@ -704,6 +704,12 @@ class ChainPoolStream:
         progressing. A high queue is handled by replay_under_pressure, which
         pauses the range without advancing its cursor.
         """
+        pending = self.queue.qsize() + int(self.retry_event is not None) + int(self.live_processing)
+        if pending <= REPLAY_RESUME_QUEUE_CAP:
+            # A shallow queue may never be literally empty on a busy chain.
+            # Waiting a quarter-second per page and per eight replayed logs
+            # makes a complete range slower than the catalogue reconnect.
+            max_wait = min(max_wait, .02)
         deadline = time.monotonic() + max_wait
         while not self.queue.empty() or self.live_processing:
             remaining = deadline - time.monotonic()
@@ -1668,7 +1674,6 @@ class ChainPoolStream:
                     'processedBlock': historical.get('block')}
         head = await self.rpc("eth_getBlockByNumber", ["latest", False])
         height = number(head["number"])
-        await self.backfill_pending_pools(head, limit=2)
         historical_block = historical.get("block")
         if self.replay_under_pressure():
             return {'caughtUp': False, 'head': height, 'processedBlock': historical_block}
@@ -1676,12 +1681,16 @@ class ChainPoolStream:
             # On the first dual-lane run, explicitly cover the last 300
             # blocks. A saved lane replays every missed block after a
             # disconnect, even if the backlog exceeds one bounded pass.
-            recent = await self.catch_up("pools-live", max_ranges=3, initial_depth=299, head=head)
+            # Give both the near-tip lane and newly verified individual pools
+            # one bounded turn. A large recent gap must not starve pool-specific
+            # coverage, and pool backfills must not block every recent attempt.
+            recent = await self.catch_up("pools-live", max_ranges=1, initial_depth=299, head=head)
+            await self.backfill_pending_pools(head, limit=1)
             if not recent['caughtUp']:
-                # A prolonged outage may leave more than three near-tip
-                # ranges. Spend the next RPC slot there before old history.
+                # Spend the next RPC slot on recent coverage before old history.
                 return {'caughtUp': False, 'head': height, 'processedBlock': historical_block}
             return await self.catch_up("pools", max_ranges=1, head=head)
+        await self.backfill_pending_pools(head, limit=1)
         return await self.catch_up(head=head)
 
     async def ws_call(self, ws, method, params):

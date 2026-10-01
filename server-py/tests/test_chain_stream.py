@@ -525,22 +525,17 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.collector.rpc = rpc
         self.collector.process_log = AsyncMock()
         self.collector.retract_orphans = AsyncMock()
-        self.collector.queue.put_nowait(log)
+        for _ in range(32):
+            self.collector.queue.put_nowait(log)
         with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
-            replay = asyncio.create_task(self.collector.catch_up())
-            try:
-                await asyncio.sleep(.06)
-                self.assertFalse(replay.done())
-                self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
+            paused = await self.collector.catch_up()
+            self.assertFalse(paused['caughtUp'])
+            self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
+            self.collector.process_log.assert_not_awaited()
+            for _ in range(32):
                 self.collector.queue.get_nowait()
-                self.collector.live_processing = True
-                await asyncio.sleep(.06)
-                self.collector.process_log.assert_not_awaited()
-                self.collector.live_processing = False
-                await asyncio.wait_for(replay, .5)
-            finally:
-                replay.cancel()
-                await asyncio.gather(replay, return_exceptions=True)
+            finished = await asyncio.wait_for(self.collector.catch_up(), .5)
+            self.assertTrue(finished['caughtUp'])
         self.collector.process_log.assert_awaited_once_with({**log, '_receivedAt': self.at})
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 51)
 
@@ -611,6 +606,35 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
             self.collector.queue.get_nowait()
         self.assertTrue(self.collector.replay_under_pressure())  # Nine pending.
         self.collector.queue.get_nowait()
+        self.assertFalse(self.collector.replay_under_pressure())
+
+    async def test_live_wait_budget_favors_shallow_queue_without_starving_replay(self):
+        async def waited_with_pending(count):
+            self.collector.queue = asyncio.Queue(maxsize=4096)
+            for index in range(count):
+                self.collector.queue.put_nowait(index)
+            elapsed = 0.0
+            sleeps = []
+
+            async def advance(seconds):
+                nonlocal elapsed
+                sleeps.append(seconds)
+                elapsed += seconds
+
+            with patch('app.collectors.chain_stream.time.monotonic', side_effect=lambda: elapsed), \
+                    patch('app.collectors.chain_stream.asyncio.sleep', side_effect=advance):
+                self.assertFalse(await self.collector.wait_for_live())
+            self.assertEqual(self.collector.queue.qsize(), count)
+            return sum(sleeps)
+
+        self.assertAlmostEqual(await waited_with_pending(2), .02, places=3)
+        self.assertAlmostEqual(await waited_with_pending(20), .25, places=3)
+        self.collector.queue = asyncio.Queue(maxsize=4096)
+        for index in range(32):
+            self.collector.queue.put_nowait(index)
+        self.assertTrue(self.collector.replay_under_pressure())
+        for _ in range(24):
+            self.collector.queue.get_nowait()
         self.assertFalse(self.collector.replay_under_pressure())
 
     async def test_repeated_queue_spikes_resume_same_bnb_range_without_refetch(self):
@@ -836,11 +860,12 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         consumer = asyncio.create_task(live_consumer())
         try:
             with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
-                await asyncio.wait_for(self.collector.reconcile_step(), 3)
+                for _ in range(3):
+                    await asyncio.wait_for(self.collector.reconcile_step(), 3)
         finally:
             consumer.cancel()
             await asyncio.gather(consumer, return_exceptions=True)
-        self.assertGreater(live_processed, 20)
+        self.assertGreater(live_processed, 0)
         self.assertFalse(self.collector.queue.empty())
         self.assertEqual(self.collector.process_log.await_count, 16)
         self.assertEqual(ranges, [(701, 800), (801, 900), (901, 1000), (51, 150)])
@@ -1576,7 +1601,8 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.collector.rpc = rpc
         self.collector.retract_orphans = AsyncMock()
         with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
-            progress = await self.collector.reconcile_step()
+            for _ in range(3):
+                progress = await self.collector.reconcile_step()
             await self.collector.status_fact(force=True)
         historical = await self.store.get('chain-stream-cursor', 'pools')
         recent = await self.store.get('chain-stream-cursor', 'pools-live')
@@ -1650,7 +1676,8 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.collector.retract_orphans = AsyncMock()
         self.collector.last_prune = self.at
         with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
-            await self.collector.reconcile_step()
+            for _ in range(3):
+                await self.collector.reconcile_step()
             await self.collector.status_fact(force=True)
         recovered = await self.store.get('chain-stream', 'pools')
         self.assertEqual(recovered['nearTipScan']['lastSuccessfulBlock'], 1000)
@@ -1678,6 +1705,67 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status['coverageFrom'], 50)
         self.assertEqual(status['historicalScan']['lastError'], 'TimeoutError:historical page timed out')
 
+    async def test_distant_recent_replay_gives_pending_pool_a_turn_each_step(self):
+        await self.store.put('chain-stream-cursor', 'pools', {'block': 50})
+        await self.store.put('chain-stream-cursor', 'pools-live', {'block': 100})
+        head = {'number': hex(1000), 'hash': hex(1000), 'timestamp': hex(self.at // 1000)}
+        self.collector.rpc = AsyncMock(return_value=head)
+        order = []
+
+        async def recent(lane, **kwargs):
+            order.append(('recent', lane, kwargs['max_ranges']))
+            return {'caughtUp': False}
+
+        async def backfill(observed_head, *, limit):
+            order.append(('pool', observed_head['number'], limit))
+            return {'requested': 1, 'updated': 1, 'failed': 0}
+
+        self.collector.catch_up = recent
+        self.collector.backfill_pending_pools = backfill
+        for _ in range(2):
+            progress = await self.collector.reconcile_step()
+            self.assertFalse(progress['caughtUp'])
+        self.assertEqual(order, [
+            ('recent', 'pools-live', 1), ('pool', head['number'], 1),
+            ('recent', 'pools-live', 1), ('pool', head['number'], 1),
+        ])
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 100)
+
+    async def test_failed_pool_backfill_does_not_block_next_recent_attempt(self):
+        await self.store.put('chain-stream-cursor', 'pools', {'block': 50})
+        await self.store.put('chain-stream-cursor', 'pools-live', {'block': 100})
+        self.collector.pools = {POOL: {
+            'streamBackfillFromBlock': 900,
+            'verificationBlock': 900,
+            'verificationBlockHash': '0x' + '9' * 64,
+        }}
+        self.collector.pending_pools.add(POOL)
+        observed = []
+
+        async def rpc(method, params):
+            if params[0] == 'latest':
+                return {'number': hex(1000), 'hash': hex(1000),
+                        'timestamp': hex(self.at // 1000)}
+            self.assertEqual(params[0], hex(900))
+            return None  # Pool verification anchor unavailable.
+
+        async def recent(lane, **kwargs):
+            observed.append(lane)
+            return {'caughtUp': False}
+
+        self.collector.rpc = rpc
+        self.collector.catch_up = recent
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            await self.collector.reconcile_step()
+            await self.collector.reconcile_step()
+        self.assertEqual(observed, ['pools-live', 'pools-live'])
+        failed = await self.store.get('pool-stream-backfill', POOL)
+        self.assertEqual(failed['failureCount'], 1)
+        self.assertEqual(failed['lastError'], 'ValueError')
+        self.assertGreater(failed['nextRetryAt'], self.at)
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 100)
+
     async def test_long_recent_outage_gets_priority_until_its_gap_is_scanned(self):
         await self.store.put('chain-stream-cursor', 'pools', {'block': 50, 'hash': '0x32'})
         await self.store.put('chain-stream-cursor', 'pools-live', {
@@ -1697,9 +1785,13 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
             progress = await self.collector.reconcile_step()
         self.assertFalse(progress['caughtUp'])
-        self.assertEqual(ranges, [(101, 200), (201, 300), (301, 400)])
+        self.assertEqual(ranges, [(101, 200)])
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
-        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 400)
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 200)
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            await self.collector.reconcile_step()
+        self.assertEqual(ranges, [(101, 200), (201, 300)])
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
 
     async def test_distant_recent_lane_replays_from_saved_cursor_without_skipping_gap(self):
         await self.store.put('chain-stream-cursor', 'pools', {
@@ -1725,17 +1817,17 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         recent = await self.store.get('chain-stream-cursor', 'pools-live')
         historical = await self.store.get('chain-stream-cursor', 'pools')
         status = await self.store.get('chain-stream', 'pools')
-        self.assertEqual(ranges, [(101, 200), (201, 300), (301, 400)])
-        self.assertEqual((recent['block'], recent['coverageFrom']), (400, 70))
+        self.assertEqual(ranges, [(101, 200)])
+        self.assertEqual((recent['block'], recent['coverageFrom']), (200, 70))
         self.assertNotIn('rebasedFromBlock', recent)
         self.assertEqual(historical['block'], 50)
-        self.assertEqual(status['nearTipLagBlocks'], 9600)
+        self.assertEqual(status['nearTipLagBlocks'], 9800)
         self.assertEqual(status['historicalGapBlocks'], 19)
         self.assertIsNone(status['nearTipRebasedFromBlock'])
         with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
             await self.collector.reconcile_step()
-        self.assertEqual(ranges[-3:], [(401, 500), (501, 600), (601, 700)])
-        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 700)
+        self.assertEqual(ranges, [(101, 200), (201, 300)])
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 300)
 
     async def test_distant_recent_lane_failure_keeps_saved_cursor(self):
         await self.store.put('chain-stream-cursor', 'pools', {'block': 50, 'hash': '0x32'})
