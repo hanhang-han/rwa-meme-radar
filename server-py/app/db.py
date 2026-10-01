@@ -383,9 +383,9 @@ class ResearchStore:
         full-object put after that wait can restore an old price over a newer
         quote.  Patch writes re-read under a write transaction instead.
         """
-        async with self._guard_write():
-            await self.db.execute("BEGIN IMMEDIATE")
-            try:
+        async def write():
+            async with self._guard_write():
+                await self.db.execute("BEGIN IMMEDIATE")
                 row = await self.fetchone(
                     "SELECT body FROM facts WHERE kind=? AND id=?", (self.key(kind), id)
                 )
@@ -397,9 +397,8 @@ class ResearchStore:
                 )
                 await self.db.commit()
                 return value
-            except BaseException:
-                await self.db.rollback()
-                raise
+
+        return await retry_busy_write(write)
 
     async def merge_asset_observation(
         self, id: str, base_patch: dict, timed_fields: dict[str, tuple[object, float]],

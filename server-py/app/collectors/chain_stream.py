@@ -34,11 +34,6 @@ CANDLE_UPSERT = """INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(asset,bar,openTime) DO UPDATE SET open=excluded.open,high=excluded.high,
     low=excluded.low,close=excluded.close,volume=excluded.volume,volumeUsd=excluded.volumeUsd,
     confirmed=excluded.confirmed"""
-# The recent lane must be able to reach the tip before another long outage
-# makes its backlog grow again. Older blocks remain assigned to the durable
-# historical lane when we start a new, explicitly bounded recent interval.
-RECENT_REBASE_LAG_BLOCKS = 1800
-RECENT_REBASE_DEPTH_BLOCKS = 300
 REPLAY_PAUSE_QUEUE_FRACTION = .5
 REPLAY_RESUME_QUEUE_FRACTION = .25
 # A 4,096-entry queue can represent minutes of lag long before it is half
@@ -1458,6 +1453,18 @@ class ChainPoolStream:
         self.scan_page_metrics[lane]["pausedForLiveAt"] = now_ms()
         return {'caughtUp': False, 'head': head, 'processedBlock': processed_block}
 
+    async def _wait_for_replay_capacity(self, lane):
+        """Keep a started range intact while live events drain below the resume mark."""
+        waited = False
+        while self.replay_under_pressure():
+            if not waited:
+                self.scan_page_metrics[lane]["pausedForLiveAt"] = now_ms()
+            waited = True
+            # The live consumer runs independently; this yield also makes a
+            # stalled consumer cancellable when its connection closes.
+            await asyncio.sleep(.05)
+        return waited
+
     async def _catch_up(self, lane="pools", max_ranges=3, initial_depth=2, head=None):
         """Only a successful full getLogs interval advances its own durable cursor.
 
@@ -1546,12 +1553,10 @@ class ChainPoolStream:
             # accept larger filters. Verified 8-address getLogs batches.
             page_size = 8 if self.chain in ("56", "4663") else 64
             for offset in range(0, len(addresses), page_size):
-                if self.replay_under_pressure():
-                    return self._paused_replay_result(lane, height, processed_block)
+                await self._wait_for_replay_capacity(lane)
                 page_started = time.monotonic()
                 await self.wait_for_live()
-                if self.replay_under_pressure():
-                    return self._paused_replay_result(lane, height, processed_block)
+                await self._wait_for_replay_capacity(lane)
                 rpc_started = time.monotonic()
                 logs = None
                 try:
@@ -1582,8 +1587,7 @@ class ChainPoolStream:
             ordered_logs = sorted(all_logs, key=lambda x: (
                 number(x["blockNumber"]), number(x.get("transactionIndex", "0x0")), number(x["logIndex"])))
             for index, log in enumerate(ordered_logs):
-                if self.replay_under_pressure():
-                    return self._paused_replay_result(lane, height, processed_block)
+                await self._wait_for_replay_capacity(lane)
                 # One bounded live head start per eight replayed logs keeps
                 # high-volume ranges moving; the intervening yields and the
                 # mutation lock still let subscribed events run between them.
@@ -1591,11 +1595,9 @@ class ChainPoolStream:
                     await self.wait_for_live()
                 else:
                     await asyncio.sleep(0)
-                if self.replay_under_pressure():
-                    return self._paused_replay_result(lane, height, processed_block)
+                await self._wait_for_replay_capacity(lane)
                 await self.process_log(log)
-            if self.replay_under_pressure():
-                return self._paused_replay_result(lane, height, processed_block)
+            await self._wait_for_replay_capacity(lane)
             # WebSocket events may have arrived from an abandoned fork while
             # the paged HTTP/WS range was in progress. Remove them before the
             # durable watermark can certify this interval.
@@ -1608,8 +1610,12 @@ class ChainPoolStream:
                 raise ValueError("checkpoint-block-unavailable")
             if end_header["hash"].lower() != before["hash"].lower():
                 raise RuntimeError("chain-reorg-during-range")
-            if self.replay_under_pressure():
-                return self._paused_replay_result(lane, height, processed_block)
+            if await self._wait_for_replay_capacity(lane):
+                # A fork can change while this range waits for live traffic.
+                # Recheck the anchor immediately before certifying coverage.
+                end_header = await self.rpc("eth_getBlockByNumber", [hex(end), False])
+                if not end_header or end_header["hash"].lower() != before["hash"].lower():
+                    raise RuntimeError("chain-reorg-during-range")
             anchors.append({"block": end, "hash": end_header["hash"]})
             anchors = anchors[-128:]
             await self.s.put("chain-stream-cursor", lane, {
@@ -1654,39 +1660,6 @@ class ChainPoolStream:
             self.last_prune = now_ms()
         return {'caughtUp': start > height, 'head': height, 'processedBlock': start - 1}
 
-    async def rebase_recent_if_far_behind(self, head):
-        """Restore a near-tip lane without certifying the skipped history.
-
-        A saved recent cursor can fall so far behind after an outage that the
-        three bounded replay ranges cannot catch the moving head. Its former
-        interval remains in the historical lane's explicit gap and is replayed
-        there. Existing trades remain persisted and replay is idempotent.
-        """
-        recent = await self.s.get("chain-stream-cursor", "pools-live") or {}
-        previous = recent.get("block")
-        height = number(head["number"])
-        if not isinstance(previous, int) or height - previous <= RECENT_REBASE_LAG_BLOCKS:
-            return False
-        historical = await self.s.get("chain-stream-cursor", "pools") or {}
-        if not isinstance(historical.get("block"), int):
-            return False
-        first = max(0, height - RECENT_REBASE_DEPTH_BLOCKS + 1)
-        anchor = await self.rpc("eth_getBlockByNumber", [hex(first - 1), False])
-        if not anchor or not anchor.get("hash"):
-            raise ValueError("recent-rebase-anchor-unavailable")
-        if self.replay_under_pressure():
-            return False
-        await self.s.put("chain-stream-cursor", "pools-live", {
-            "block": first - 1, "hash": anchor["hash"],
-            "coverageFrom": first, "updatedAt": now_ms(),
-            "blockTime": number(anchor["timestamp"]) * 1000,
-            "poolCount": len(self.pools),
-            "anchors": [{"block": first - 1, "hash": anchor["hash"]}],
-            "rebasedAt": now_ms(), "rebasedFromBlock": previous,
-            "previousCoverageFrom": recent.get("coverageFrom"),
-        })
-        return True
-
     async def reconcile_step(self):
         """Verify the current tip before spending the shared RPC budget on old history."""
         historical = await self.s.get("chain-stream-cursor", "pools") or {}
@@ -1700,10 +1673,9 @@ class ChainPoolStream:
         if self.replay_under_pressure():
             return {'caughtUp': False, 'head': height, 'processedBlock': historical_block}
         if isinstance(historical_block, int) and height - historical_block > 32:
-            await self.rebase_recent_if_far_behind(head)
             # On the first dual-lane run, explicitly cover the last 300
-            # blocks. On later runs the saved lane replays every missed block
-            # after a disconnect, while the older gap stays on pools.
+            # blocks. A saved lane replays every missed block after a
+            # disconnect, even if the backlog exceeds one bounded pass.
             recent = await self.catch_up("pools-live", max_ranges=3, initial_depth=299, head=head)
             if not recent['caughtUp']:
                 # A prolonged outage may leave more than three near-tip
@@ -1760,7 +1732,10 @@ class ChainPoolStream:
         live_token = _live_log_collector.set(self)
         self.live_processing = True
         try:
-            await self.process_log(event)
+            # A short cross-process SQLite writer collision must not tear down
+            # the socket and cancel a partly scanned replay range. Processing
+            # this same event again is already required after reconnect.
+            await retry_busy_write(lambda: self.process_log(event), attempts=4)
         except BaseException:
             # Requeueing into the bounded queue could block forever if the
             # reader filled the freed slot. This single pending head preserves
@@ -1879,6 +1854,7 @@ class ChainPoolStream:
         async with httpx.AsyncClient(timeout=12) as self.http:
             while True:
                 reader = replay = None
+                connected_at = None
                 try:
                     await self.catalogue()
                     async with websockets.connect(self.urls[attempt % len(self.urls)], open_timeout=15,
@@ -1896,6 +1872,7 @@ class ChainPoolStream:
                         for offset in range(0, len(pools), 64):
                             await self.ws_call(ws, "eth_subscribe", ["logs", {"address": pools[offset:offset + 64], "topics": [TOPICS]}])
                             self.subscribed_pools.update(pools[offset:offset + 64])
+                        connected_at = time.monotonic()
                         self.status = "catching-up"
                         self.schedule_status_fact(force=True)
                         replay = asyncio.create_task(self.reconcile())
@@ -1931,6 +1908,8 @@ class ChainPoolStream:
                         if task:
                             task.cancel()
                     await asyncio.gather(*(t for t in (reader, replay) if t), return_exceptions=True)
+                if connected_at is not None and time.monotonic() - connected_at >= 60:
+                    attempt = 0
                 attempt += 1
                 await asyncio.sleep(min(30, 2 ** min(attempt, 5)))
 

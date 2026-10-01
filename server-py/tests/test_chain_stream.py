@@ -4,9 +4,11 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import replace
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
@@ -171,6 +173,10 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         await self.collector.close()
         await self.store.close()
         self.tmp.cleanup()
+
+    async def _wait_until(self, predicate):
+        while not predicate():
+            await asyncio.sleep(.001)
 
     def trade(self, id, size, offset=0):
         return {"id": id, "t": self.at + offset, "price": 3, "quantity": size,
@@ -607,29 +613,143 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.collector.queue.get_nowait()
         self.assertFalse(self.collector.replay_under_pressure())
 
-    async def test_queue_filling_during_replay_discards_partial_range(self):
-        await self.store.put('chain-stream-cursor', 'pools', {'block': 50, 'hash': '0x32'})
+    async def test_repeated_queue_spikes_resume_same_bnb_range_without_refetch(self):
+        await self.store.put('chain-stream-cursor', 'pools', {'block': 199, 'hash': hex(199)})
+        collector = ChainPoolStream('56')
+        collector.s = self.store
+        collector.pools = {f'0x{i:040x}': {} for i in range(1, 18)}
+        collector.last_prune = self.at
+        collector.retract_orphans = AsyncMock()
+        collector.process_log = AsyncMock()
+        pages = []
+
+        async def rpc(method, params):
+            if method == 'eth_getLogs':
+                addresses = params[0]['address']
+                pages.append(addresses)
+                for index in range(32):
+                    collector.queue.put_nowait((len(pages), index))
+                return [{'blockNumber': hex(200), 'blockHash': hex(200),
+                         'transactionIndex': '0x0', 'logIndex': hex(len(pages))}]
+            block = 499 if params[0] == 'latest' else int(params[0], 16)
+            return {'number': hex(block), 'hash': hex(block), 'timestamp': hex(self.at // 1000)}
+
+        async def drain_live():
+            for expected_page in range(1, 4):
+                while len(pages) < expected_page or not collector.replay_paused:
+                    await asyncio.sleep(.001)
+                self.assertEqual(collector.queue.qsize(), 32)
+                for _ in range(24):
+                    collector.queue.get_nowait()
+                self.assertFalse(collector.replay_under_pressure())
+                for _ in range(8):
+                    collector.queue.get_nowait()
+
+        collector.rpc = rpc
+        consumer = asyncio.create_task(drain_live())
+        try:
+            with patch.object(self.store, 'put', wraps=self.store.put) as put:
+                with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+                    result = await asyncio.wait_for(collector.catch_up(), 2)
+                cursor_writes = [call.args[2]['block'] for call in put.call_args_list
+                                 if call.args[:2] == ('chain-stream-cursor', 'pools')]
+            await consumer
+        finally:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+            await collector.close()
+        self.assertTrue(result['caughtUp'])
+        self.assertEqual([len(page) for page in pages], [8, 8, 1])
+        self.assertEqual(cursor_writes, [499])
+        self.assertEqual(collector.process_log.await_count, 3)
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 499)
+        self.assertEqual((await self.store.get('chain-stream-scan', 'pools'))['pausedForLiveAt'], self.at)
+
+    async def test_cancelled_pressure_wait_leaves_cursor_and_replays_all_pages(self):
+        await self.store.put('chain-stream-cursor', 'pools', {'block': 199, 'hash': hex(199)})
         self.collector.pools = {f'0x{i:040x}': {} for i in range(65)}
-        self.collector.queue = asyncio.Queue(maxsize=8)
-        self.collector.last_prune = self.at
+        self.collector.last_prune = int(time.time() * 1000)
+        self.collector.retract_orphans = AsyncMock()
+        self.collector.process_log = AsyncMock()
         pages = []
 
         async def rpc(method, params):
             if method == 'eth_getLogs':
                 pages.append(params[0]['address'])
-                for index in range(4):
-                    self.collector.queue.put_nowait(index)
-                return []
-            block = 51 if params[0] == 'latest' else int(params[0], 16)
+                if len(pages) == 1:
+                    for index in range(4):
+                        self.collector.queue.put_nowait(index)
+                return [{'blockNumber': hex(200), 'blockHash': hex(200),
+                         'transactionIndex': '0x0', 'logIndex': hex(len(pages))}]
+            block = 200 if params[0] == 'latest' else int(params[0], 16)
             return {'number': hex(block), 'hash': hex(block), 'timestamp': hex(self.at // 1000)}
 
+        self.collector.queue = asyncio.Queue(maxsize=8)
         self.collector.rpc = rpc
-        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
-            result = await self.collector.catch_up()
-        self.assertFalse(result['caughtUp'])
-        self.assertEqual(len(pages), 1)
-        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
-        self.assertEqual((await self.store.get('chain-stream-scan', 'pools'))['pausedForLiveAt'], self.at)
+        replay = asyncio.create_task(self.collector.catch_up())
+        try:
+            await asyncio.wait_for(self._wait_until(lambda: self.collector.replay_paused), 1)
+            await asyncio.sleep(.12)
+            self.assertEqual(len(pages), 1)
+            self.assertFalse(replay.done())  # Waiting yields; it cannot spin through pages.
+            replay.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(replay, .5)
+        finally:
+            replay.cancel()
+            await asyncio.gather(replay, return_exceptions=True)
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 199)
+        self.collector.process_log.assert_not_awaited()
+        while not self.collector.queue.empty():
+            self.collector.queue.get_nowait()
+        result = await asyncio.wait_for(self.collector.catch_up(), 1)
+        self.assertTrue(result['caughtUp'])
+        self.assertEqual(len(pages), 3)  # First page is fetched again after cancellation.
+        self.assertEqual(self.collector.process_log.await_count, 2)
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 200)
+
+    async def test_reorg_while_waiting_retries_range_before_certifying_coverage(self):
+        await self.store.put('chain-stream-cursor', 'pools', {'block': 199, 'hash': hex(199)})
+        self.collector.pools = {f'0x{i:040x}': {} for i in range(65)}
+        self.collector.queue = asyncio.Queue(maxsize=8)
+        self.collector.last_prune = int(time.time() * 1000)
+        self.collector.process_log = AsyncMock()
+        self.collector.retract_orphans = AsyncMock()
+        chain_hash = 'old200'
+        pages = []
+
+        async def rpc(method, params):
+            if method == 'eth_getLogs':
+                pages.append((chain_hash, params[0]['address']))
+                if len(pages) == 1:
+                    for index in range(4):
+                        self.collector.queue.put_nowait(index)
+                return [{'blockNumber': hex(200), 'blockHash': chain_hash,
+                         'transactionIndex': '0x0', 'logIndex': '0x1'}] if len(params[0]['address']) == 64 else []
+            block = 200 if params[0] == 'latest' else int(params[0], 16)
+            return {'number': hex(block), 'hash': chain_hash if block == 200 else hex(block),
+                    'timestamp': hex(self.at // 1000)}
+
+        self.collector.rpc = rpc
+        replay = asyncio.create_task(self.collector.catch_up())
+        try:
+            await asyncio.wait_for(self._wait_until(lambda: self.collector.replay_paused), 1)
+            chain_hash = 'new200'
+            while not self.collector.queue.empty():
+                self.collector.queue.get_nowait()
+            with self.assertRaisesRegex(RuntimeError, 'chain-reorg-during-range'):
+                await asyncio.wait_for(replay, 1)
+        finally:
+            replay.cancel()
+            await asyncio.gather(replay, return_exceptions=True)
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 199)
+        self.collector.retract_orphans.assert_not_awaited()
+        finished = await asyncio.wait_for(self.collector.catch_up(), 1)
+        self.assertTrue(finished['caughtUp'])
+        self.assertEqual([hash for hash, _ in pages],
+                         ['old200', 'new200', 'new200', 'new200'])
+        self.assertEqual(self.collector.process_log.await_args_list[-1].args[0]['blockHash'], 'new200')
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 200)
 
     async def test_partial_replay_resumes_without_duplicate_trade_or_candle(self):
         first = await self.prepare_logs()
@@ -660,16 +780,17 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
                     self.collector.queue.put_nowait(index)
 
         self.collector.process_log = fill_after_first
-        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
-            paused = await self.collector.catch_up()
-        self.assertFalse(paused['caughtUp'])
-        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 199)
-        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
-        while not self.collector.queue.empty():
-            self.collector.queue.get_nowait()
+        async def drain_live():
+            await self._wait_until(lambda: self.collector.replay_paused)
+            self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 199)
+            self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 1)
+            while not self.collector.queue.empty():
+                self.collector.queue.get_nowait()
 
+        consumer = asyncio.create_task(drain_live())
         with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
-            finished = await self.collector.catch_up()
+            finished = await asyncio.wait_for(self.collector.catch_up(), 2)
+        await consumer
         self.assertTrue(finished['caughtUp'])
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 200)
         self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM trades'))[0], 2)
@@ -849,6 +970,102 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.collector.retry_event)
         self.assertTrue(self.collector.queue.empty())
         self.collector.catch_up.assert_not_awaited()
+
+    async def test_transient_busy_retries_live_log_in_place_without_reconnect(self):
+        first = {'id': 'first'}
+        later = {'id': 'later'}
+        self.collector.queue.put_nowait(later)
+        busy = sqlite3.OperationalError('database is locked')
+        busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        self.collector.process_log = AsyncMock(side_effect=[busy, busy, None])
+
+        with patch('app.db.asyncio.sleep', new_callable=AsyncMock) as sleep:
+            await self.collector.process_queued(first)
+
+        self.assertEqual(self.collector.process_log.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+        self.assertTrue(all(call.args == (first,) for call in self.collector.process_log.await_args_list))
+        self.assertIsNone(self.collector.retry_event)
+        self.assertFalse(self.collector.recovery_needed)
+        self.assertEqual(self.collector.reconnects, 0)
+        self.assertIs(self.collector.queue.get_nowait(), later)
+        self.assertEqual(len(self.collector.live_log_durations_ms), 1)
+
+    async def test_persistent_busy_retains_queue_head_after_bounded_attempts(self):
+        first = {'id': 'first'}
+        later = {'id': 'later'}
+        self.collector.queue.put_nowait(later)
+        busy = sqlite3.OperationalError('database is locked')
+        busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        self.collector.process_log = AsyncMock(side_effect=busy)
+
+        with patch('app.db.asyncio.sleep', new_callable=AsyncMock) as sleep:
+            with self.assertRaises(sqlite3.OperationalError):
+                await self.collector.process_queued(first)
+
+        self.assertEqual(self.collector.process_log.await_count, 4)
+        self.assertEqual(sleep.await_count, 3)
+        self.assertIs(self.collector.retry_event, first)
+        self.assertTrue(self.collector.recovery_needed)
+        self.assertIs(self.collector.queue.get_nowait(), later)
+
+    async def test_nonbusy_sqlite_error_and_cancellation_are_not_retried(self):
+        for error in (sqlite3.OperationalError('database is locked'), asyncio.CancelledError()):
+            with self.subTest(error=type(error).__name__):
+                event = {'id': 'first'}
+                if isinstance(error, sqlite3.OperationalError):
+                    error.sqlite_errorcode = getattr(sqlite3, 'SQLITE_BUSY_SNAPSHOT', 517)
+                self.collector.process_log = AsyncMock(side_effect=error)
+                self.collector.retry_event = None
+                self.collector.recovery_needed = False
+                with patch('app.db.asyncio.sleep', new_callable=AsyncMock) as sleep:
+                    with self.assertRaises(type(error)):
+                        await self.collector.process_queued(event)
+                self.collector.process_log.assert_awaited_once_with(event)
+                sleep.assert_not_awaited()
+                self.assertIs(self.collector.retry_event, event)
+                self.assertTrue(self.collector.recovery_needed)
+
+    async def test_healthy_socket_resets_prior_reconnect_backoff(self):
+        class SocketContext:
+            async def __aenter__(self):
+                return object()
+
+            async def __aexit__(self, *_):
+                return False
+
+        real_sleep = asyncio.sleep
+        delays = []
+
+        async def stop_after_third_retry(seconds):
+            delays.append(seconds)
+            if len(delays) == 3:
+                raise asyncio.CancelledError()
+
+        async def closed_reader(_):
+            raise RuntimeError('socket closed')
+
+        async def ws_call(_, method, __):
+            await real_sleep(0)  # Let the reader close before the live loop.
+            return hex(196) if method == 'eth_chainId' else 'subscription'
+
+        self.collector.init = AsyncMock()
+        self.collector.catalogue = AsyncMock(return_value=False)
+        self.collector.reader = closed_reader
+        self.collector.ws_call = ws_call
+        self.collector.recover_live_queue = AsyncMock()
+        self.collector.reconcile = AsyncMock()
+        self.collector.schedule_status_fact = lambda *_, **__: None
+        with patch('app.collectors.chain_stream.websockets.connect', side_effect=[
+                RuntimeError('unavailable'), RuntimeError('unavailable'), SocketContext()]), \
+             patch('app.collectors.chain_stream.time',
+                   SimpleNamespace(monotonic=Mock(side_effect=[100, 161]))), \
+             patch('app.collectors.chain_stream.asyncio.sleep', new=stop_after_third_retry):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.collector.run()
+
+        self.assertEqual(delays, [2, 4, 2])
+        self.assertEqual(self.collector.reconnects, 3)
 
     async def test_long_recovery_publishes_queue_progress_before_resubscription(self):
         self.collector.queue = asyncio.Queue(maxsize=65)
@@ -1484,7 +1701,7 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools'))['block'], 50)
         self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 400)
 
-    async def test_distant_recent_lane_restarts_at_tip_and_preserves_historical_gap(self):
+    async def test_distant_recent_lane_replays_from_saved_cursor_without_skipping_gap(self):
         await self.store.put('chain-stream-cursor', 'pools', {
             'block': 50, 'hash': '0x32', 'coverageFrom': 40})
         await self.store.put('chain-stream-cursor', 'pools-live', {
@@ -1508,15 +1725,19 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         recent = await self.store.get('chain-stream-cursor', 'pools-live')
         historical = await self.store.get('chain-stream-cursor', 'pools')
         status = await self.store.get('chain-stream', 'pools')
-        self.assertEqual(ranges, [(9701, 9800), (9801, 9900), (9901, 10_000), (51, 150)])
-        self.assertEqual((recent['block'], recent['coverageFrom']), (10_000, 9701))
-        self.assertEqual(recent['rebasedFromBlock'], 100)
-        self.assertEqual(historical['block'], 150)
-        self.assertEqual(status['nearTipLagBlocks'], 0)
-        self.assertEqual(status['historicalGapBlocks'], 9550)
-        self.assertEqual(status['nearTipRebasedFromBlock'], 100)
+        self.assertEqual(ranges, [(101, 200), (201, 300), (301, 400)])
+        self.assertEqual((recent['block'], recent['coverageFrom']), (400, 70))
+        self.assertNotIn('rebasedFromBlock', recent)
+        self.assertEqual(historical['block'], 50)
+        self.assertEqual(status['nearTipLagBlocks'], 9600)
+        self.assertEqual(status['historicalGapBlocks'], 19)
+        self.assertIsNone(status['nearTipRebasedFromBlock'])
+        with patch('app.collectors.chain_stream.now_ms', return_value=self.at):
+            await self.collector.reconcile_step()
+        self.assertEqual(ranges[-3:], [(401, 500), (501, 600), (601, 700)])
+        self.assertEqual((await self.store.get('chain-stream-cursor', 'pools-live'))['block'], 700)
 
-    async def test_recent_rebase_failure_does_not_certify_skipped_blocks(self):
+    async def test_distant_recent_lane_failure_keeps_saved_cursor(self):
         await self.store.put('chain-stream-cursor', 'pools', {'block': 50, 'hash': '0x32'})
         await self.store.put('chain-stream-cursor', 'pools-live', {
             'block': 100, 'hash': '0x64', 'coverageFrom': 70})
@@ -1533,7 +1754,7 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
             await self.collector.reconcile_step()
         recent = await self.store.get('chain-stream-cursor', 'pools-live')
         historical = await self.store.get('chain-stream-cursor', 'pools')
-        self.assertEqual((recent['block'], recent['coverageFrom']), (9700, 9701))
+        self.assertEqual((recent['block'], recent['coverageFrom']), (100, 70))
         self.assertEqual(historical['block'], 50)
         self.assertEqual((await self.store.get('chain-stream-scan', 'pools-live'))['lastError'],
                          'RuntimeError:recent-provider-unavailable')
@@ -1725,7 +1946,8 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
             await self.collector.process_queued(log)
         await self.collector.status_fact(force=True)
         status = await self.store.get('chain-stream', 'pools')
-        self.assertEqual(status['liveStageTimingsRecentMs']['rawInsert']['count'], 1)
+        self.assertEqual(self.collector._write_stream_log.await_count, 4)
+        self.assertEqual(status['liveStageTimingsRecentMs']['rawInsert']['count'], 4)
         self.assertNotIn('rawMarkProcessed', status['liveStageTimingsRecentMs'])
         self.assertIs(self.collector.retry_event, log)
         self.assertEqual(status['liveLogProcessingSamplesRecent'], 1)
