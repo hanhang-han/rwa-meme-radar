@@ -1267,6 +1267,31 @@ class DurablePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(call.args[0] == 'market-registry' for call in encode.call_args_list), 1)
         self.assertEqual(await self.store.get('market-registry', changed.storage), changed.record())
 
+    async def test_trade_prepares_market_identity_before_sqlite_write_transaction(self):
+        original_frame = Market.frame
+        original_record = Market.record
+        stages = []
+
+        def frame(market):
+            stages.append(('frame', self.store.db.in_transaction))
+            return original_frame(market)
+
+        def record(market):
+            stages.append(('record', self.store.db.in_transaction))
+            return original_record(market)
+
+        def bars(market):
+            stages.append(('bars', self.store.db.in_transaction))
+            return ['1m', '5m', '1H']
+
+        with patch.object(Market, 'frame', frame), patch.object(Market, 'record', record), \
+             patch.object(self.collector, 'bars', bars):
+            self.assertTrue(await self.collector.commit_trade(self.market, self.trade('prepared', 2)))
+        self.assertTrue(stages)
+        self.assertFalse(any(in_transaction for _, in_transaction in stages), stages)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM candles'))[0], 3)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM realtime_events'))[0], 4)
+
     async def test_trade_commit_uses_dedicated_connection_while_shared_read_is_busy(self):
         with patch('app.collectors.chain_stream.store', new=AsyncMock(return_value=self.store)):
             await self.collector.init()

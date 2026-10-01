@@ -11,6 +11,7 @@ from .ai import MODEL, ai_enabled, ai_failure, ai_narrate
 from .asset_facts import (READOUT_MAX_AGE_MS, build_fact_packet, fact_hash,
                           template_lines, validate_model_text)
 from .db import store
+from .demand_leases import all_lease_kv
 from .realtime_projection import ProjectionUnavailable, read_token_projection
 
 
@@ -86,7 +87,7 @@ async def refresh_insights() -> None:
     now = int(time.time() * 1000)
     for chain in CHAINS:
         s = await store(chain)
-        for ident, demand in await s.all_kv('insight-demand'):
+        for ident, demand in await all_lease_kv(s, 'insight-demand'):
             if int(demand.get('expiresAt') or 0) < now:
                 continue
             address = str(demand.get('address') or '').lower()

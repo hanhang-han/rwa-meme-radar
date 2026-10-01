@@ -168,6 +168,27 @@ class StreamPersistenceTests(unittest.IsolatedAsyncioTestCase):
         latest=await self.store.get('market-quote',MARKET.storage)
         self.assertEqual(latest['sourceEventAt'],102)
 
+    async def test_backlog_coalesces_quotes_across_transaction_splits_without_losing_trades(self):
+        trade=normalize_binance_trade(TRADE)
+        messages=[]
+        for index in range(40):
+            messages.append(('quote',MARKET,{'price':index+1,'volume24h':index+1,
+                        'statisticsAt':index+1,'sourceEventAt':index+1}))
+            if index in (5,20,35):
+                messages.append(('trade',MARKET,{**trade,'id':f'agg:{index}','sourceId':index}))
+        await self.processor.flush(messages)
+        self.assertEqual(len(await self.events('price')),1)
+        self.assertEqual(len(await self.events('trade')),3)
+        quote=await self.store.get('market-quote',MARKET.storage)
+        self.assertEqual((quote['price'],quote['volume24h'],quote['sourceEventAt']),(40,40,40))
+
+    async def test_replayed_quote_receipt_does_not_publish_another_price(self):
+        quote={'price':1,'volume24h':10,'statisticsAt':100,'sourceEventAt':100}
+        await self.processor.flush([('quote',MARKET,quote)])
+        await self.processor.flush([('quote',MARKET,{**quote,'receivedAt':1790317783100})])
+        self.assertEqual(len(await self.events('price')),1)
+        self.assertEqual((await self.store.get('market-quote',MARKET.storage))['sourceEventAt'],100)
+
     async def test_official_open_candle_close_and_old_correction(self):
         bar,row=normalize_binance_candle(KLINE)
         await self.processor.flush([('candle',MARKET,{'bar':bar,'row':row,'sourceEventAt':200})])

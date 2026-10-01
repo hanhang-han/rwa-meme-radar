@@ -51,9 +51,10 @@ class CollectionInfrastructureTest(unittest.TestCase):
                         b=await candles.get_candles('56',address,'5m',500,'dex')
                     self.assertEqual(a['rows'],b['rows'])
                     network.assert_not_called()
-                    from app.demand_leases import flush_lease_writer
+                    from app.demand_leases import all_lease_kv, flush_lease_writer
                     await flush_lease_writer()
-                    self.assertEqual(len(await db.all('candle-watch')),1)
+                    self.assertEqual(len(await all_lease_kv(db,'candle-watch')),1)
+                    self.assertEqual(await db.all('candle-watch'),[])
                 finally:await db.close()
         asyncio.run(run())
 

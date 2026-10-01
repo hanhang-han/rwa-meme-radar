@@ -355,6 +355,133 @@ class RealtimeTest(unittest.TestCase):
                 finally: await db.close()
         asyncio.run(run())
 
+    def test_trade_bucket_rebuild_skips_unchanged_rows_and_removes_obsolete_rows(self):
+        from app import db as db_module
+        from app.db import ResearchStore
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                db = await ResearchStore(d+'/research.sqlite', '196').connect()
+                try:
+                    token = '0x' + '4' * 40
+                    start = 1_800_000_000_000
+                    await db.put_trades(token, [{'id': 'one', 't': start+60_000,
+                                                  'type': 'buy', 'volume': 3, 'user': 'u'}])
+                    original_loads = db_module.json.loads
+                    parsing_under_write_lock = []
+
+                    def observe_parse(*args, **kwargs):
+                        parsing_under_write_lock.append(db._write_lock.locked())
+                        return original_loads(*args, **kwargs)
+
+                    with patch.object(db_module.json, 'loads', side_effect=observe_parse):
+                        await db.rebuild_trade_buckets(token, start+300_001)
+                    self.assertTrue(parsing_under_write_lock)
+                    self.assertFalse(any(parsing_under_write_lock))
+                    first = await db.trade_buckets(token, '5m', 10)
+                    self.assertEqual(first[0]['tradeCount'], 1)
+                    changes = db.db.total_changes
+                    await db.rebuild_trade_buckets(token, start+300_001)
+                    self.assertEqual(db.db.total_changes, changes)
+                    self.assertEqual(await db.trade_buckets(token, '5m', 10), first)
+                    async with db._guard_write():
+                        await db.db.execute('DELETE FROM trades WHERE asset=? AND id=?',
+                                            (db.key(token), 'one'))
+                        await db.db.commit()
+                    await db.rebuild_trade_buckets(token, start+300_001)
+                    self.assertEqual(await db.trade_buckets(token, '5m', 10), [])
+                finally:
+                    await db.close()
+        asyncio.run(run())
+
+    def test_trade_bucket_rebuild_retries_when_source_changes_after_snapshot(self):
+        from contextlib import asynccontextmanager
+        from app.db import ResearchStore
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                path = d+'/research.sqlite'
+                db = await ResearchStore(path, '196').connect()
+                other = await ResearchStore(path, '196').connect()
+                try:
+                    token = '0x' + '5' * 40
+                    start = 1_800_000_000_000
+                    await db.put_trades(token, [{'id': 'one', 't': start+60_000,
+                                                  'type': 'buy', 'volume': 3}])
+                    original_guard = db._guard_write
+                    attempts = 0
+
+                    @asynccontextmanager
+                    async def inject_trade_before_writer(connection=None):
+                        nonlocal attempts
+                        attempts += 1
+                        if attempts == 1:
+                            await other.put_trades(token, [{'id': 'two', 't': start+120_000,
+                                                            'type': 'sell', 'volume': 4}])
+                        async with original_guard(connection):
+                            yield
+
+                    db._guard_write = inject_trade_before_writer
+                    latest = await db.rebuild_trade_buckets(token, start+300_001)
+                    self.assertEqual(attempts, 2)
+                    self.assertEqual(latest['5m']['tradeCount'], 2)
+                    self.assertEqual((await db.trade_buckets(token, '5m', 10))[0]['volumeUsd'], 7)
+                finally:
+                    await other.close()
+                    await db.close()
+        asyncio.run(run())
+
+    def test_trade_bucket_rebuild_uses_private_memory_database(self):
+        from app.db import ResearchStore
+        async def run():
+            db = await ResearchStore(':memory:', '196').connect()
+            try:
+                token = '0x' + '6' * 40
+                start = 1_800_000_000_000
+                await db.put_trades(token, [{'id': 'one', 't': start+60_000,
+                                              'type': 'buy', 'volume': 5}])
+                latest = await db.rebuild_trade_buckets(token, start+300_001)
+                self.assertEqual(latest['5m']['tradeCount'], 1)
+                self.assertEqual((await db.trade_buckets(token, '5m', 10))[0]['volumeUsd'], 5)
+            finally:
+                await db.close()
+        asyncio.run(run())
+
+    def test_trade_bucket_rebuild_finishes_after_continuous_source_changes(self):
+        from contextlib import asynccontextmanager
+        from app.db import ResearchStore
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                path = d+'/research.sqlite'
+                db = await ResearchStore(path, '196').connect()
+                other = await ResearchStore(path, '196').connect()
+                try:
+                    token = '0x' + '7' * 40
+                    start = 1_800_000_000_000
+                    await db.put_trades(token, [{'id': 'one', 't': start+60_000,
+                                                  'type': 'buy', 'volume': 1}])
+                    original_guard = db._guard_write
+                    attempts = 0
+
+                    @asynccontextmanager
+                    async def inject_each_optimistic_attempt(connection=None):
+                        nonlocal attempts
+                        attempts += 1
+                        if attempts <= 3:
+                            await other.put_trades(token, [{'id': str(attempts+1),
+                                                            't': start+60_000+attempts*10_000,
+                                                            'type': 'buy', 'volume': 1}])
+                        async with original_guard(connection):
+                            yield
+
+                    db._guard_write = inject_each_optimistic_attempt
+                    latest = await db.rebuild_trade_buckets(token, start+300_001)
+                    self.assertEqual(attempts, 4)
+                    self.assertEqual(latest['5m']['tradeCount'], 4)
+                    self.assertEqual((await db.trade_buckets(token, '5m', 10))[0]['volumeUsd'], 4)
+                finally:
+                    await other.close()
+                    await db.close()
+        asyncio.run(run())
+
     def test_quality_rules_separate_history_from_rankings_and_alerts(self):
         from app.data_quality import evaluate_asset
         now=1_800_000_000_000
@@ -388,7 +515,6 @@ class RealtimeTest(unittest.TestCase):
             stores={cid:AsyncMock() for cid in q.CHAINS}
             async def rows(kind):
                 if kind=='asset':return [{'token':t,'kind':'candidate'} for t in tokens]
-                if kind=='watch':return [{'token':t,'expiresAt':99_000_000} for t in tokens]
                 if kind=='collector-job':return list(queue.values())
                 return []
             for cid in q.CHAINS:stores[cid].all.return_value=[]
@@ -398,7 +524,11 @@ class RealtimeTest(unittest.TestCase):
                 calls.extend(selected)
                 for t in selected:queue[t]={'domain':'quote','key':t,'lastAttemptAt':clock[0],'lastSuccessAt':clock[0]}
                 return {'accepted':len(selected)}
-            with patch.object(q,'_fetch_and_merge',fetch), patch.object(q,'store',scoped), patch.object(q,'now_ms',lambda:clock[0]):
+            async def leases(scoped_store,kind):
+                return ([{'token':t,'expiresAt':99_000_000} for t in tokens]
+                        if scoped_store is stores['56'] and kind=='watch' else [])
+            with patch.object(q,'_fetch_and_merge',fetch), patch.object(q,'store',scoped), \
+                 patch.object(q,'all_leases',leases), patch.object(q,'now_ms',lambda:clock[0]):
                 for _ in range(3):
                     await q.refresh_watched();clock[0]+=300_000
             self.assertEqual(len(set(calls)),75)

@@ -8,6 +8,7 @@ import httpx
 import websockets
 
 from ..db import store
+from ..demand_leases import all_lease_kv
 from .market_streams import (BAR_MS, MarketStreamProcessor, finite, now_ms,
                              normalize_binance_candle, normalize_binance_trade)
 
@@ -110,7 +111,7 @@ class BinanceMarketFeed:
         by_asset={(m.chain_id,m.token.lower(),m.market_id):m for m in markets}
         now=now_ms()
         for chain in {m.chain_id for m in markets}:
-            for _,lease in await (await store(chain)).all_kv('candle-watch'):
+            for _,lease in await all_lease_kv(await store(chain), 'candle-watch'):
                 if lease.get('venue')!=self.venue or lease.get('expiresAt',0)<=now or lease.get('bar') not in BAR_MS:
                     continue
                 for (c,token,market_id),market in by_asset.items():

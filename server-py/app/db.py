@@ -650,57 +650,57 @@ class ResearchStore:
 
         Empty bars are written only where successful catch-up intervals prove
         that the provider was observed. coverageRatio distinguishes a closed,
-        fully observed zero from an unobserved gap.
+        fully observed zero from an unobserved gap. Usually JSON parsing and
+        aggregation happen before the short writer transaction. A contended
+        asset gets one locked rebuild if its input changes three times.
         """
         now_ms = int(now_ms or time.time() * 1000)
         specs = {"1m": (60_000, 6 * 3_600_000), "5m": (300_000, 86_400_000), "1h": (3_600_000, 7 * 86_400_000)}
         oldest = now_ms - max(horizon for _, horizon in specs.values())
-        observations = await self.fetchall(
-            "SELECT t,body FROM trades WHERE asset=? AND t>=? ORDER BY t",
-            (self.key(asset), oldest),
-        )
-        trades = []
-        for row in observations:
-            try:
-                trades.append((int(row[0]), json.loads(row[1])))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-        observations = await self.fetchall(
-            "SELECT startTime,endTime FROM trade_coverage WHERE asset=? AND endTime>=? ORDER BY startTime",
-            (self.key(asset), oldest),
-        )
-        intervals = [(max(oldest, int(r[0])), min(now_ms, int(r[1]))) for r in observations if int(r[1]) > int(r[0])]
-        merged = []
-        for start, end in intervals:
-            if not merged or start > merged[-1][1]:
-                merged.append([start, end])
-            else:
-                merged[-1][1] = max(merged[-1][1], end)
+        asset_key = self.key(asset)
+        trade_query = "SELECT rowid,id,t,body FROM trades WHERE asset=? AND t>=? ORDER BY t,rowid"
+        trade_identity_query = "SELECT rowid,id,t FROM trades WHERE asset=? AND t>=? ORDER BY t,rowid"
+        coverage_query = """SELECT rowid,startTime,endTime FROM trade_coverage
+            WHERE asset=? AND endTime>=? ORDER BY startTime,rowid"""
 
-        def covered(start: int, end: int) -> int:
-            return sum(max(0, min(end, b) - max(start, a)) for a, b in merged)
+        async def read_source(connection):
+            observations = await connection.execute_fetchall(trade_query, (asset_key, oldest))
+            coverage = await connection.execute_fetchall(coverage_query, (asset_key, oldest))
+            return observations, coverage
 
-        latest: dict[str, dict] = {}
-        async with self._guard_write():
-            await self.db.execute("BEGIN IMMEDIATE")
-            try:
-                for bar, (width, horizon) in specs.items():
-                    since = now_ms - horizon
-                    first_points = [t for t, _ in trades if t >= since]
-                    first_points.extend(a for a, b in merged if b >= since)
-                    await self.db.execute(
-                        "DELETE FROM trade_buckets WHERE asset=? AND bar=? AND openTime>=?",
-                        (self.key(asset), bar, since // width * width),
-                    )
-                    if not first_points:
-                        continue
+        def calculate(observations, coverage):
+            trades = []
+            for row in observations:
+                try:
+                    trades.append((int(row[2]), json.loads(row[3])))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            intervals = [(max(oldest, int(r[1])), min(now_ms, int(r[2]))) for r in coverage
+                         if int(r[2]) > int(r[1])]
+            merged = []
+            for start, end in intervals:
+                if not merged or start > merged[-1][1]:
+                    merged.append([start, end])
+                else:
+                    merged[-1][1] = max(merged[-1][1], end)
+
+            def covered(start: int, end: int) -> int:
+                return sum(max(0, min(end, b) - max(start, a)) for a, b in merged)
+
+            latest: dict[str, dict] = {}
+            calculated: dict[str, list[tuple]] = {}
+            for bar, (width, horizon) in specs.items():
+                since = now_ms - horizon
+                first_points = [t for t, _ in trades if t >= since]
+                first_points.extend(a for a, b in merged if b >= since)
+                rows = []
+                if first_points:
                     first = max(since, min(first_points)) // width * width
                     last = now_ms // width * width
                     grouped: dict[int, list[dict]] = {}
                     for t, body in trades:
                         if t >= since:
                             grouped.setdefault(t // width * width, []).append(body)
-                    rows = []
                     for opened in range(first, last + 1, width):
                         bucket_trades = grouped.get(opened, [])
                         ratio = min(1.0, covered(opened, opened + width) / width)
@@ -721,26 +721,98 @@ class ResearchStore:
                             "traders": len({r.get("user") for r in bucket_trades if r.get("user")}),
                             "coverageRatio": round(ratio, 4), "complete": complete, "updatedAt": now_ms,
                         }
-                        rows.append((self.key(asset), bar, opened, row["buyCount"], row["sellCount"], row["tradeCount"],
+                        rows.append((asset_key, bar, opened, row["buyCount"], row["sellCount"], row["tradeCount"],
                                      row["buyVolumeUsd"], row["sellVolumeUsd"], row["volumeUsd"], row["traders"],
                                      row["coverageRatio"], 1 if complete else 0, now_ms))
                         if opened + width <= now_ms:
                             latest[bar] = row
-                    if rows:
-                        await self.db.executemany(
-                            """INSERT INTO trade_buckets VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-                               ON CONFLICT(asset,bar,openTime) DO UPDATE SET
-                               buyCount=excluded.buyCount,sellCount=excluded.sellCount,tradeCount=excluded.tradeCount,
-                               buyVolumeUsd=excluded.buyVolumeUsd,sellVolumeUsd=excluded.sellVolumeUsd,
-                               volumeUsd=excluded.volumeUsd,traders=excluded.traders,
-                               coverageRatio=excluded.coverageRatio,complete=excluded.complete,updatedAt=excluded.updatedAt""",
-                            rows,
-                        )
+                calculated[bar] = rows
+            return latest, calculated
+
+        async def publish(calculated):
+            # The caller owns BEGIN IMMEDIATE. Avoid DELETE/reinsert of every
+            # bar: unchanged rows should not fire the real-time event triggers.
+            for bar, (width, horizon) in specs.items():
+                first = (now_ms - horizon) // width * width
+                last = now_ms // width * width
+                existing_rows = await self.db.execute_fetchall(
+                    """SELECT openTime,buyCount,sellCount,tradeCount,buyVolumeUsd,sellVolumeUsd,
+                              volumeUsd,traders,coverageRatio,complete,updatedAt
+                       FROM trade_buckets WHERE asset=? AND bar=? AND openTime BETWEEN ? AND ?""",
+                    (asset_key, bar, first, last),
+                )
+                existing = {r[0]: tuple(r) for r in existing_rows}
+                desired = {r[2]: r for r in calculated[bar]}
+                deletes = [(asset_key, bar, opened, now_ms) for opened, row in existing.items()
+                           if opened not in desired and row[-1] <= now_ms]
+                changes = [row for opened, row in desired.items()
+                           if opened not in existing or (
+                               existing[opened][-1] <= now_ms
+                               and existing[opened][1:-1] != row[3:-1])]
+                if deletes:
+                    await self.db.executemany(
+                        """DELETE FROM trade_buckets WHERE asset=? AND bar=?
+                           AND openTime=? AND updatedAt<=?""", deletes)
+                if changes:
+                    await self.db.executemany(
+                        """INSERT INTO trade_buckets VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                           ON CONFLICT(asset,bar,openTime) DO UPDATE SET
+                           buyCount=excluded.buyCount,sellCount=excluded.sellCount,tradeCount=excluded.tradeCount,
+                           buyVolumeUsd=excluded.buyVolumeUsd,sellVolumeUsd=excluded.sellVolumeUsd,
+                           volumeUsd=excluded.volumeUsd,traders=excluded.traders,
+                           coverageRatio=excluded.coverageRatio,complete=excluded.complete,updatedAt=excluded.updatedAt
+                           WHERE trade_buckets.updatedAt<=excluded.updatedAt""", changes)
+
+        # Both source tables must come from one read transaction. Identifying
+        # the rows again after BEGIN IMMEDIATE prevents publishing an older
+        # calculation when another collector inserted or removed a row.
+        for _ in range(3):
+            if self.path == ':memory:':
+                # A separate connection sees a different private database.
+                async with self._guard_write():
+                    observations, coverage = await read_source(self.db)
+            else:
+                async with aiosqlite.connect(self.path, timeout=self.busy_timeout_ms / 1000) as reader:
+                    await reader.execute("PRAGMA query_only=ON")
+                    await reader.execute("BEGIN")
+                    try:
+                        observations, coverage = await read_source(reader)
+                    finally:
+                        await reader.rollback()
+            trade_identity = [(r[0], r[1], r[2]) for r in observations]
+            coverage_identity = [tuple(r) for r in coverage]
+            latest, calculated = calculate(observations, coverage)
+
+            async with self._guard_write():
+                await self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    current_trades = await self.db.execute_fetchall(trade_identity_query, (asset_key, oldest))
+                    current_coverage = await self.db.execute_fetchall(coverage_query, (asset_key, oldest))
+                    if ([tuple(r) for r in current_trades] != trade_identity
+                            or [tuple(r) for r in current_coverage] != coverage_identity):
+                        await self.db.rollback()
+                        continue
+                    await publish(calculated)
+                    await self.db.commit()
+                    return latest
+                except BaseException:
+                    await self.db.rollback()
+                    raise
+
+        # A very hot asset can change during every optimistic calculation.
+        # Reserve the SQLite writer only for that case so the next update is
+        # guaranteed to include the committed source rows at transaction time.
+        async with self._guard_write():
+            await self.db.execute("BEGIN IMMEDIATE")
+            try:
+                observations, coverage = await read_source(self.db)
+                latest, calculated = calculate(observations, coverage)
+                await publish(calculated)
                 await self.db.commit()
+                return latest
             except BaseException:
                 await self.db.rollback()
                 raise
-        return latest
 
     async def trade_buckets(self, asset: str, bar: str, limit: int = 120) -> list:
         observations = await self.fetchall(

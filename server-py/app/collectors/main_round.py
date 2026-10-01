@@ -13,6 +13,7 @@ from web3.exceptions import ContractLogicError
 from web3.middleware import ExtraDataToPOAMiddleware
 
 from ..db import store
+from ..demand_leases import all_leases
 from ..okx_client import okx_get, request_lane, QuotaExceeded
 from ..registry import w3
 from ..stream_hub import broadcast
@@ -569,7 +570,7 @@ async def refresh_liquidity():
     for cid in ("196", "56", "4663"):
         s = await store(cid)
         queue = await jobs(s, "pool-quote")
-        watched = {w.get("token") for w in await s.all("watch") if (w.get("expiresAt") or 0) > now}
+        watched = {w.get("token") for w in await all_leases(s, "watch") if (w.get("expiresAt") or 0) > now}
         for rel in await s.all("relation"):
             job = queue.get(rel.get("pool"), {})
             interval = 30_000 if rel.get("token") in watched or rel.get("stock") in watched else 240_000

@@ -8,6 +8,7 @@ budget so the collection round can never stall a user-facing refresh."""
 import asyncio
 
 from ..db import store
+from ..demand_leases import all_leases
 from ..okx_client import okx_get, request_lane, QuotaExceeded
 from ..stream_hub import broadcast
 from .assets import now_ms
@@ -203,7 +204,7 @@ async def refresh_hot_trades():
     for chain in ('196', '56', '4663'):
         s = await store(chain)
         queue = await jobs(s, 'trades')
-        watches = {w.get('token') for w in await s.all('watch') if (w.get('expiresAt') or 0) > now}
+        watches = {w.get('token') for w in await all_leases(s, 'watch') if (w.get('expiresAt') or 0) > now}
         related = {r.get('token') for r in await s.all('relation') if r.get('status') == 'verified'}
         assets = [a for a in await s.all('asset') if a.get('kind') in ('candidate', 'stock')
                   and str(a.get('symbol') or '').upper() not in BASE_QUOTE_SYMBOLS]

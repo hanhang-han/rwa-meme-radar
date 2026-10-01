@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 from app import insights
 from app.asset_facts import build_fact_packet, fact_hash, template_lines, validate_model_text
 from app.db import ResearchStore
-from app.demand_leases import flush_lease_writer
+from app.demand_leases import all_lease_kv, flush_lease_writer
 
 
 class InsightTests(unittest.IsolatedAsyncioTestCase):
@@ -146,7 +146,7 @@ class InsightTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first['source'], 'template')
             model.assert_not_awaited()
             await flush_lease_writer()
-            self.assertEqual((await self.db.get('insight-demand', self.token + ':en'))['factHash'],
+            self.assertEqual(dict(await all_lease_kv(self.db,'insight-demand'))[self.token + ':en']['factHash'],
                              first['factHash'])
             model.return_value = {'text': first['text'], 'at': self.now}
             with patch.object(insights, 'CHAINS', ('56',)):
@@ -175,7 +175,7 @@ class InsightTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(insights, 'CHAINS', ('56',)):
                 await insights.refresh_insights()
         self.assertEqual(result['source'], 'template')
-        self.assertIsNone(await self.db.get('insight-demand', self.token + ':zh'))
+        self.assertNotIn(self.token + ':zh', dict(await all_lease_kv(self.db,'insight-demand')))
         model.assert_not_awaited()
 
     async def test_rejected_model_output_keeps_template(self):

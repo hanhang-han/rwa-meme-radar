@@ -265,12 +265,41 @@ class MarketStreamProcessor:
             if pending:
                 await self.flush(pending)
 
+    @staticmethod
+    def _coalesce_backlog(messages):
+        """Keep each trade, but persist only the newest replaceable observation.
+
+        Coalescing before the 16-row transaction split prevents a busy market's
+        repeated quote/candle updates from becoming dozens of separate writes.
+        The first observation keeps its place so a quote is not delayed behind
+        an entire replay page of trades.
+        """
+        ordered=[]
+        latest={}
+        for position,(typ,market,data) in enumerate(messages):
+            item=(typ,market,data)
+            if typ=='trade':
+                ordered.append((position,item))
+                continue
+            ident=(typ,market.chain_id,market.storage,data.get('bar'),(data.get('row') or {}).get('t'))
+            prior=latest.get(ident)
+            if prior is None:
+                latest[ident]=(position,item)
+            elif typ=='quote':
+                latest[ident]=(prior[0],(typ,market,merge_quote(prior[1][2],data)))
+            elif data.get('sourceEventAt',data.get('marketAt',0)) >= prior[1][2].get('sourceEventAt',prior[1][2].get('marketAt',0)):
+                latest[ident]=(prior[0],item)
+        ordered.extend(latest.values())
+        ordered.sort(key=lambda entry:entry[0])
+        return [item for _,item in ordered]
+
     async def flush(self, messages):
         from ..realtime_schema import enqueue_events
         # Replay pages contain up to 1,000 trades. A 128-event transaction
         # held SQLite's only writer for over 45 seconds in production. Keep
         # each commit short so the projection and quote collectors can write.
         if len(messages)>16:
+            messages=self._coalesce_backlog(messages)
             for offset in range(0,len(messages),16):
                 await self.flush(messages[offset:offset+16])
                 await asyncio.sleep(0)
@@ -350,6 +379,12 @@ class MarketStreamProcessor:
                             if old.get('sourceEventAt',0)>body['sourceEventAt'] and old.get('statisticsAt',0)>=body.get('statisticsAt',0):
                                 continue
                             body=merge_quote(old,body)
+                            # A reconnect can replay the exact same exchange
+                            # observation. Receipt time alone is not a new
+                            # price, so avoid a fact/outbox/event write.
+                            if old and {key:value for key,value in body.items() if key not in ('receivedAt','persistedAt')} == {
+                                    key:value for key,value in old.items() if key not in ('receivedAt','persistedAt')}:
+                                continue
                             body['persistedAt']=persisted
                             body.update(timeKind='market',quoteAt=body['marketAt'],
                                 priceProvenance={'timeKind':'market','marketAt':body['marketAt'],

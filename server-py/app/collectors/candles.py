@@ -2,6 +2,7 @@
 import time
 
 from ..db import store
+from ..demand_leases import all_lease_kv
 from ..okx_client import request_lane
 
 
@@ -11,7 +12,7 @@ async def refresh_watched_candles():
     work = []
     for chain in ('196','56','4663'):
         s = await store(chain)
-        for key, lease in await s.all_kv('candle-watch'):
+        for key, lease in await all_lease_kv(s, 'candle-watch'):
             if lease.get('expiresAt',0)<=now or lease.get('bar') not in BARS:
                 continue
             if lease.get('pool'):

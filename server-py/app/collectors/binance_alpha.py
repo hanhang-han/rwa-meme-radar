@@ -11,6 +11,7 @@ import re
 import httpx
 
 from ..db import store
+from ..demand_leases import all_lease_kv
 from .exchange_stream import BinanceMarketFeed
 from .market_streams import Market, now_ms
 
@@ -139,7 +140,7 @@ async def markets():
                 address=str(row.get('token') or row.get('tokenContractAddress') or row.get('address') or '').lower()
                 if address:
                     assets.add(address)
-        watched={(r.get('address'),r.get('market')) for _,r in await s.all_kv('candle-watch')
+        watched={(r.get('address'),r.get('market')) for _,r in await all_lease_kv(s, 'candle-watch')
                  if r.get('venue')=='binance-alpha' and r.get('expiresAt',0)>now_ms()}
         definitions=[]
         for _,row in await s.all_kv('market-registry'):

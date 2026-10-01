@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..db import store
+from ..demand_leases import all_leases
 from ..okx_client import okx_post, request_lane, QuotaExceeded
 from ..stream_hub import broadcast
 from .assets import now_ms, save_asset
@@ -134,7 +135,7 @@ async def quote_on_demand(chain, address):
 
 async def core_assets(cid, s, now, queue=None):
     assets = [a for a in await s.all('asset') if a.get('kind') in ('stock', 'candidate') and valid_token(a.get('token'))]
-    watches = {x.get('token') for x in await s.all('watch') if (x.get('expiresAt') or 0) > now}
+    watches = {x.get('token') for x in await all_leases(s, 'watch') if (x.get('expiresAt') or 0) > now}
     watches |= {t for (c, t), at in _watched.items() if c == cid and now / 1000 - at < 60}
     relations = [r for r in await s.all('relation') if r.get('status') == 'verified']
     related = {r.get('token') for r in relations} | {r.get('stock') for r in relations}

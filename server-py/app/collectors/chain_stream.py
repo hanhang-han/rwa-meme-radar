@@ -20,6 +20,7 @@ import websockets
 from web3 import Web3
 
 from ..db import ResearchStore, retry_busy_write, store
+from ..demand_leases import all_leases
 from ..pool_quotes import pool_ratio
 
 SWAP_V2 = Web3.to_hex(Web3.keccak(text="Swap(address,uint256,uint256,uint256,uint256,address)"))
@@ -373,7 +374,7 @@ class ChainPoolStream:
         if now_ms() - self.last_watches < 5_000:
             return
         watched_bars = {}
-        for watch in await (self.status_store or self.s).all("candle-watch"):
+        for watch in await all_leases(self.status_store or self.s, "candle-watch"):
             if watch.get("pool") and (watch.get("expiresAt") or 0) > now_ms() and watch.get("bar") in BAR_MS:
                 key = (watch["pool"].lower(), watch.get("address", "").lower())
                 watched_bars.setdefault(key, set()).add(watch["bar"])
@@ -975,6 +976,12 @@ class ChainPoolStream:
         db = self.trade_db or s.db
         with self._measure_live_stage("usdEvidence"):
             usd_fields = await dated_usd_volume(db, s, market, trade)
+        # Market identity, watched bars, and the fact selector do not depend on
+        # the current database snapshot. Prepare them before BEGIN IMMEDIATE
+        # so a busy stream does not hold SQLite's sole writer while building
+        # the same keys for every trade.
+        market_frame = market.frame()
+        market_record = market.record()
         # _guard_write rolls back s.db on failure. A dedicated transaction must
         # hold the same lock without touching an unrelated shared transaction.
         write_guard = s._write_lock if db is not s.db else s._guard_write()
@@ -985,10 +992,33 @@ class ChainPoolStream:
                 self.live_trade_lock_wait_ms.append(round(
                     (time.perf_counter() - lock_started) * 1000, 1))
             stamp = now_ms()
-            market_frame = market.frame()
             body = {**market_frame, **trade, "provider": "Chain RPC", "source": "Chain RPC",
                     "receivedAt": received, "sourceEventAt": trade["t"], "persistedAt": stamp,
                     "volume": None, **usd_fields}
+            trade_body = json.dumps(body, separators=(",", ":"))
+            registry_changed = self.market_registry.get(market.storage) != market_record
+            registry_fact = (self._fact_params("market-registry", market.storage, market_record)
+                             if registry_changed else None)
+            # Watch leases can change while waiting for the process lock. Read
+            # them here, but still before SQLite's cross-process writer lock.
+            bars = self.bars(market)
+            bar_keys = {}
+            for bar in bars:
+                width = BAR_MS[bar]
+                offset = 4 * 86400000 if width == 604800000 else 0
+                opened = (trade["t"] - offset) // width * width + offset
+                bar_keys[bar] = (opened, market.storage + ":" + bar + ":" + str(opened))
+            selectors = {
+                "pool-candle-acc": [bar_keys[bar][1] for bar in bars],
+                "market-candle": [market.storage + ":" + bar for bar in bars],
+                "candle-meta": [market.candle_key(bar) for bar in bars],
+            }
+            where, args = [], []
+            for kind, keys in selectors.items():
+                where.append("(kind=? AND id IN (" + ",".join("?" for _ in keys) + "))")
+                args.extend((s.key(kind), *keys))
+            current_query = "SELECT kind,id,body FROM facts WHERE " + " OR ".join(where)
+            kind_names = {s.key(kind): kind for kind in selectors}
             try:
                 begin_started = time.perf_counter()
                 await db.execute("BEGIN IMMEDIATE")
@@ -996,40 +1026,19 @@ class ChainPoolStream:
                     self.live_trade_begin_ms.append(round(
                         (time.perf_counter() - begin_started) * 1000, 1))
                 insert = await db.execute("INSERT OR IGNORE INTO trades VALUES (?,?,?,?)",
-                    (s.key(market.storage), trade["id"], trade["t"], json.dumps(body)))
+                    (s.key(market.storage), trade["id"], trade["t"], trade_body))
                 if not insert.rowcount:
                     await db.rollback()
                     return False
-                market_record = market.record()
                 # Catalogue persists known definitions before subscription.
                 # The same registry JSON need not be rewritten for each trade.
                 # Cache only after a successful atomic trade commit below.
-                registry_changed = self.market_registry.get(market.storage) != market_record
-                fact_rows = ([self._fact_params("market-registry", market.storage, market_record)]
-                             if registry_changed else [])
+                fact_rows = [registry_fact] if registry_fact else []
                 candle_rows = []
                 events = []
-                bars = self.bars(market)
-                bar_keys = {}
-                for bar in bars:
-                    width = BAR_MS[bar]
-                    offset = 4 * 86400000 if width == 604800000 else 0
-                    opened = (trade["t"] - offset) // width * width + offset
-                    bar_keys[bar] = (opened, market.storage + ":" + bar + ":" + str(opened))
-
-                selectors = {
-                    "pool-candle-acc": [bar_keys[bar][1] for bar in bars],
-                    "market-candle": [market.storage + ":" + bar for bar in bars],
-                    "candle-meta": [market.candle_key(bar) for bar in bars],
-                }
-                where, args = [], []
-                for kind, keys in selectors.items():
-                    where.append("(kind=? AND id IN (" + ",".join("?" for _ in keys) + "))")
-                    args.extend((s.key(kind), *keys))
                 rows = await db.execute_fetchall(
-                    "SELECT kind,id,body FROM facts WHERE " + " OR ".join(where), tuple(args))
+                    current_query, tuple(args))
                 current = {kind: {} for kind in selectors}
-                kind_names = {s.key(kind): kind for kind in selectors}
                 for kind, key, value in rows:
                     current[kind_names[kind]][key] = json.loads(value)
                 accumulators = current["pool-candle-acc"]
@@ -1097,7 +1106,9 @@ class ChainPoolStream:
         await self.s.db.execute(FACT_UPSERT, self._fact_params(kind, key, value))
 
     def _fact_params(self, kind, key, value):
-        return self.s.key(kind), key, json.dumps(value, allow_nan=False)
+        # Candle metadata can contain 1,000 observation watermarks. Compact
+        # JSON keeps the same facts while reducing bytes written on each tick.
+        return self.s.key(kind), key, json.dumps(value, allow_nan=False, separators=(",", ":"))
 
     async def _observe_bar(self, market, bar, opened, stamp):
         meta = await self.s.get("candle-meta",market.candle_key(bar)) or {}
