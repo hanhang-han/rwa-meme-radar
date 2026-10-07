@@ -27,7 +27,7 @@ test('lookalike wrappers and stock-to-stock pools do not establish a meme relati
   assert.equal(result.relation,null);
   await assert.rejects(verifyXPool(pool,stocks,async()=>word(stock)),/invalid/);
 });
-test('wrong network, missing trade ID and unknown direction cannot contaminate activity',()=>{
+test('wrong network, missing trade ID and unknown direction cannot contaminate activity',async()=>{
   const row={chainIndex:'196',tokenContractAddress:meme,id:'event-1',time:'1234567',type:'buy',volume:'0'};
   assert.equal(normalizeTrade(row,meme)?.volume,0);
   assert.equal(normalizeTrade({...row,chainIndex:'56'},meme),null);
@@ -35,7 +35,7 @@ test('wrong network, missing trade ID and unknown direction cannot contaminate a
   assert.equal(normalizeTrade({...row,type:'mint'},meme),null);
   assert.equal(normalizeTrade({...row,volume:''},meme)?.volume,null);
 });
-test('same names group for display without merging addresses or missing fields into zeros',()=>{
+test('same names group for display without merging addresses or missing fields into zeros',async()=>{
   const a=normalizeXAsset({chainIndex:'196',tokenContractAddress:meme,tokenSymbol:'Apple',price:'',txsBuy:'0'})!;
   const b=normalizeXAsset({chainIndex:'196',tokenContractAddress:wrapper,tokenSymbol:'APPLE',price:'2'})!;
   assert.equal(a.price,null);assert.equal(a.buys24h,0);assert.equal(a.sells24h,null);
@@ -43,7 +43,7 @@ test('same names group for display without merging addresses or missing fields i
   assert.equal(groupCandidates([a,b],[])[0].members.length,2);
   assert.equal(normalizeXAsset({chainIndex:'56',tokenContractAddress:meme}),null);
 });
-test('unified feed retains internal provenance while merging stock-token catalogues',()=>{
+test('unified feed retains internal provenance while merging stock-token catalogues',async()=>{
   const feed=unifiedFromXLayer({
     status:'ready',updatedAt:10,coverage:{},assets:[{token:meme,chain:'196'}],
     relations:[{id:'r',token:meme}],signals:[{asset:meme}],groups:[],sectors:[],metrics:{},
@@ -59,23 +59,23 @@ test('unified feed retains internal provenance while merging stock-token catalog
   assert.deepEqual(feed.sources[2],{id:'binance:bstocks:56',provider:'Binance',chainId:'56',chainName:'BNB Smart Chain',status:'ready',updatedAt:13});
   assert.equal(feed.stockTokens[2].tokenContractAddress,pool);
 });
-test('archive survives pagination limits, duplicate replays and database restart',()=>{
+test('archive survives pagination limits, duplicate replays and database restart',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'xlayer-test-')),file=join(dir,'test.sqlite');
   let store=new ResearchStore(file);
   try {
-    for(let i=0;i<2100;i++)store.put('asset',String(i),{token:i});
-    store.event('pool-1',meme,{label:'verified'},1);
-    store.event('pool-1',meme,{label:'verified again'},2);
+    for(let i=0;i<2100;i++)(await store.put('asset',String(i),{token:i}));
+    (await store.event('pool-1',meme,{label:'verified'},1));
+    (await store.event('pool-1',meme,{label:'verified again'},2));
     const trade={id:'x',t:100,type:'buy',volume:1,user:meme};
-    store.trades(meme,[trade]);store.trades(meme,[trade]);
-    store.sample(meme,1,100,300000);store.sample(meme,2,200,300001);
-    store.close();store=new ResearchStore(file);
-    assert.equal(store.all('asset').length,2100);
-    assert.deepEqual(store.get('asset','0'),{token:0});
-    assert.equal(store.events().length,1);
-    assert.equal(store.activity(meme,0).buys,1);
-    assert.equal(store.activity(meme,0).volume,1);
-    assert.equal(store.samples(meme).length,1);
-    assert.equal(store.samples(meme)[0].price,2);
-  }finally{store.close();rmSync(dir,{recursive:true,force:true});}
+    (await store.trades(meme,[trade]));(await store.trades(meme,[trade]));
+    (await store.sample(meme,1,100,300000));(await store.sample(meme,2,200,300001));
+    (await store.close());store=new ResearchStore(file);
+    assert.equal((await store.all('asset')).length,2100);
+    assert.deepEqual((await store.get('asset','0')),{token:0});
+    assert.equal((await store.events()).length,1);
+    assert.equal((await store.activity(meme,0)).buys,1);
+    assert.equal((await store.activity(meme,0)).volume,1);
+    assert.equal((await store.samples(meme)).length,1);
+    assert.equal((await store.samples(meme))[0].price,2);
+  }finally{(await store.close());rmSync(dir,{recursive:true,force:true});}
 });

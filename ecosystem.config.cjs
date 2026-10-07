@@ -14,6 +14,7 @@ module.exports = { apps: [
     script: '/opt/memedashboard/server-py/.venv/bin/uvicorn',
     args: 'app.main:app --app-dir server-py --host 127.0.0.1 --port 8010',
     interpreter: 'none', exec_mode: 'fork', instances: 1, autorestart: true,
+    env: { LIVE_MARKET_ENABLED: 'true', LIVE_MARKET_DB: 'data/live-market.sqlite', DEMAND_LEASE_DB: 'data/research.sqlite.leases.sqlite' },
   },
   {
     name: 'pyradar-worker',
@@ -21,7 +22,7 @@ module.exports = { apps: [
     script: '/opt/memedashboard/server-py/.venv/bin/python',
     args: '-m app.worker',
     interpreter: 'none', exec_mode: 'fork', instances: 1, autorestart: true,
-    env: { PYTHONPATH: '/opt/memedashboard/server-py', WORKER_HEALTH_PATH: 'data/worker-health.json' },
+    env: { PYTHONPATH: '/opt/memedashboard/server-py', WORKER_HEALTH_PATH: 'data/worker-health.json', PROCESS_NICE: '10', PROCESS_IO_NICE: '7', DEMAND_LEASE_DB: 'data/research.sqlite.leases.sqlite' },
   },
   {
     name: 'pyradar-projection',
@@ -29,6 +30,30 @@ module.exports = { apps: [
     script: '/opt/memedashboard/server-py/.venv/bin/python',
     args: '-m app.projection_worker',
     interpreter: 'none', exec_mode: 'fork', instances: 1, autorestart: true,
-    env: { PYTHONPATH: '/opt/memedashboard/server-py', WORKER_HEALTH_PATH: 'data/projection-health.json' },
+    env: { PYTHONPATH: '/opt/memedashboard/server-py', WORKER_HEALTH_PATH: 'data/projection-health.json', PROJECTION_COOLDOWN_SECONDS: '15', PROCESS_NICE: '15', PROCESS_IO_NICE: '7' },
+  },
+  {
+    name: 'pyradar-read-model',
+    cwd: '/opt/memedashboard',
+    script: '/opt/memedashboard/server-py/.venv/bin/python',
+    args: '-m app.read_model_worker',
+    interpreter: 'none', exec_mode: 'fork', instances: 1, autorestart: true,
+    env: { PYTHONPATH: '/opt/memedashboard/server-py', ARCHITECTURE_SETTINGS: 'data/architecture-runtime.json', READ_MODEL_HEALTH_PATH: 'data/read-model-health.json', PROCESS_NICE: '8', PROCESS_IO_NICE: '6' },
+  },
+  {
+    name: 'pyradar-market',
+    cwd: '/opt/memedashboard',
+    script: '/opt/memedashboard/server-py/.venv/bin/python',
+    args: '-m app.market_worker',
+    interpreter: 'none', exec_mode: 'fork', instances: 1, autorestart: true,
+    env: { PYTHONPATH: '/opt/memedashboard/server-py', LIVE_MARKET_ENABLED: 'true', LIVE_MARKET_DB: 'data/live-market.sqlite', DEMAND_LEASE_DB: 'data/research.sqlite.leases.sqlite', MARKET_WORKER_HEALTH_PATH: 'data/market-worker-health.json', LIVE_MARKET_POOL_LIMIT: '32', LIVE_MARKET_MEME_LIMIT: '20', LIVE_MARKET_STOCK_LIMIT: '10' },
+  },
+  {
+    name: 'pyradar-market-api',
+    cwd: '/opt/memedashboard',
+    script: '/opt/memedashboard/server-py/.venv/bin/uvicorn',
+    args: 'app.market_main:app --app-dir server-py --host 127.0.0.1 --port 8011',
+    interpreter: 'none', exec_mode: 'fork', instances: 1, autorestart: true,
+    env: { LIVE_MARKET_ENABLED: 'true', LIVE_MARKET_DB: 'data/live-market.sqlite', DEMAND_LEASE_DB: 'data/research.sqlite.leases.sqlite' },
   },
 ] };

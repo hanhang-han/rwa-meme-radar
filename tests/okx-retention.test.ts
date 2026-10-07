@@ -25,15 +25,15 @@ test('a smaller valid OKX page retains each durable stock with its original quot
     process.env.OKX_LEDGER_PATH=join(directory,'okx-budget.sqlite');
     process.env.OKX_API_KEY='test';process.env.OKX_SECRET_KEY='test';process.env.OKX_PASSPHRASE='test';
     const bnb=new ResearchStore(file,'56');
-    bnb.put('stock',a,stock(a,1,oldAt));
-    bnb.put('stock',b,stock(b,2,oldAt));
-    bnb.put('stock',c,stock(c,3));
-    bnb.put('asset',b,{token:b,chain:'56',symbol:'TESTx',name:'Test stock',kind:'stock',
-      firstSeen:existingFirstSeen,updatedAt:oldAt,price:2,fieldTimes:{price:oldAt}});
-    bnb.close();
+    (await bnb.put('stock',a,stock(a,1,oldAt)));
+    (await bnb.put('stock',b,stock(b,2,oldAt)));
+    (await bnb.put('stock',c,stock(c,3)));
+    (await bnb.put('asset',b,{token:b,chain:'56',symbol:'TESTx',name:'Test stock',kind:'stock',
+      firstSeen:existingFirstSeen,updatedAt:oldAt,price:2,fieldTimes:{price:oldAt}}));
+    (await bnb.close());
     const xlayer=new ResearchStore(file,'196');
-    xlayer.put('stock',other,{...stock(other,4,oldAt),chainIndex:'196'});
-    xlayer.close();
+    (await xlayer.put('stock',other,{...stock(other,4,oldAt),chainIndex:'196'}));
+    (await xlayer.close());
     mkdirSync(join(directory,'data'));
     writeFileSync(join(directory,'data/okx-56.json'),JSON.stringify({status:'ready',updatedAt:oldAt,
       tokens:[stock(a,1,oldAt),stock(c,3)],error:null}));
@@ -43,7 +43,7 @@ test('a smaller valid OKX page retains each durable stock with its original quot
       issuer:'Test',price:'9',stockPrice:'10',volume24h:'5',marketCap:'900',
     }]}}))) as typeof fetch;
     const {refreshOkx,restoreOkxCatalogue,extraOkx}=await import('../src/lib/okx');
-    const restored=restoreOkxCatalogue('56');
+    const restored=await restoreOkxCatalogue('56');
     assert.equal(restored.status,'partial');
     assert.equal(restored.tokens.length,3);
     assert.equal(JSON.parse(readFileSync(join(directory,'data/okx-56.json'),'utf8')).tokens.length,3);
@@ -71,21 +71,21 @@ test('a smaller valid OKX page retains each durable stock with its original quot
     assert.equal(snapshot.tokens.find((t:any)=>t.tokenContractAddress===c).quoteAt,null);
 
     const persisted=new ResearchStore(file,'56');
-    assert.equal(persisted.get<any>('stock',a)?.price,1);
-    assert.equal(persisted.get<any>('asset',b)?.fieldTimes?.price,oldAt);
-    assert.equal(persisted.get<any>('asset',b)?.firstSeen,existingFirstSeen);
-    assert.equal(persisted.get<any>('asset',c),null);
-    persisted.close();
+    assert.equal((await persisted.get<any>('stock',a))?.price,1);
+    assert.equal((await persisted.get<any>('asset',b))?.fieldTimes?.price,oldAt);
+    assert.equal((await persisted.get<any>('asset',b))?.firstSeen,existingFirstSeen);
+    assert.equal((await persisted.get<any>('asset',c)),null);
+    (await persisted.close());
     const {dashboardState}=await import('../src/lib/dashboard-v2');
-    const rows=new Map(dashboardState().stockTokens.filter((t:any)=>t.chainId==='56').map((t:any)=>[t.tokenContractAddress,t]));
+    const rows=new Map((await dashboardState()).stockTokens.filter((t:any)=>t.chainId==='56').map((t:any)=>[t.tokenContractAddress,t]));
     assert.equal((rows.get(b) as any)?.updatedAt,oldAt);
     assert.equal((rows.get(c) as any)?.updatedAt,null);
     const freshQuoteAt=Date.now();
     const quoteWriter=new ResearchStore(file,'56');
-    quoteWriter.put('asset',b,{token:b,price:8,fieldTimes:{price:freshQuoteAt},updatedAt:freshQuoteAt});
-    assert.equal(quoteWriter.get<any>('asset',b)?.fieldTimes?.price,freshQuoteAt);
-    quoteWriter.close();
-    const quoted=dashboardState().stockTokens.find((t:any)=>t.chainId==='56'&&t.tokenContractAddress===b) as any;
+    (await quoteWriter.put('asset',b,{token:b,price:8,fieldTimes:{price:freshQuoteAt},updatedAt:freshQuoteAt}));
+    assert.equal((await quoteWriter.get<any>('asset',b))?.fieldTimes?.price,freshQuoteAt);
+    (await quoteWriter.close());
+    const quoted=(await dashboardState()).stockTokens.find((t:any)=>t.chainId==='56'&&t.tokenContractAddress===b) as any;
     assert.equal(quoted.updatedAt,freshQuoteAt);
     assert.equal(quoted.referenceAt,oldAt);
     assert.equal(quoted.premium.value,null);

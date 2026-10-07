@@ -29,7 +29,7 @@ test('stablecoin or unknown units do not silently become dollars',()=>{
 
 test('the shared amount component compiles and labels unpriced USD clearly',()=>{
   assert.doesNotThrow(()=>compileScript(descriptor,{id:'trade-amount-test'}));
-  assert.match(source,/美元金额未计价/);
-  for(const file of ['LiveView.vue','DetailView.vue'])
-    assert.match(readFileSync(new URL(`../src/views/${file}`,import.meta.url),'utf8'),/<TradeAmount :trade=/);
+  assert.match(source,/暂无法折算为美元/);
+  for(const file of ['components/HomeActivityPanel.vue','views/DetailView.vue'])
+    assert.match(readFileSync(new URL(`../src/${file}`,import.meta.url),'utf8'),/<TradeAmount :trade=/);
 });

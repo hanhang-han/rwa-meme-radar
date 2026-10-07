@@ -6,8 +6,22 @@ import { buildTickerSet, matchStock } from '../src/lib/stocks';
 const native='0xc845b2894dbddd03858fd2d643b4ef725fe0849d';
 const current='0xa8ddb5cd96b5222afe198316e9a57caa642850d5';
 
+test('Robinhood authority uses a pinned issuer asset ID, ISIN and exact chain deployment',()=>{
+  const address='0x117cc2133c37b721f49de2a7a74833232b3b4c0c';
+  const trust=officialStockIdentity('4663',address.toUpperCase().replace('0X','0x'),'WRONG');
+  assert.equal(trust.ticker,'SPY');
+  assert.equal(trust.underlyingIsin,'US78462F1030');
+  assert.equal(trust.issuer,'Robinhood Assets (Jersey) Limited');
+  assert.equal(trust.eligibleForPair,true);
+  assert.match(trust.underlyingId!,/^robinhood:0x/);
+  assert.equal(trust.sourceUrl,'https://api.robinhood.com/rhj/assets');
+  for(const chain of ['196','56'])assert.equal(officialStockIdentity(chain,address,'SPY').eligibleForPair,false);
+  assert.equal(officialStockIdentity('4663','0x'+'9'.repeat(40),'SPY').eligibleForPair,false);
+  assert.equal(stockTokenManifest.issuers.length,2);
+});
+
 test('official issuer identity is pinned to chain and address, not a matching ticker',()=>{
-  assert.equal(stockTokenManifest.entries,4592);
+  assert.equal(stockTokenManifest.entries,4786);
   const a=officialStockIdentity('196',native),b=officialStockIdentity('196',current);
   assert.equal(a.verificationStatus,'official');
   assert.equal(a.tokenKind,'native');

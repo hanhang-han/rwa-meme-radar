@@ -4,6 +4,7 @@ import { okxGet } from './okx-client';
 import { readSnapshot, writeSnapshot } from './snapshot';
 import { canonicalStockCode } from './stock-identity';
 import { ResearchStore } from './research-store';
+import { postgresResearchEnabled } from './postgres-storage';
 
 export interface RwaToken {
   chainIndex: string; tokenContractAddress: string; tokenSymbol: string;
@@ -42,27 +43,27 @@ function catalogueStore(chain:string){
   // tests opt in with their own temporary database.
   if(process.env.NODE_ENV==='test'&&!process.env.RESEARCH_DB)return null;
   const path=process.env.RESEARCH_DB||'data/research.sqlite';
-  if(!existsSync(path))return null;
+  if(!existsSync(path)&&!postgresResearchEnabled())return null;
   return new ResearchStore(path,chain,{readOnly:true});
 }
-function mergeDurable(chain:string,tokens:RwaToken[],store:ResearchStore|null){
+async function mergeDurable(chain:string,tokens:RwaToken[],store:ResearchStore|null){
   const previous=new Map<string,RwaToken>();
   for(const row of tokens){const token=storedToken(row,chain);if(token)previous.set(addressKey(token.tokenContractAddress),token);}
-  // SQLite is the durable catalogue. The JSON snapshot supplies observation
+  // The database is the durable catalogue. The JSON snapshot supplies observation
   // times for legacy stock facts that predate per-token quoteAt.
-  for(const row of store?.all<RwaToken>('stock')??[]){
+  for(const row of store?await store.all<RwaToken>('stock'):[]){
     const address=addressKey(row?.tokenContractAddress);
     // A discovery/firstSeen timestamp says nothing about when a price was
     // observed. Only a preserved row clock or a priced asset field can supply
     // the missing legacy quote time.
-    const fallback=previous.get(address)?.quoteAt??store?.get<{fieldTimes?:{price?:number}}>('asset',address)?.fieldTimes?.price??null;
+    const fallback=previous.get(address)?.quoteAt??(store?await store.get<{fieldTimes?:{price?:number}}>('asset',address):null)?.fieldTimes?.price??null;
     const token=storedToken(row,chain,fallback);
     const existing=previous.get(address);
     if(token&&(!existing||(token.quoteAt??0)>=(existing.quoteAt??0)))previous.set(address,{...existing,...token});
   }
   return previous;
 }
-export function restoreOkxCatalogue(chain='196') {
+export async function restoreOkxCatalogue(chain='196') {
   const target=chain==='196'?okxState:(extraOkx[chain]??={status:'starting',updatedAt:null,tokens:[],error:null});
   const path=`data/okx${chain==='196'?'':'-'+chain}.json`;
   let saved:typeof target|null=null;
@@ -83,32 +84,32 @@ export function restoreOkxCatalogue(chain='196') {
     store=catalogueStore(chain);
     const before=JSON.stringify(target.tokens);
     const previousCount=target.tokens.length;
-    target.tokens=[...mergeDurable(chain,target.tokens,store).values()];
+    target.tokens=[...(await mergeDurable(chain,target.tokens,store)).values()];
     if(target.tokens.length>previousCount){
       target.status=target.updatedAt?'partial':'stale';
-      target.error=target.updatedAt?`SQLite catalogue contains ${target.tokens.length-previousCount} token${target.tokens.length-previousCount===1?'':'s'} absent from JSON snapshot`:null;
+      target.error=target.updatedAt?`Durable catalogue contains ${target.tokens.length-previousCount} token${target.tokens.length-previousCount===1?'':'s'} absent from JSON snapshot`:null;
     }else if(target.tokens.length&&(target.status==='starting'||target.status==='unconfigured'))target.status='stale';
     if(process.env.NODE_ENV!=='test'&&before!==JSON.stringify(target.tokens))writeSnapshot(path,target);
     if(store||process.env.NODE_ENV==='test'&&!process.env.RESEARCH_DB)durableRestored.add(chain);
   }catch(e){
     target.status=target.tokens.length?'stale':'error';
     target.error=e instanceof Error?e.message:'Catalogue unavailable';
-  }finally{store?.close();}
+  }finally{await store?.close();}
   return target;
 }
 export async function refreshOkx(chain='196') {
-  const target=restoreOkxCatalogue(chain);
+  const target=await restoreOkxCatalogue(chain);
   let store:ResearchStore|null=null;
   let previous=new Map<string,RwaToken>();
   let catalogueReadError:string|null=null;
   try {
     try{
       store=catalogueStore(chain);
-      previous=mergeDurable(chain,target.tokens,store);
+      previous=await mergeDurable(chain,target.tokens,store);
     }catch(error){
-      catalogueReadError=error instanceof Error?error.message:'SQLite catalogue unavailable';
-      previous=mergeDurable(chain,target.tokens,null);
-    }finally{store?.close();store=null;}
+      catalogueReadError=error instanceof Error?error.message:'Durable catalogue unavailable';
+      previous=await mergeDurable(chain,target.tokens,null);
+    }finally{await store?.close();store=null;}
     target.tokens=[...previous.values()];
     const key = process.env.OKX_API_KEY, secret = process.env.OKX_SECRET_KEY, passphrase = process.env.OKX_PASSPHRASE;
     if (!key || !secret || !passphrase) { target.status = 'unconfigured'; return; }
@@ -148,7 +149,7 @@ export async function refreshOkx(chain='196') {
     const retained=target.tokens.length-fetched.size;
     target.status=retained||catalogueReadError?'partial':'ready';
     target.error=[retained?`OKX omitted ${retained} previously catalogued stock token${retained===1?'':'s'}`:null,
-      catalogueReadError?`SQLite catalogue unavailable: ${catalogueReadError}`:null].filter(Boolean).join('; ')||null;
+      catalogueReadError?`Durable catalogue unavailable: ${catalogueReadError}`:null].filter(Boolean).join('; ')||null;
     if (process.env.NODE_ENV !== 'test') writeSnapshot(`data/okx${chain==='196'?'':'-'+chain}.json`, target);
   } catch (e) {
     target.status = target.tokens.length ? 'stale' : 'error';

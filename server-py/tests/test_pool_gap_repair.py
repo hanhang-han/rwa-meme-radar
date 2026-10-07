@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 from app.db import ResearchStore
 from app.collectors.chain_stream import ChainPoolStream
 from app.collectors.discovery_coverage import reconcile_bnb
-from app.collectors.factory_discovery import BSC_FACTORIES, FACTORY_SELECTOR, GET_PAIR_SELECTOR, GET_POOL_SELECTOR
+from app.collectors.factory_discovery import BSC_FACTORIES, FACTORIES_BY_CHAIN, FACTORY_SELECTOR, GET_PAIR_SELECTOR, GET_POOL_SELECTOR
 from app.collectors.pool_gap_repair import KIND, PoolGapRepair, queue_indexed_gap, verify_indexed_pool
 from app.stock_identity import token_identity
 
@@ -42,7 +42,7 @@ def gap(pool=POOL, other=MEME):
 
 
 class FakeProofRpc:
-    def __init__(self, *, factory=None, other=MEME, pool=POOL, fee=2500, symbol="MOON"):
+    def __init__(self, *, factory=None, other=MEME, pool=POOL, fee=2500, symbol="MOON", chain='56'):
         self.factory = factory or BSC_FACTORIES[1]
         self.other, self.pool, self.fee = other, pool, fee
         self.symbol = symbol
@@ -54,6 +54,7 @@ class FakeProofRpc:
         self.reorg = False
         self.empty_code = False
         self.headers = 0
+        self.chain = chain
 
     async def __call__(self, method, params):
         self.calls.append((method, params))
@@ -61,7 +62,7 @@ class FakeProofRpc:
             self.fail_once = False
             raise TimeoutError("rpc timeout")
         if method == "eth_chainId":
-            return "0x38"
+            return hex(int(self.chain))
         if method == "eth_getBlockByNumber":
             self.headers += 1
             return {"number": "0x64" if params[0] == "latest" else params[0],
@@ -95,6 +96,27 @@ class FakeProofRpc:
 
 
 class GapRepairTests(unittest.IsolatedAsyncioTestCase):
+    async def test_xlayer_candidates_are_separate_and_require_xlayer_factory_proof(self):
+        xlayer = await ResearchStore(self.tmp.name+'/research.sqlite', '196').connect()
+        try:
+            await xlayer.put('stock', STOCK, {'tokenContractAddress': STOCK, 'stockCode': 'EIX'})
+            await queue_indexed_gap(self.system, gap(), seen_at=1)
+            xrow = {**gap(), 'chainId': '196'}
+            await queue_indexed_gap(self.system, xrow, seen_at=1)
+            candidates = await self.system.all(KIND)
+            self.assertEqual(len(candidates), 2)
+            rpc = FakeProofRpc(chain='196', factory=FACTORIES_BY_CHAIN['196'][1])
+            repair = PoolGapRepair(xlayer, self.system, rpc, clock=lambda: 1_000)
+            result = await repair.run_once()
+            self.assertEqual(result['accepted'], 1)
+            pending = [r for r in await self.system.all(KIND) if r['chainId']=='56'][0]
+            self.assertEqual(pending['status'], 'pending')
+            self.assertIsNotNone(await xlayer.get('pool', POOL))
+            with self.assertRaises(ValueError):
+                await verify_indexed_pool(FakeProofRpc(chain='56'), xrow)
+        finally:
+            await xlayer.close()
+
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         path = self.tmp.name + "/research.sqlite"

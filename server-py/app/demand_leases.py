@@ -15,6 +15,8 @@ from pathlib import Path
 
 import aiosqlite
 
+from .storage_runtime import async_connect, is_postgres_path
+
 
 LEGACY_WINDOW_MS = 120_000
 PRUNE_INTERVAL_MS = 60_000
@@ -68,16 +70,18 @@ async def _flush():
             selected = [(key, body) for key, body in batch if key[0] == path]
             try:
                 directory = os.path.dirname(path)
-                if directory:
+                postgres = is_postgres_path(path)
+                if directory and not postgres:
                     os.makedirs(directory, exist_ok=True)
-                async with aiosqlite.connect(path, timeout=.25) as connection:
-                    stat = os.stat(path)
-                    identity = (stat.st_dev, stat.st_ino)
+                async with async_connect(path, timeout=.25) as connection:
+                    stat = None if postgres else os.stat(path)
+                    identity = ('postgres', str(Path(path).resolve())) if postgres else (stat.st_dev, stat.st_ino)
                     now = int(time.time() * 1000)
                     if _initialized.get(path) != identity:
-                        mode = (await connection.execute_fetchall('PRAGMA journal_mode'))[0][0]
-                        if mode.lower() != 'wal':
-                            await connection.execute('PRAGMA journal_mode=WAL')
+                        if not postgres:
+                            mode = (await connection.execute_fetchall('PRAGMA journal_mode'))[0][0]
+                            if mode.lower() != 'wal':
+                                await connection.execute('PRAGMA journal_mode=WAL')
                         await connection.executescript(SCHEMA)
                         await connection.execute(
                             "INSERT OR IGNORE INTO lease_meta VALUES ('createdAt', ?)", (now,))
@@ -113,9 +117,9 @@ async def all_lease_kv(store, kind) -> list[tuple[str, dict]]:
     path = lease_path(store)
     sidecar = {}
     created_at = None
-    if os.path.isfile(path):
+    if is_postgres_path(path) or os.path.isfile(path):
         try:
-            async with aiosqlite.connect(Path(path).absolute().as_uri() + '?mode=ro',
+            async with async_connect(Path(path).absolute().as_uri() + '?mode=ro',
                                          uri=True, timeout=.25) as connection:
                 rows = await connection.execute_fetchall(
                     'SELECT id,body FROM leases WHERE kind=?', (store.key(kind),))

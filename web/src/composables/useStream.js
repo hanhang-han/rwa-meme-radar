@@ -256,7 +256,7 @@ export async function handleStreamEvent(event, raw) {
     dash.setStreamStatus({ state: 'syncing' });
     const page=currentProjectionScope();
     const selected=useDetailStore().current;
-    const [,snapshot]=await Promise.all([feed.load(),page==='asset'
+    const [,snapshot]=await Promise.all([feed.load(undefined,{fresh:true}),page==='asset'
       ?useDetailStore().fetch(selected.chain,selected.address,{force:true})
       :dash.poll({view:page})]);
     useDetailStore().invalidate();

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from .storage_runtime import async_connect
 from .comparisons import (VERSION, MAX_AGE, MAX_SKEW, independent_quote, pool_spread,
                           relative_point, relative_return, stock_premium, unavailable, independent_stock_row)
 from .db import store, ResearchStore, retry_busy_write
@@ -244,7 +245,7 @@ async def new_history_rows(s, rows):
     # A separate read-only connection sees only committed rows. Reading the
     # shared store connection could see another task's row before rollback.
     uri = Path(base.path).resolve().as_uri() + '?mode=ro'
-    async with aiosqlite.connect(uri, uri=True,
+    async with async_connect(uri, readonly=True, uri=True,
                                  timeout=base.busy_timeout_ms / 1000) as reader:
         # 400 pairs plus the scope fit SQLite's older 999-variable limit.
         for offset in range(0, len(keys), 400):

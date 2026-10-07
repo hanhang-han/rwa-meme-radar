@@ -4,6 +4,7 @@ import { sharedUsage, reserveRequestSlot } from './request-ledger';
 export const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 let queue: Promise<unknown> = Promise.resolve();
 let nextAt = 0;
+let roundGeneration=0;
 
 type Allowance={remaining:number;parent?:Allowance};
 const allowance=new AsyncLocalStorage<Allowance>();
@@ -14,8 +15,13 @@ const usage={day:'',daily:0,round:0,startedAt:0,completedAt:0,nextAt:0,lastError
 const positive=(value:string|undefined,fallback:number)=>Number.isFinite(Number(value))&&Number(value)>0?Math.floor(Number(value)):fallback;
 const reserve=(name:string,daily:number,fallback:number,ratio:number)=>process.env[name]
   ?Math.min(daily,positive(process.env[name],fallback)):Math.min(fallback,Math.max(0,Math.floor(daily*ratio)));
-export function collectionStatus(){
-  if(process.env.NODE_ENV!=='test'){usage.day=new Date().toISOString().slice(0,10);usage.daily=sharedUsage(usage.day);}
+export async function collectionStatus(){
+  if(process.env.NODE_ENV!=='test'){
+    const day=new Date().toISOString().slice(0,10);
+    if(usage.day!==day){usage.day=day;usage.daily=0;}
+    const daily=await sharedUsage(day);
+    if(usage.day===day)usage.daily=Math.max(usage.daily,daily);
+  }
   const dailyLimit=positive(process.env.OKX_DAILY_REQUEST_LIMIT,8000);
   const backgroundReserve=reserve('OKX_BACKGROUND_RESERVE',dailyLimit,1200,.15);
   const criticalReserve=Math.min(backgroundReserve,reserve('OKX_CRITICAL_RESERVE',dailyLimit,400,.05));
@@ -23,19 +29,29 @@ export function collectionStatus(){
     backgroundCap:Math.max(0,dailyLimit-backgroundReserve),interactiveCap:Math.max(0,dailyLimit-criticalReserve),
     backgroundReserve,criticalReserve};
 }
-export function startCollection(){usage.round=0;usage.startedAt=Date.now();usage.lastError=null;usage.nextAt=0;}
+export function startCollection(){roundGeneration++;usage.round=0;usage.startedAt=Date.now();usage.lastError=null;usage.nextAt=0;}
 export function endCollection(error:string|null=null){usage.completedAt=Date.now();usage.nextAt=Date.now()+300000;usage.lastError=error;}
-function chargeRequest(opts?:{skipRound?:boolean;priority?:'background'|'interactive'|'critical'}){
+async function chargeRequest(opts?:{skipRound?:boolean;priority?:'background'|'interactive'|'critical'}){
   const day=new Date().toISOString().slice(0,10);if(usage.day!==day){usage.day=day;usage.daily=0;}
-  const limits=collectionStatus();
+  const limits=await collectionStatus();
   const budgets:Allowance[]=[];for(let b=allowance.getStore();b;b=b.parent)budgets.push(b);
   if(budgets.some(b=>b.remaining<=0))throw new Error('OKX network request allowance exhausted');
   const cap=opts?.priority==='critical'?limits.dailyLimit:opts?.priority==='interactive'?limits.interactiveCap:limits.backgroundCap;
   if(usage.daily>=cap||(!opts?.skipRound&&usage.round>=limits.roundLimit))throw new Error('OKX local request budget exhausted');
   const channel=lane.getStore();
-  usage.daily=process.env.NODE_ENV==='test'?usage.daily+1:sharedUsage(day,cap,channel?.name,channel?.limit);
+  const generation=roundGeneration;
+  // Urgent requests can run concurrently. Reserve local stage/round counts
+  // before awaiting PostgreSQL, so a second task sees the pending charge.
   for(const budget of budgets)budget.remaining--;
   if(!opts?.skipRound)usage.round++;
+  try{
+    const daily=process.env.NODE_ENV==='test'?usage.daily+1:await sharedUsage(day,cap,channel?.name,channel?.limit);
+    if(usage.day===day)usage.daily=Math.max(usage.daily,daily);
+  }catch(error){
+    for(const budget of budgets)budget.remaining++;
+    if(!opts?.skipRound&&generation===roundGeneration)usage.round--;
+    throw error;
+  }
 }
 
 // All workers share one rate limiter. Never send these headers to another host.
@@ -52,8 +68,8 @@ function okxRequest(path: string, method: 'GET' | 'POST', body = '', opts?: { sk
     if (!path.startsWith('/api/v6/dex/')) throw new Error('Invalid OKX endpoint');
     for (let attempt = 0; attempt < 4; attempt++) {
       await pause(Math.max(0, nextAt - Date.now()));
-      chargeRequest(opts);
-      if(process.env.NODE_ENV!=='test')await pause(reserveRequestSlot(positive(process.env.OKX_REQUEST_INTERVAL_MS,500)));
+      await chargeRequest(opts);
+      if(process.env.NODE_ENV!=='test')await pause(await reserveRequestSlot(positive(process.env.OKX_REQUEST_INTERVAL_MS,500)));
       const timestamp = new Date().toISOString();
       const response = await fetch('https://web3.okx.com' + path, {
         method, ...(body ? {body} : {}),

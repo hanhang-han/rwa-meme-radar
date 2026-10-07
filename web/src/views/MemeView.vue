@@ -1,186 +1,103 @@
 <template>
   <div class="meme-page">
-    <div class="meme-heading">
-      <h2>Meme</h2>
-      <div class="meme-view-switch" :aria-label="tr('查看方式','View')">
-        <button type="button" :class="{active:view==='coin'}" :aria-pressed="view==='coin'" @click="switchView('coin')">{{ tr('按币','By token') }}</button>
-        <button type="button" :class="{active:view==='pool'}" :aria-pressed="view==='pool'" @click="switchView('pool')">{{ tr('按池','By pool') }}</button>
-      </div>
-    </div>
+    <header class="meme-heading"><div><h2>Meme {{ tr('市场','Market') }}</h2><p>{{ tr('浏览链上资产行情与股票关联。','Browse on-chain assets and stock relationships.') }}</p></div><div class="meme-view-switch" :aria-label="tr('查看方式','View')"><button type="button" :class="{active:view==='coin'}" :aria-pressed="view==='coin'" @click="switchView('coin')">{{ tr('按币','By token') }}</button><button type="button" :class="{active:view==='pool'}" :aria-pressed="view==='pool'" @click="switchView('pool')">{{ tr('按池','By pool') }}</button></div></header>
     <section class="panel meme-results">
-    <PoolListView v-if="view==='pool'" :scope="scope" :qualified="qualified" />
-    <template v-else>
-      <div class="meme-toolbar">
-        <button type="button" class="mobile-filter-toggle" :aria-expanded="filtersOpen" @click="filtersOpen=!filtersOpen">{{ tr('筛选','Filters') }} {{ filtersOpen?'−':'+' }}</button>
-        <div class="meme-filter-options" :class="{'is-open':filtersOpen}">
-          <select :value="relationFilter" :aria-label="tr('关系','Relationship')" @change="setQuery({rel:$event.target.value,qualified:undefined})"><option value="A">{{ tr('池子配对','Pool pair') }}</option><option value="B">{{ tr('名称匹配','Name match') }}</option><option value="A,B,C">{{ tr('全部关系','All relationships') }}</option><option value="all">{{ tr('全部资产','All assets') }}</option></select>
-          <select :value="freshFilter" :aria-label="tr('价格时效','Price freshness')" @change="setQuery({fresh:$event.target.value,qualified:undefined})"><option value="1">{{ tr('价格 15 分钟内','Price within 15m') }}</option><option value="0">{{ tr('含历史报价','Include historical quotes') }}</option></select>
-          <select :value="minLiquidity" :aria-label="tr('最低总流动性','Minimum total liquidity')" @change="setQuery({minLiq:$event.target.value,qualified:undefined})"><option value="0">{{ tr('不限总流动性','Any total liquidity') }}</option><option value="1000">≥ $1K</option><option value="10000">≥ $10K</option><option value="100000">≥ $100K</option></select>
-          <select :value="String(route.query.category || 'all')" :aria-label="tr('资产类别','Asset category')" @change="setQuery({category:$event.target.value==='all'?undefined:$event.target.value,qualified:undefined})"><option value="all">{{ tr('全部类别','All categories') }}</option><option value="meme">Meme</option><option value="derivative">{{ tr('衍生品','Derivatives') }}</option></select>
-          <label><input type="checkbox" :checked="hideRisk" @change="setQuery({risk:$event.target.checked?'hide':undefined,qualified:undefined})"> {{ tr('隐藏风险标记','Hide flagged') }}</label>
-          <label><input type="checkbox" :checked="qualified" @change="setQuery({qualified:$event.target.checked?'1':undefined,rel:'all',fresh:'1',minLiq:undefined,risk:undefined})"> {{ tr('活跃 Meme','Active memes') }}</label>
-        </div>
-        <select id="v2Sort" :value="sort" :aria-label="tr('排序','Sort')" @change="setQuery({sort:$event.target.value})"><option value="volume24h">{{ tr('24h 成交','24h volume') }}</option><option value="price">{{ tr('价格','Price') }}</option><option value="change24h">{{ tr('24h 涨跌','24h change') }}</option><option value="totalLiquidityUsd">{{ tr('总流动性','Total liquidity') }}</option><option value="holders">{{ tr('持币地址','Holders') }}</option><option value="firstSeen">{{ tr('新发现','New discoveries') }}</option></select>
-      </div>
-      <div class="meme-list-meta">
-        <span v-if="catalogReady">{{ tr('显示','Showing') }} {{ num(displayedCount) }} / {{ tr('共','of') }} {{ num(assets.length) }} {{ tr('个资产','assets') }}</span>
-        <button v-if="search" type="button" @click="setQuery({q:undefined})">{{ search }} ×</button>
-        <button v-if="route.query.new==='24h'" type="button" @click="setQuery({new:undefined})">{{ tr('近 24h 新发现','Discovered in 24h') }} ×</button>
-        <button v-if="volumeRanking" type="button" @click="setQuery({rank:undefined})">{{ tr('24h 成交榜','24h volume ranking') }} ×</button>
-        <button v-if="qualified" type="button" @click="setQuery({qualified:undefined})">{{ tr('活跃 Meme','Active memes') }} ×</button>
-        <label v-if="catalogReady && !qualified && (hiddenMissingCount || showMissing)"><input type="checkbox" :checked="showMissing" @change="setQuery({showMissing:$event.target.checked?'1':'0'})"> {{ tr('含行情不完整资产','Include incomplete quotes') }}<template v-if="hiddenMissingCount"> ({{ num(hiddenMissingCount) }})</template></label>
-      </div>
-      <p v-if="qualified" class="meme-note">{{ tr('价格 15 分钟内，总流动性 30 分钟内且不低于 $1K。','Price within 15m; total liquidity within 30m and at least $1K.') }}</p>
-      <div v-if="!catalogReady" class="meme-skeleton" role="status" :aria-label="tr('加载行情','Loading market data')"><p class="meme-note">{{ store.error?tr('列表暂时无法加载。','The list could not be loaded.'):tr('正在加载列表…','Loading the list…') }} <button type="button" @click="store.poll({view:'market'})">{{ tr('重试','Retry') }}</button></p><div v-for="n in 7" :key="n" class="skeleton-line"></div></div>
-      <div v-else-if="!pageGroups.length" class="x-empty">{{ tr('当前筛选暂无资产。','No assets match these filters.') }} <button type="button" @click="resetFilters">{{ tr('查看全部资产','View all assets') }}</button></div>
+      <PoolListView v-if="view==='pool'" :scope="scope" :qualified="filters.qualified" />
       <template v-else>
-        <div class="scroll meme-desktop" id="xMemeRows">
-          <table class="tbl v2-meme-table">
-            <thead><tr><th>{{ tr('资产','Asset') }}</th><th>{{ tr('关联股票','Stocks') }}</th><th>{{ tr('价格','Price') }}</th><th>24h</th><th>{{ tr('24h 成交','24h volume') }}</th><th>{{ tr('总流动性','Total liquidity') }}</th><th>{{ tr('成交 / 流动性','Vol / Liq') }}</th><th>{{ tr('持币地址','Holders') }}</th><th>{{ tr('风险','Risk') }}</th><th>{{ tr('报价时间','Quote time') }}</th></tr></thead>
-            <tbody><template v-for="group in pageGroups" :key="group.symbol"><MemeRow :a="group.members[0]" :relations="relations" :store="store" :extra="group.members.length>1?group.members.length-1:0" @toggle-group="toggleGroup(group.symbol)" /><template v-if="openGroups.has(group.symbol)"><MemeRow v-for="member in group.members.slice(1)" :key="member.chainId+':'+member.token" :a="member" :relations="relations" :store="store" child /></template></template></tbody>
-          </table>
+        <div class="meme-toolbar">
+          <form class="meme-search" @submit.prevent="setQuery({q:searchText.trim()||undefined})"><label class="sr-only" for="meme-search-input">{{ tr('名称或完整合约','Name or full contract') }}</label><input id="meme-search-input" v-model="searchText" type="search" :placeholder="tr('名称 / 完整合约','Name / full contract')"><button type="submit">{{ tr('搜索','Search') }}</button></form>
+          <label>{{ tr('股票关系','Stocks') }}<select :value="filters.relation" @change="setQuery({rel:$event.target.value,qualified:undefined})"><option value="all">{{ tr('不限','Any') }}</option><option value="A">{{ tr('已确认同池','Confirmed pool pairs') }}</option><option value="B">{{ tr('仅名称线索','Name only') }}</option><option value="A,B,C">{{ tr('所有关联','All relationships') }}</option></select></label>
+          <label>{{ tr('价格时效','Quote age') }}<select :value="filters.fresh" @change="setQuery({fresh:$event.target.value,qualified:undefined})"><option value="0">{{ tr('含历史报价','Include history') }}</option><option value="1">{{ tr('15 分钟内','Within 15m') }}</option></select></label>
+          <label>{{ tr('最低流动性','Min. liquidity') }}<select :value="filters.minLiquidity" @change="setQuery({minLiq:$event.target.value,qualified:undefined})"><option value="0">{{ tr('不限','Any') }}</option><option value="1000">≥ $1K</option><option value="10000">≥ $10K</option><option value="100000">≥ $100K</option></select></label>
+          <label>{{ tr('排序','Sort') }}<select :value="sort" @change="setQuery({sort:$event.target.value})"><option value="volume24h">{{ tr('24h 成交','24h volume') }}</option><option value="price">{{ tr('价格','Price') }}</option><option value="change24h">{{ tr('24h 涨跌','24h change') }}</option><option value="totalLiquidityUsd">{{ tr('总流动性','Total liquidity') }}</option><option value="holders">{{ tr('持币地址','Holder addresses') }}</option><option value="firstSeen">{{ tr('新收录','Recently indexed') }}</option></select></label>
+          <button type="button" class="text-button" @click="resetFilters">{{ tr('重置','Reset') }}</button>
+          <SignalLegend class="meme-signal-legend" />
         </div>
-        <div class="meme-mobile">
-          <template v-for="group in pageGroups" :key="group.symbol">
-            <article v-for="asset in visibleMembers(group)" :key="asset.chainId+':'+asset.token" class="meme-mobile-card">
-              <div class="meme-card-title"><RouterLink :to="assetLink(asset)"><strong>{{ asset.name || asset.symbol || short(asset.token) }}</strong></RouterLink><RiskBadge :asset="asset" /></div>
-              <p>{{ chainLabel(asset.chainId) }} · {{ short(asset.token) }}</p>
-              <div class="meme-card-relations"><RouterLink v-for="ticker in assetTickers(asset)" :key="ticker" :to="{path:'/stock/'+ticker,query:{chain:scope}}">{{ ticker }}</RouterLink><span v-if="!assetTickers(asset).length">{{ tr('暂无股票关联','No stock relationship') }}</span></div>
-              <dl><div><dt>{{ tr('价格','Price') }}</dt><dd><LiveNumber :value="asset.price" :currency="asset.priceCurrency" format="price" /></dd></div><div><dt>{{ tr('1h 涨跌','1h change') }}</dt><dd :class="Number(asset.change1h)>0?'up':Number(asset.change1h)<0?'down':''">{{ pct(asset.change1h) }}</dd></div><div><dt>{{ tr('24h 成交','24h volume') }}</dt><dd><LiveNumber :value="asset.volume24h" :currency="asset.volumeCurrency ?? asset.priceCurrency" /></dd></div><div><dt>{{ tr('成交 / 流动性','Vol / Liq') }}</dt><dd>{{ ratioText(asset) }}</dd></div></dl>
-              <div class="meme-card-footer"><time :title="date(asset.fieldTimes?.price)">{{ age(asset.fieldTimes?.price) }}</time><RouterLink :to="assetLink(asset)">{{ tr('详情','Details') }} →</RouterLink></div>
-              <button v-if="asset===group.members[0] && group.members.length>1" class="meme-same-name" @click="toggleGroup(group.symbol)">{{ openGroups.has(group.symbol)?tr('收起同名合约','Hide same-name contracts'):`+${group.members.length-1} ${tr('个同名合约','same-name contracts')}` }}</button>
-            </article>
-          </template>
-        </div>
-        <div class="x-pager"><button :disabled="safePage<=0" @click="setQuery({page:safePage-1})">{{ tr('上一页','Previous') }}</button><span>{{ safePage+1 }} / {{ pages }}</span><button :disabled="safePage+1>=pages" @click="setQuery({page:safePage+1})">{{ tr('下一页','Next') }}</button></div>
+        <details class="meme-advanced"><summary>{{ tr('更多筛选','More filters') }}</summary><div><label>{{ tr('资产类别','Asset category') }}<select :value="route.query.category||'all'" @change="setQuery({category:$event.target.value==='all'?undefined:$event.target.value,qualified:undefined})"><option value="all">{{ tr('全部类别','All categories') }}</option><option value="meme">Meme</option><option value="derivative">{{ tr('衍生品','Derivatives') }}</option></select></label><label><input type="checkbox" :checked="filters.hideRisk" @change="setQuery({risk:$event.target.checked?'hide':undefined,qualified:undefined})">{{ tr('排除有风险提示的资产','Exclude flagged assets') }}</label><label><input type="checkbox" :checked="filters.newAssets" @change="setQuery({new:$event.target.checked?'24h':undefined,qualified:undefined})">{{ tr('近 24h 新收录','Indexed within 24h') }}</label><label><input type="checkbox" :checked="filters.showMissing" @change="setQuery({showMissing:$event.target.checked?'1':'0',qualified:undefined})">{{ tr('含缺少行情 / 零流动性','Include missing data / zero liquidity') }}</label></div></details>
+        <div class="meme-list-meta"><span v-if="catalogReady">{{ tr('已收录','Indexed') }} {{ num(store.directory.catalogTotal) }} · {{ tr('筛选后','Filtered') }} {{ num(store.directory.filteredTotal) }} · {{ tr('本页','This page') }} {{ num(displayedCount) }} {{ tr('个资产','assets') }}</span><details class="meme-column-settings"><summary>{{ tr('显示列','Columns') }}</summary><div><label><input v-model="showHolders" type="checkbox">{{ tr('持币地址','Holder addresses') }}</label><label><input v-model="showWindows" type="checkbox">{{ tr('其他涨跌窗口','Other changes') }}</label></div></details></div>
+        <p v-if="filters.qualified" class="meme-note">{{ tr('当前筛选：报价 15 分钟内，流动性 30 分钟内且至少 $1K。','Current filters: quote within 15m; liquidity within 30m and at least $1K.') }} <button type="button" class="text-button" @click="setQuery({qualified:undefined,rel:'all',fresh:'0',minLiq:'0'})">{{ tr('清除预设','Clear preset') }}</button></p>
+        <p v-if="route.query.ticker" class="meme-note">{{ tr('股票主题','Stock theme') }} {{ route.query.ticker }} <button type="button" class="text-button" @click="setQuery({ticker:undefined})">{{ tr('清除','Clear') }}</button></p>
+        <p v-if="catalogReady && (store.loading || store.error)" class="meme-note" role="status">{{ store.error?tr('更新失败，保留上次结果。','Update failed. Previous results are retained.'):tr('正在更新…','Updating…') }} <button v-if="store.error" type="button" class="text-button" @click="store.refresh()">{{ tr('重试','Retry') }}</button></p>
+        <LiveDataStatus v-if="catalogReady" :stream="quoteStream" :quote-at="observedQuoteAt" :snapshot-at="store.snapshot.snapshotAt??store.snapshot.now" @refresh="store.refresh()" />
+        <div v-if="!catalogReady && store.error" class="meme-empty" role="alert">{{ tr('列表暂时无法加载。','The list could not be loaded.') }} <button type="button" class="text-button" @click="store.refresh()">{{ tr('重试','Retry') }}</button></div>
+        <div v-else-if="!catalogReady" class="meme-skeleton" role="status"><p class="meme-note">{{ tr('正在加载列表…','Loading the list…') }}</p><div v-for="n in 6" :key="n" class="skeleton-line"></div></div>
+        <div v-else-if="!pageGroups.length" class="meme-empty">{{ tr('没有符合条件的资产。','No matching assets.') }} <button type="button" class="text-button" @click="resetFilters">{{ tr('重置筛选','Reset filters') }}</button></div>
+        <template v-else>
+          <div class="meme-table-wrap" tabindex="0" :aria-label="tr('资产行情表，可横向滚动','Asset market table; scroll horizontally')"><table class="tbl meme-directory-table"><thead><tr><th>{{ route.query.category==='meme'?'Meme':tr('链上资产','On-chain asset') }}</th><th class="numeric">{{ tr('价格 / 24h 涨跌','Price / 24h change') }}</th><th class="numeric">{{ tr('资产 24h 成交','Asset 24h volume') }}</th><th class="numeric">{{ tr('总流动性','Total liquidity') }}<small>USD</small></th><th>{{ tr('股票关联','Stocks') }}</th><th v-if="showHolders" class="numeric">{{ tr('持币地址','Holder addresses') }}</th><th v-if="showWindows">{{ tr('其他涨跌','Other changes') }}</th><th>{{ tr('操作','Actions') }}</th></tr></thead><tbody><template v-for="group in pageGroups" :key="group.symbol"><MemeDirectoryRow v-for="(asset,index) in visibleMembers(group)" :key="directoryAssetKey(asset)" :asset="asset" :added="store.addedKeys?.includes(directoryAssetKey(asset))" :relations="store.relations" :scope="scope" :child="index>0" :stale="index>0&&!!store.members[group.symbol]?.stale" :extra="index===0?Math.max(0,group.memberCount-1):0" :expanded="openGroups.has(group.symbol)" :holders="showHolders" :windows="showWindows" @toggle-group="toggleGroup(group.symbol)"/><tr v-if="openGroups.has(group.symbol)" class="meme-group-progress"><td :colspan="6+Number(showHolders)+Number(showWindows)"><span v-if="store.members[group.symbol]?.error">{{ tr('同名合约更新失败，保留上次记录。','Same-name contracts could not be updated; previous records are retained.') }}</span><span v-else-if="store.members[group.symbol]?.refreshing || (store.members[group.symbol]?.stale && store.members[group.symbol]?.loading)">{{ tr('同名成员正在更新，暂显示上次记录。','Same-name contracts are updating; previous records are retained.') }}</span><span v-else-if="store.members[group.symbol]?.stale">{{ tr('同名成员暂显示上次记录。','Previous same-name contract records are retained.') }}</span><span v-else-if="store.members[group.symbol]?.loading">{{ tr('正在加载同名合约…','Loading same-name contracts…') }}</span><span v-else>{{ tr('已显示','Showing') }} {{ num(group.members.length) }} / {{ num(group.memberCount) }}</span><button v-if="store.members[group.symbol]?.error" type="button" class="text-button" @click="store.loadGroup(group.symbol)">{{ tr('重试','Retry') }}</button><button v-else-if="store.members[group.symbol]?.hasMore" type="button" class="text-button" :disabled="store.members[group.symbol]?.loading" @click="store.loadGroup(group.symbol,{more:true})">{{ tr('加载更多同名合约','Load more same-name contracts') }}</button></td></tr></template></tbody></table></div>
+          <div class="x-pager"><button type="button" :disabled="safePage<=0" @click="setQuery({page:safePage-1})">{{ tr('上一页','Previous') }}</button><span>{{ safePage+1 }} / {{ pages }}</span><button type="button" :disabled="safePage+1>=pages" @click="setQuery({page:safePage+1})">{{ tr('下一页','Next') }}</button></div>
+          <details v-if="distributionPoints.length>=2 || (store.snapshot?.chart?.requiresFetch && Number(store.snapshot.chart.total)>=2)" class="meme-distribution" @toggle="store.setChartVisible?.($event.target.open)"><summary>{{ tr('成交与流动性分析','Volume and liquidity analysis') }}<small>{{ num(distributionPoints.length||store.snapshot.chart.total) }} {{ tr('个可比资产','comparable assets') }}</small></summary><p class="meme-note">{{ tr('资产 24h 成交与总流动性，均为 USD；采用对数刻度。只比较近期数据，不代表全市场成交。','Token-wide 24h volume and total liquidity in USD on logarithmic axes. Recent observations only; this is not total market volume.') }}</p><p v-if="store.chartLoading||store.chartError||store.snapshot?.chart?.requiresFetch" class="meme-note" role="status">{{ store.chartError?tr('图表暂时无法加载。','The chart could not be loaded.'):tr('正在加载图表…','Loading the chart…') }} <button v-if="store.chartError" type="button" class="text-button" @click="store.loadChart()">{{ tr('重试','Retry') }}</button></p><div v-else-if="distributionPoints.length>=2" class="meme-plot-wrap"><span class="axis-title">{{ tr('资产成交 · 24h USD','Asset volume · 24h USD') }}</span><div class="meme-plot-body"><div class="meme-y-ticks"><span v-for="(tick,index) in axisTicksY" :key="index">{{ usd(tick) }}</span></div><div class="meme-plot" role="group" :aria-label="tr('成交与流动性散点图','Volume and liquidity scatter plot')"><button v-for="point in distributionPoints" :key="point.key" type="button" class="meme-point" :class="{selected:selectedPoint?.key===point.key}" :style="{left:`${point.x}%`,bottom:`${point.y}%`}" :title="pointTitle(point)" :aria-label="pointTitle(point)" @click="selectedPointKey=point.key"></button></div></div><div class="meme-x-ticks"><span v-for="(tick,index) in axisTicksX" :key="index">{{ usd(tick) }}</span></div><span class="axis-title x-title">{{ tr('总流动性 · USD','Total liquidity · USD') }}</span></div><div v-if="selectedPoint" class="meme-selected"><strong>{{ selectedPoint.name||selectedPoint.symbol||short(selectedPoint.token) }}</strong><span>{{ tr('成交','Volume') }} {{ usd(selectedPoint.volume) }} · {{ tr('流动性','Liquidity') }} {{ usd(selectedPoint.liquidity) }}</span><span>{{ tr('成交观测','Volume observed') }} {{ age(selectedPoint.volumeAt) }} · {{ tr('流动性观测','Liquidity observed') }} {{ age(selectedPoint.liquidityAt) }}</span><RouterLink :to="assetLink(selectedPoint)">{{ tr('查看行情','View market') }} →</RouterLink><button type="button" class="text-button" @click="selectedPointKey=null">{{ tr('取消选择','Clear selection') }}</button></div></details>
+        </template>
+        <details class="meme-methods"><summary>{{ tr('统计口径与数据来源','Definitions and data sources') }}</summary><p>{{ tr('— 表示暂无可用数据，不代表 0。报价、资产成交和流动性分别使用各自来源与观测时间；资产成交不等于股票配对池成交。','— means unavailable, not zero. Quotes, token-wide volume and liquidity each retain their source and observation time. Asset volume is not stock-pair pool volume.') }}</p><p>{{ tr('同名资产按链和合约分别统计，展开后独立显示。名称线索不等于已确认同池。未知风险不会被标为安全。','Same-name assets are counted independently by chain and contract. Expand to see each asset. Name clues are not confirmed pool pairs; unknown risk is not safe.') }}</p><p v-if="catalogReady">{{ tr('当前筛选有','The current selection has') }} {{ num(store.summary.comparableCount) }} {{ tr('个具备近期美元成交与有效流动性的可比资产；不是有报价的资产总数。','comparable assets with recent USD volume and usable liquidity; this is not the number of quoted assets.') }}</p><p v-if="catalogReady&&store.directory.hiddenMissingCount">{{ tr('当前目录有','The current directory has') }} {{ num(store.directory.hiddenMissingCount) }} {{ tr('个缺少行情字段或零流动性的资产，可在更多筛选中包含。','assets with missing market data or zero liquidity; include them in More filters.') }}</p></details>
       </template>
-      <p class="meme-note">{{ tr('池子配对：同池交易。名称匹配：名称关联。','Pool pair: traded in one pool. Name match: a name association.') }}</p>
-    </template>
     </section>
   </div>
 </template>
 
 <script setup>
-import { computed, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import MemeRow from '../components/MemeRow.vue';
-import RiskBadge from '../components/RiskBadge.vue';
-import LiveNumber from '../components/LiveNumber.vue';
+import MemeDirectoryRow from '../components/MemeDirectoryRow.vue';
+import LiveDataStatus from '../components/LiveDataStatus.vue';
+import SignalLegend from '../components/SignalLegend.vue';
+import { useVisibleQuotes } from '../composables/useVisibleQuotes';
+import { visibleQuoteAt } from '../utils/visible-quotes';
+import { visibleExchangeObservation } from '../utils/visible-exchange-quote';
 import PoolListView from './PoolListView.vue';
-import { useDashboardStore } from '../stores/dashboard';
+import { useMemeDirectoryStore } from '../stores/meme-directory';
 import { useMinuteClock } from '../composables/useMinuteClock';
 import { tr } from '../i18n';
-import { age, date, num, pct, short } from '../utils/format';
-import { chainScope, inChainScope } from '../utils/chain-scope';
-import { relationLevel, riskFlags, volumeLiquidityRatio } from '../utils/product-labels';
-import { marketCatalogReady, memeFilterValues, memeQuoteMatches } from '../utils/meme-filter-model';
-import { comparableVolume, hasBasicMarketData, isQualifiedMeme, isRecentObservation, normalizeTicker } from '../utils/stock-theme-model';
-
-const route=useRoute(), router=useRouter(), store=useDashboardStore(), now=useMinuteClock();
-const openGroups=reactive(new Set()), filtersOpen=ref(false);
-const scope=computed(()=>chainScope(route.query));
-const view=computed(()=>route.query.view==='pool'?'pool':'coin');
-const filterValues=computed(()=>memeFilterValues(route.query));
-const qualified=computed(()=>filterValues.value.qualified);
-const volumeRanking=computed(()=>filterValues.value.ranking);
-const showMissing=computed(()=>filterValues.value.showMissing);
-const legacy=computed(()=>String(route.query.filter??''));
-const relationFilter=computed(()=>filterValues.value.relation);
-const freshFilter=computed(()=>filterValues.value.fresh);
-const minLiquidity=computed(()=>filterValues.value.minLiquidity);
-const hideRisk=computed(()=>filterValues.value.hideRisk);
-const search=computed(()=>String(route.query.q??'').trim().toLowerCase());
-const sort=computed(()=>String(route.query.sort??'volume24h'));
+import { age, date, fullUsd, num, short, usd } from '../utils/format';
+import { chainScope } from '../utils/chain-scope';
+import { memeFilterValues } from '../utils/meme-filter-model';
+import { memeDirectoryQuery, memeFilterKey } from '../utils/meme-directory-query';
+import { comparableDirectoryPoints, directoryAssetKey } from '../utils/meme-directory-presentation';
+import { memeGroupMembers } from '../utils/meme-scan-signals';
+import { assetNavigationLink } from '../utils/navigation-context';
+import { readPageState, writePageState } from '../utils/page-navigation-state';
+const route=useRoute(),router=useRouter(),store=useMemeDirectoryStore(),clock=useMinuteClock();
+const scope=computed(()=>chainScope(route.query)),view=computed(()=>route.query.view==='pool'?'pool':'coin'),filters=computed(()=>memeFilterValues(route.query));
+const sort=computed(()=>String(route.query.sort??'volume24h')),searchText=ref(String(route.query.q??''));
+watch(()=>route.query.q,value=>{searchText.value=String(value??'');});
+const showHolders=ref(false),showWindows=ref(false),openGroups=reactive(new Set()),selectedPointKey=ref(null);
+const directoryQuery=computed(()=>memeDirectoryQuery(route.query));
+const contextKey=query=>`${query.view}:${memeFilterKey(query)}:${query.offset}`;
+let activeContext='',disposed=false;
+let restoredMemberFocus={};const groupRestoreTasks=new Map();
+function memberFocus(entry){const rows=entry?.rows??[];return Object.keys(entry?.segments??{}).map(Number).sort((a,b)=>a-b).flatMap(offset=>{const row=rows.find(item=>Number(item._directoryMemberIndex)===offset);return row?[directoryAssetKey(row)]:[];}).slice(-20);}
+function saveContext(){if(!activeContext)return;const focus={};for(const symbol of openGroups){const keys=[...new Set([...(restoredMemberFocus[symbol]??[]),...memberFocus(store.members[symbol])])].slice(-20);if(keys.length)focus[symbol]=keys;}writePageState('meme-directory:'+activeContext,{groups:[...openGroups],memberFocus:focus,holders:showHolders.value,windows:showWindows.value});}
+function loadOpenGroup(symbol){const context=activeContext,existing=groupRestoreTasks.get(symbol);if(existing?.context===context)return existing.task;const targets=[...(restoredMemberFocus[symbol]??[])].reverse().slice(0,20);const task=(async()=>{await store.loadGroup(symbol);for(const target of targets){if(disposed||activeContext!==context||!openGroups.has(symbol)||store.members[symbol]?.error)return;if(!(store.members[symbol]?.rows??[]).some(row=>directoryAssetKey(row)===target))await store.loadGroup(symbol,{focus:target});}})().catch(()=>{}).finally(()=>{if(groupRestoreTasks.get(symbol)?.task===task)groupRestoreTasks.delete(symbol);});groupRestoreTasks.set(symbol,{context,task});return task;}
+const coinQueryKeys=['q','rel','fresh','minLiq','risk','qualified','category','new','rank','ticker','showMissing','filter','minLiquidity','sort','page'];
+const poolQueryKeys=['q','qualified','sort','page'];
+function modeQuery(query,mode){const result={};for(const key of mode==='pool'?poolQueryKeys:coinQueryKeys)if(query[key]!=null)result[key]=Array.isArray(query[key])?[...query[key]]:query[key];return result;}
+watch(()=>route.query,query=>writePageState('meme-mode-query:'+(query.view==='pool'?'pool':'coin'),modeQuery(query,query.view==='pool'?'pool':'coin')),{immediate:true});
+watch(directoryQuery,(query,previous)=>{if(!previous||contextKey(query)!==contextKey(previous)){saveContext();activeContext=contextKey(query);const saved=readPageState('meme-directory:'+activeContext);restoredMemberFocus=saved?.memberFocus??{};openGroups.clear();for(const symbol of saved?.groups??[])openGroups.add(symbol);showHolders.value=!!saved?.holders;showWindows.value=!!saved?.windows;selectedPointKey.value=null;}store.setQuery(query);},{immediate:true});
+onMounted(()=>{store.start();});onUnmounted(()=>{saveContext();disposed=true;groupRestoreTasks.clear();store.setChartVisible?.(false);store.stop();});
+const catalogReady=computed(()=>store.ready&&store.query?.view==='coin');
+const pageGroups=computed(()=>store.groups.map(group=>({...group,members:memeGroupMembers(group.representative,store.members[group.symbol]?.rows??[])})));
 const page=computed(()=>Math.max(0,Number(route.query.page)||0));
-const relations=computed(()=>store.relations);
-const catalogReady=computed(()=>marketCatalogReady(store.snapshot));
-const relationMap=computed(()=>{
-  const result=new Map();
-  for(const relation of relations.value){const key=`${relation.chainId}:${String(relation.token).toLowerCase()}`;if(!result.has(key))result.set(key,[]);result.get(key).push(relation);}
-  return result;
-});
-const assetRelations=asset=>relationMap.value.get(`${asset.chainId}:${String(asset.token).toLowerCase()}`)??[];
-function isCurrentLiquidity(asset){return asset.totalLiquidityUsd!=null && Number.isFinite(Number(asset.totalLiquidityUsd)) && asset.totalLiquidityStatus==='current' && isRecentObservation(asset.totalLiquidityAt ?? asset.fieldTimes?.totalLiquidityUsd,1800000,now.value);}
-const matchingAssets=computed(()=>{
-  const selected=new Set(relationFilter.value.split(',')), floor=Number(minLiquidity.value)||0;
-  const unique=new Map(store.assets.map(asset=>[`${asset.chainId}:${String(asset.token).toLowerCase()}`,asset]));
-  return [...unique.values()].filter(asset=>{
-    if(asset.kind!=='candidate'||!inChainScope(asset,scope.value))return false;
-    if(route.query.category==='derivative'&&asset.assetCategory!=='derivative')return false;
-    if((route.query.category==='meme'||volumeRanking.value)&&asset.assetCategory==='derivative')return false;
-    if(volumeRanking.value&&comparableVolume(asset,now.value)==null)return false;
-    if(route.query.new==='24h'&&!isRecentObservation(asset.firstSeen,86400000,now.value))return false;
-    const related=assetRelations(asset);
-    if(search.value && ![asset.name,asset.symbol,asset.token,...related.map(r=>r.ticker),asset.match?.ticker].some(v=>String(v??'').toLowerCase().includes(search.value)))return false;
-    if(qualified.value)return isQualifiedMeme(asset,now.value);
-    const levels=new Set(related.map(relationLevel).filter(Boolean));if(asset.relationLevel)levels.add(asset.relationLevel);
-    if(relationFilter.value!=='all'&&![...levels].some(level=>selected.has(level)))return false;
-    if(floor && !(isCurrentLiquidity(asset)&&Number(asset.totalLiquidityUsd)>=floor))return false;
-    if(hideRisk.value&&riskFlags(asset).length)return false;
-    if(legacy.value==='history'&&asset.dataQuality?.tier!=='historical')return false;
-    return true;
-  });
-});
-const hiddenMissingCount=computed(()=>matchingAssets.value.filter(asset=>!hasBasicMarketData(asset)).length);
-const assets=computed(()=>matchingAssets.value.filter(asset=>memeQuoteMatches(asset,filterValues.value,now.value)));
-const groups=computed(()=>{
-  const bySymbol=new Map();
-  for(const asset of assets.value){const symbol=String(asset.symbol||asset.name||asset.token).toUpperCase();if(!bySymbol.has(symbol))bySymbol.set(symbol,[]);bySymbol.get(symbol).push(asset);}
-  const score=asset=>{const value=asset[sort.value];return value==null?Number.NEGATIVE_INFINITY:Number(value)||0;};
-  const rows=[...bySymbol].map(([symbol,members])=>({symbol,members:members.sort((a,b)=>score(b)-score(a)||String(a.token).localeCompare(String(b.token)))}));
-  return rows.sort((a,b)=>score(b.members[0])-score(a.members[0])||a.symbol.localeCompare(b.symbol));
-});
-const PAGE_SIZE=50;
-const pages=computed(()=>Math.max(1,Math.ceil(groups.value.length/PAGE_SIZE)));
-const safePage=computed(()=>Math.min(page.value,pages.value-1));
-const pageGroups=computed(()=>groups.value.slice(safePage.value*PAGE_SIZE,(safePage.value+1)*PAGE_SIZE));
+const pageSize=20,pages=computed(()=>Math.max(1,Math.ceil((store.directory.groupTotal??0)/pageSize))),safePage=computed(()=>Math.min(page.value,pages.value-1));
 const visibleMembers=group=>openGroups.has(group.symbol)?group.members:group.members.slice(0,1);
-const displayedCount=computed(()=>pageGroups.value.reduce((total,group)=>total+visibleMembers(group).length,0));
+const displayedCount=computed(()=>pageGroups.value.reduce((sum,group)=>sum+visibleMembers(group).length,0));
+const visibleAssets=computed(()=>pageGroups.value.flatMap(visibleMembers));
+const {status:quoteStream}=useVisibleQuotes({rows:visibleAssets,enabled:computed(()=>view.value==='coin'&&catalogReady.value),getCursor:()=>store.snapshot?.realtime?.cursor,onReset:()=>store.queueRefresh?.(),onQuote:packet=>store.applyQuotePacket?.(packet)??false});
+const observedQuoteAt=computed(()=>Math.max(0,...visibleAssets.value.map(asset=>Math.max(visibleQuoteAt(asset),visibleExchangeObservation(asset,Math.max(clock.value,Date.now()))?.at||0))));
+watch(()=>store.snapshot,packet=>{if(!packet||view.value==='pool')return;if(page.value>=pages.value)router.replace({query:{...route.query,page:pages.value>1?pages.value-1:undefined}});for(const symbol of openGroups)if(pageGroups.value.some(group=>group.symbol===symbol))loadOpenGroup(symbol);},{immediate:true});
+watch([showHolders,showWindows],saveContext);
 function setQuery(patch){router.push({query:{...route.query,...(Object.hasOwn(patch,'qualified')?{rank:undefined}:{}),...patch,filter:undefined,minLiquidity:undefined,page:patch.page||undefined}});}
-function switchView(next){router.push({query:{chain:scope.value,q:route.query.q,view:next==='pool'?'pool':undefined}});}
 function resetFilters(){router.push({query:{chain:scope.value,rel:'all',fresh:'0',showMissing:'1',minLiq:'0'}});}
-function toggleGroup(symbol){openGroups.has(symbol)?openGroups.delete(symbol):openGroups.add(symbol);}
-function assetTickers(asset){return [...new Set([...assetRelations(asset).map(r=>r.ticker),asset.match?.ticker].filter(Boolean).map(normalizeTicker))].slice(0,3);}
-function assetLink(asset){return {path:`/asset/${asset.chainId}/${asset.token}`,query:{chain:scope.value,from:'meme'}};}
-function chainLabel(chain){return {'56':'BNB Chain','196':'X Layer','4663':'Robinhood Chain'}[chain]??chain;}
-function ratioText(asset){const ratio=volumeLiquidityRatio(asset);return ratio==null?'—':`${Math.round(ratio)}x`;}
+function switchView(next){if(next===view.value)return;saveContext();writePageState('meme-mode-query:'+view.value,modeQuery(route.query,view.value));const saved=readPageState('meme-mode-query:'+next)??{};router.push({query:{...modeQuery(saved,next),chain:scope.value,view:next==='pool'?'pool':undefined}});}
+async function toggleGroup(symbol){if(openGroups.has(symbol))openGroups.delete(symbol);else{openGroups.add(symbol);await loadOpenGroup(symbol);}saveContext();}
+const validPoints=computed(()=>comparableDirectoryPoints(store.snapshot?.chart?.points??[],Math.max(clock.value,Date.now())));
+const plotVolumeMax=computed(()=>Math.max(0,...validPoints.value.map(point=>Number(point.volume)))),plotLiquidityMax=computed(()=>Math.max(0,...validPoints.value.map(point=>Number(point.liquidity))));
+const logX=computed(()=>Math.log1p(plotLiquidityMax.value)),logY=computed(()=>Math.log1p(plotVolumeMax.value));
+const distributionPoints=computed(()=>validPoints.value.map(point=>({...point,x:3+(logX.value?Math.log1p(point.liquidity)/logX.value:0)*94,y:4+(logY.value?Math.log1p(point.volume)/logY.value:0)*92})));
+const axisTicksX=computed(()=>[0,.25,.5,.75,1].map(f=>Math.expm1(logX.value*f))),axisTicksY=computed(()=>[1,.75,.5,.25,0].map(f=>Math.expm1(logY.value*f)));
+const selectedPoint=computed(()=>distributionPoints.value.find(point=>point.key===selectedPointKey.value)??null);
+function assetLink(asset){return assetNavigationLink(asset,{route,scope:scope.value});}
+function pointTitle(point){return `${point.symbol||point.name||short(point.token)} · ${tr('成交','Volume')} ${fullUsd(point.volume)} · ${tr('流动性','Liquidity')} ${fullUsd(point.liquidity)} · ${date(point.volumeAt)} / ${date(point.liquidityAt)}`;}
 </script>
-
 <style scoped>
-.meme-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:20px; }
-.meme-heading h2 { font-size:20px; }
-.meme-view-switch { display:flex; border:1px solid var(--border); border-radius:6px; padding:3px; gap:3px; }
-.meme-view-switch button { border:0; background:transparent; color:var(--muted); padding:7px 14px; border-radius:4px; cursor:pointer; }
-.meme-view-switch button.active { background:var(--surface-raised); color:var(--text); }
-.meme-toolbar,.meme-filter-options,.meme-list-meta { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
-.meme-toolbar { justify-content:space-between; margin-bottom:12px; }
-.meme-toolbar select { min-height:34px; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--text); padding:5px 8px; }
-.meme-toolbar label,.meme-list-meta label { display:flex; gap:5px; align-items:center; font-size:12px; color:var(--muted); }
-.meme-list-meta { color:var(--muted); font-size:12px; margin-bottom:12px; }
-.meme-list-meta button { color:var(--text); background:var(--surface-raised); border:1px solid var(--border); border-radius:4px; padding:3px 7px; cursor:pointer; }
-.meme-note { margin:12px 0; color:var(--muted); font-size:12px; }
-.meme-desktop { max-height:none; }
-.meme-desktop :deep(th) { font-size:12px; }
-.meme-mobile,.mobile-filter-toggle { display:none; }
-@media(max-width:760px) {
-  .meme-desktop { display:none; }
-  .meme-mobile { display:grid; gap:10px; }
-  .mobile-filter-toggle { display:block; padding:7px 12px; background:var(--surface-raised); border:1px solid var(--border); border-radius:6px; color:var(--text); }
-  .meme-filter-options { display:none; order:3; width:100%; padding:10px 0; gap:12px; }
-  .meme-filter-options.is-open { display:flex; }
-  .meme-filter-options select { flex:1; min-width:145px; }
-  .meme-mobile-card { border:1px solid var(--border); border-radius:8px; background:var(--bg); padding:14px; min-width:0; }
-  .meme-card-title,.meme-card-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; }
-  .meme-card-title a { min-width:0; word-break:break-word; color:var(--text); }
-  .meme-mobile-card > p { color:var(--muted); font-size:12px; margin:4px 0 8px; }
-  .meme-card-relations { display:flex; gap:8px; color:var(--muted); font-size:12px; min-height:18px; margin-bottom:12px; }
-  .meme-card-relations a { color:var(--accent); }
-  .meme-mobile-card dl { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  .meme-mobile-card dt { color:var(--muted); font-size:12px; }
-  .meme-mobile-card dd { font-family:ui-monospace,monospace; font-variant-numeric:tabular-nums; margin-top:4px; overflow-wrap:anywhere; }
-  .meme-card-footer { border-top:1px solid var(--border); margin-top:12px; padding-top:10px; font-size:12px; }
-  .meme-card-footer time { color:var(--muted); }
-  .meme-card-footer a { color:var(--text); }
-  .meme-same-name { margin-top:10px; background:none; color:var(--muted); border:0; text-decoration:underline; }
-}
+.meme-page{display:grid;gap:18px}.meme-heading{display:flex;align-items:center;justify-content:space-between;gap:15px}.meme-heading h2{margin:0;font-size:25px;font-weight:650}.meme-heading p{margin:5px 0 0;font-size:13px;color:var(--muted)}.meme-view-switch{display:flex;gap:3px;background:var(--surface-raised);padding:4px;border:1px solid var(--border);border-radius:8px}.meme-view-switch button{border:0;border-radius:5px;padding:8px 15px;background:none;font-size:12px;color:var(--muted);cursor:pointer}.meme-view-switch button.active{background:var(--panel);color:var(--accent);box-shadow:0 1px 3px #172d5210}.meme-results{padding:22px}.meme-toolbar{display:flex;align-items:end;flex-wrap:wrap;gap:12px}.meme-toolbar>label,.meme-advanced label{display:flex;gap:5px;flex-direction:column;color:var(--muted);font-size:11px}.meme-toolbar select,.meme-advanced select{min-height:35px;padding:6px 9px;border:1px solid var(--border);border-radius:6px;background:var(--panel);color:var(--text);font-size:12px}.meme-search{display:flex;align-items:center;flex:1;min-width:180px;border:1px solid var(--border);border-radius:6px;min-height:35px}.meme-search input{min-width:0;flex:1;width:100%;border:0;background:none;color:var(--text);font-size:12px;padding:8px 10px}.meme-search button{border:0;border-left:1px solid var(--border);background:none;color:var(--accent);padding:6px 10px;font-size:12px;cursor:pointer}.text-button{border:0;background:none;color:var(--accent);font-size:12px;padding:5px 0;cursor:pointer;text-decoration:underline;text-underline-offset:3px}.meme-toolbar>.text-button{min-height:35px;text-decoration:none}.meme-advanced{margin-top:12px;font-size:12px;color:var(--muted)}.meme-advanced summary,.meme-column-settings summary,.meme-methods summary,.meme-distribution summary{cursor:pointer}.meme-advanced>div{display:flex;align-items:center;flex-wrap:wrap;gap:12px 20px;margin-top:12px;padding:12px;background:var(--surface-raised);border-radius:6px}.meme-advanced>div>label:has(input){flex-direction:row;align-items:center}.meme-list-meta{display:flex;align-items:center;gap:10px 20px;flex-wrap:wrap;padding:15px 0 12px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--border)}.snapshot-time{margin-left:auto;font-size:11px}.meme-column-settings{position:relative;font-size:11px}.meme-column-settings>div{position:absolute;right:0;top:22px;z-index:10;background:var(--panel);border:1px solid var(--border);box-shadow:0 3px 10px #172d5210;border-radius:6px;padding:10px;min-width:165px;display:grid;gap:8px}.meme-column-settings label{display:flex;gap:6px;align-items:center;white-space:nowrap}.meme-note{font-size:12px;color:var(--muted);line-height:1.6;margin:10px 0}.meme-new-data{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;border:1px solid var(--border);background:var(--surface-raised);padding:10px 12px;border-radius:6px;margin-top:12px}.meme-new-data button{white-space:nowrap;font-size:12px;border:0;background:none;color:var(--accent);cursor:pointer}.meme-empty{padding:24px 0;font-size:13px;color:var(--muted)}.meme-table-wrap{overflow:auto}.meme-directory-table{width:100%;border-collapse:collapse}.meme-directory-table th{text-align:left;padding:14px 10px;font-size:11px;font-weight:500;color:var(--muted);white-space:nowrap}.meme-directory-table th:first-child{padding-left:0}.meme-directory-table th:last-child{padding-right:0}.meme-directory-table th.numeric{text-align:right}.meme-directory-table th small{display:block;font-size:10px;font-weight:400}.meme-group-progress td{padding:8px 10px;color:var(--muted);font-size:11px;background:var(--surface-raised)}.meme-group-progress button{font-size:11px;margin-left:12px}.meme-methods,.meme-distribution{border-top:1px solid var(--border);padding-top:15px;margin-top:15px;font-size:12px;color:var(--muted)}.meme-methods p{line-height:1.6}.meme-distribution>summary{display:flex;align-items:center;gap:12px;color:var(--text);font-weight:600}.meme-distribution>summary small{color:var(--muted);font-size:11px;font-weight:400}.meme-plot-wrap{max-width:900px;margin:18px auto}.axis-title{font-size:11px;color:var(--muted)}.meme-plot-body{display:flex;height:230px;margin-top:10px}.meme-y-ticks{width:65px;display:flex;flex-direction:column;justify-content:space-between;font-size:10px;color:var(--muted);padding-right:10px;text-align:right}.meme-plot{position:relative;flex:1;border-left:1px solid var(--border);border-bottom:1px solid var(--border);background:repeating-linear-gradient(to top,transparent,transparent calc(25% - 1px),var(--border) calc(25% - 1px),var(--border) 25%)}.meme-point{position:absolute;width:10px;height:10px;padding:0;background:var(--accent);opacity:.7;border:1px solid var(--panel);border-radius:50%;transform:translate(-50%,50%);cursor:pointer}.meme-point.selected{width:15px;height:15px;opacity:1;outline:2px solid var(--accent);outline-offset:2px}.meme-x-ticks{display:flex;justify-content:space-between;margin:6px 0 0 65px;font-size:10px;color:var(--muted)}.x-title{display:block;text-align:center;margin-top:9px}.meme-selected{display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px;padding:12px;background:var(--surface-raised);border-radius:6px;font-size:11px}.meme-selected a{color:var(--accent)}.meme-skeleton{padding:15px 0}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,.meme-table-wrap:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.meme-toolbar>.meme-signal-legend[open]{flex-basis:100%}.meme-toolbar>.meme-signal-legend{align-self:center;max-width:100%;font-size:11px}
+@media(max-width:760px){.meme-toolbar>.meme-signal-legend{grid-column:1/-1;justify-self:start}.meme-page,.meme-results,.meme-table-wrap{min-width:0;width:100%;max-width:100%;box-sizing:border-box}.meme-toolbar{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.meme-toolbar>*{min-width:0}.meme-heading{align-items:start}.meme-heading h2{font-size:22px}.meme-heading p{max-width:240px;font-size:12px}.meme-view-switch button{padding:7px 9px;white-space:nowrap}.meme-results{padding:16px}.meme-toolbar{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}.meme-search{grid-column:1/-1}.meme-toolbar select{width:100%;min-width:0}.meme-toolbar>.text-button{grid-column:1/-1;justify-self:start;min-height:20px}.meme-list-meta{gap:8px 12px;font-size:11px}.snapshot-time{margin-left:0}.meme-column-settings{margin-left:auto}.meme-table-wrap{overflow:visible}.meme-directory-table,.meme-directory-table tbody{display:block;min-width:0;width:100%;max-width:100%}.meme-directory-table thead{display:none}.meme-group-progress{display:block;padding:9px;background:var(--surface-raised)}.meme-group-progress td{display:block;padding:0}.meme-new-data{align-items:flex-start;font-size:11px}.meme-plot-body{height:190px}.meme-y-ticks{width:50px}.meme-x-ticks{margin-left:50px}.meme-selected{display:grid;gap:7px}.meme-heading{gap:8px}}
 </style>

@@ -2,16 +2,16 @@ import { hasBasicMarketData, isQualifiedMeme, isRecentObservation } from './stoc
 
 export const marketCatalogReady = snapshot => !!snapshot?.unified && snapshot.unified.snapshotScope !== 'overview';
 
-// Entry links provide defaults. Explicit choices still work while the user
-// keeps the discovery window or volume-ranking condition selected.
+// Browse the complete catalogue by default. Explicit filters and the active
+// Meme KPI keep their own scopes and observation requirements.
 export function memeFilterValues(query = {}) {
   const qualified=query.qualified==='1',newAssets=query.new==='24h',ranking=query.rank==='volume24h';
   const legacy=String(query.filter??'');
   return {
     qualified,newAssets,ranking,
-    showMissing:query.showMissing!=null ? query.showMissing==='1' : newAssets||ranking,
-    relation:qualified?'all':String(query.rel??(newAssets||ranking?'all':({all:'all',name:'B',history:'all',verified:'A',related:'A'}[legacy]??'A'))),
-    fresh:qualified?'1':String(query.fresh??(newAssets||ranking||['all','verified','name','history'].includes(legacy)?'0':'1')),
+    showMissing:query.showMissing!=null ? query.showMissing==='1' : !qualified,
+    relation:qualified?'all':String(query.rel??(newAssets||ranking?'all':({all:'all',name:'B',history:'all',verified:'A',related:'A'}[legacy]??'all'))),
+    fresh:qualified?'1':String(query.fresh??(legacy==='related'?'1':'0')),
     minLiquidity:qualified?'1000':String(query.minLiq??query.minLiquidity??'0'),
     hideRisk:query.risk==='hide',
   };

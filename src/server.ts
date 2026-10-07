@@ -478,12 +478,12 @@ seedBstocks();
 // The pipeline runs immediately at startup, then waits five minutes after
 // each completed round (the round itself may take additional time).
 void loop("dashboard", 300_000, collectDashboard);
-void loop("marketEnrichment", 300_000, async () => refreshMarketEnrichment(dashboardState()));
+void loop("marketEnrichment", 300_000, async () => refreshMarketEnrichment(await dashboardState()));
 // Rotate token-wide liquidity and official pool valuations independently of
 // slower supplemental providers. The shared CoinGecko limiter and upstream
 // Retry-After remain authoritative; a minute-scale round can revisit the
 // full catalogue before its 30-minute liquidity freshness window expires.
-void loop("coinGeckoEnrichment", COINGECKO_REFRESH_INTERVAL_MS, async () => refreshCoinGeckoEnrichment(dashboardState()), true);
+void loop("coinGeckoEnrichment", COINGECKO_REFRESH_INTERVAL_MS, async () => refreshCoinGeckoEnrichment(await dashboardState()), true);
 // The issuer price endpoint caches for 15s. Catalogue/multiplier refreshes
 // remain independently bounded to five minutes inside this collector.
 void loop("robinhood", 15_000, refreshRobinhood);
@@ -546,9 +546,9 @@ app.use('/api/*',async(c,next)=>{
 app.use('/api/*',compress());
 let dashboardJson='',dashboardJsonAt=0;
 const etag=(v:string)=>'"'+createHash('sha1').update(v).digest('base64url').slice(0,20)+'"';
-app.get('/api/dashboard',c=>{
+app.get('/api/dashboard',async c=>{
   if(!dashboardJson||Date.now()-dashboardJsonAt>10000){
-    const u=dashboardState();
+    const u=await dashboardState();
     const pick=(row:any,keys:string[])=>Object.fromEntries(keys.filter(k=>row[k]!==undefined).map(k=>[k,row[k]]));
     const assets=u.assets.map(a=>pick(a,['token','chainId','chain','symbol','name','kind','firstSeen','updatedAt','fieldTimes','fieldSources','price','marketCap','volume24h','buys24h','sells24h','txs24h','holders','liquidity','change24h','match','risk','provider','providers','logoUrl','tradeAt']));
     const stockTokens=u.stockTokens.map(s=>pick(s,['assetId','chainId','tokenContractAddress','stockCode','tokenSymbol','tokenName','issuer','provider','providers','price','stockPrice','volume24h','volumeScope','priceScope','updatedAt','referenceAt','referenceObservedAt','referenceProvider','referenceSymbol','referenceVolume','referenceChange24h','premium','instrumentId','logoUrl','stockIdentity','fieldTimes']));
@@ -584,7 +584,7 @@ app.get("/api/token/:chain/:address", async (c) => {
   const address = c.req.param("address").toLowerCase();
   if (['196','56','4663'].includes(chain) && /^0x[\da-f]{40}$/.test(address)) {
     if(chain==='196')void refreshAssetOnDemand(address);
-    const detail=dashboardDetail(chain,address);
+    const detail=await dashboardDetail(chain,address);
     if(detail)return c.json(detail);
   }
   if (chain === "4663" && /^0x[\da-f]{40}$/.test(address)) {
@@ -627,21 +627,21 @@ app.get("/api/token/:chain/:address", async (c) => {
   if (cached) return c.json(radarTokenJson(cached, tickers));
   return c.json({error:'Asset not yet in the persistent index'},404);
 });
-app.get('/api/events',c=>{
+app.get('/api/events',async c=>{
   const chain=c.req.query('chain')??'196';if(!['196','56','4663'].includes(chain))return c.json({error:'Unsupported chain'},400);
   let before;try{before=c.req.query('before')?JSON.parse(c.req.query('before')!):undefined;if(before&&(!Number.isFinite(before.t)||typeof before.id!=='string'))throw 0;}catch{return c.json({error:'Invalid cursor'},400);}
-  return c.json(dashboardEvents(chain,before));
+  return c.json(await dashboardEvents(chain,before));
 });
-app.get('/api/pair/:chain/:stock',c=>{
+app.get('/api/pair/:chain/:stock',async c=>{
  const chain=c.req.param('chain'),stock=c.req.param('stock').toLowerCase();
  if(!['196','56','4663'].includes(chain)||!/^0x[\da-f]{40}$/.test(stock))return c.json({error:'Invalid identity'},400);
- const data=dashboardDetail(chain,stock);return data?c.json(data):c.json({error:'Not indexed'},404);
+ const data=await dashboardDetail(chain,stock);return data?c.json(data):c.json({error:'Not indexed'},404);
 });
 const aiLang=(c:any)=>c.req.query('lang')==='en'?'en':'zh';
 app.get('/api/ai/insight/:chain/:address',async c=>{
  const lang=aiLang(c),chain=c.req.param('chain'),address=c.req.param('address').toLowerCase();
  if(!['196','56','4663'].includes(chain)||!/^0x[\da-f]{40}$/.test(address))return c.json({error:'Invalid identity'},400);
- const d:any=dashboardDetail(chain,address);
+ const d:any=await dashboardDetail(chain,address);
  if(!d?.asset)return c.json({error:'Not indexed'},404);
  const mins=(t?:number)=>t==null?null:Math.max(0,Math.round((Date.now()-t)/60000));
  const a=d.asset;
@@ -687,8 +687,8 @@ function tierLabel(v: number | null | undefined, lang: string): string | null {
   return lang === "en" ? (n >= 10000 ? "pool liquidity ≥$10k" : n >= 1000 ? "pool liquidity $1k–$10k" : "pool liquidity <$1k")
     : (n >= 10000 ? "池流动性≥$1万" : n >= 1000 ? "池流动性$1千-$1万" : "池流动性<$1千");
 }
-function briefingBase() {
- const u=dashboardState();
+async function briefingBase() {
+ const u=await dashboardState();
  const dayAgo=Date.now()-86400_000;
  const tickers=buildTickerSet(state.assets.map(a=>a.underlying));
  const leadRows=[...candidates.values()].filter(x=>x.firstSeen>=dayAgo);
@@ -712,7 +712,7 @@ function briefingBase() {
   distribution:u.distribution,newNameLeads24h:newLeads,newVerifiedPairs24h:newVerifiedRaw,verifiedAssetMovers24h:movers,moverSymbols,crossMarketPremiumTop:premiums};
 }
 const ASCII_ONLY=/^[\x20-\x7E]+$/;
-function briefingFor(base:ReturnType<typeof briefingBase>,lang:string){
+function briefingFor(base:Awaited<ReturnType<typeof briefingBase>>,lang:string){
  const movers=base.verifiedAssetMovers24h.map(x=>({...x,liquidityTierLabel:tierLabel(x.liquidityUsd,lang)}));
  const verified=base.newVerifiedPairs24h.map(x=>({...x,liquidityTierLabel:tierLabel(x.poolLiquidityUsd,lang)}));
  if(lang==='en'){
@@ -737,7 +737,7 @@ app.get('/api/ai/briefing', async c => {
 });
 // On-chain PairRegistry (X Layer 196): public read API + idempotent sync of
 // verified pairs. Unconfigured (no REGISTRY_CONTRACT) degrades to metadata only.
-app.get("/api/registry", async (c) => c.json(await registryInfo(xLayerState().relations)));
+app.get("/api/registry", async (c) => c.json(await registryInfo((await xLayerState()).relations)));
 // Server-sent events: price/trade/briefing deltas plus a heartbeat. The
 // frontend falls back to polling whenever this stream is unavailable.
 app.get("/api/stream", (c) => {
@@ -771,10 +771,10 @@ void loop("streamHeartbeat", 25_000, async () => {
   broadcastStream("heartbeat", { at: Date.now() });
 });
 let stateJson='',stateJsonAt=0;
-app.get("/api/state", (c) => {
+app.get("/api/state", async (c) => {
   if(!stateJson||Date.now()-stateJsonAt>10000){
   const tickers = buildTickerSet(state.assets.map((a) => a.underlying));
-  const xlayer = xLayerState();
+  const xlayer = await xLayerState();
   stateJson=JSON.stringify({
     ...state,
     rpcPool: rpc.nodeStats(),
@@ -794,7 +794,7 @@ app.get("/api/state", (c) => {
     okx: okxState,
     // `unified` is the source-neutral feed consumed by the new relationship
     // screens. Keep `xlayer` temporarily for the legacy API contract.
-    unified: dashboardState(),
+    unified: await dashboardState(),
     xlayer,
     relationTypes,
     // Baskets are made from verified direct-pair members only. Name matches

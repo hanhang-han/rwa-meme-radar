@@ -13,6 +13,7 @@ import time
 import aiosqlite
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
+from ..storage_runtime import async_connect
 from .. import developer_access as access
 from ..db import store
 from ..market_quotes import enrich_asset
@@ -131,7 +132,7 @@ async def _index() -> dict:
     async with _index_lock:
         if _index_cache and time.monotonic() - _index_cache[2] < INDEX_REFRESH_SECONDS:
             return _index_cache[1]
-        async with aiosqlite.connect(scoped.path, timeout=10) as db:
+        async with async_connect(scoped.path, readonly=True, timeout=10) as db:
             await db.execute("PRAGMA query_only=ON")
             await db.execute("BEGIN")
             cursor = await db.execute("SELECT revision,built_at FROM dashboard_projection WHERE name='full'")

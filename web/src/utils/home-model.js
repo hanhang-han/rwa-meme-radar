@@ -44,26 +44,30 @@ export function onchainRecordedTrades(trades, knownAssets, scope = 'all', minAmo
   return (trades ?? []).filter(trade => (known == null || known.has(identity(trade)))
     && (String(trade.venue ?? '').toLowerCase() === 'dex' || (!trade.venue && !!trade.hash))
     && inChainScope(trade,scope) && (direction === 'all' || trade.type === direction)
-    && (minAmount <= 0 || (tradeDisplayAmount(trade)?.value ?? -1) >= minAmount)).slice(0,50);
+    && (minAmount <= 0 || (tradeDisplayAmount(trade)?.currency === 'USD' && tradeDisplayAmount(trade).value >= minAmount))).slice(0,50);
 }
 
 export function groupActivityItems(items = []) {
   const grouped = new Map();
   const seen = new Set();
   for (const item of items) {
-    if (item.id && seen.has(item.id)) continue;
-    if (item.id) seen.add(item.id);
-    const key = `${identity(item)}:${item.type ?? item.kind ?? ''}`;
-    const at = Number(item.at ?? item.verifiedAt ?? item.discoveredAt ?? 0);
+    const deliveryKey=item.id?`${item.chainId??item.relation?.chainId??''}:${item.id}`:null;
+    if (deliveryKey && seen.has(deliveryKey)) continue;
+    if (deliveryKey) seen.add(deliveryKey);
+    const relation=item.relation??{};
+    const pool=String(item.pool??relation.pool??'').toLowerCase();
+    const stock=String(item.stock??relation.stock??item.ticker??relation.ticker??'').toLowerCase();
+    const key = `${String(item.chainId??relation.chainId??'')}:${pool||identity(item)}:${stock}:${item.type ?? item.kind ?? ''}`;
+    const at = Number(item.at ?? item.t ?? item.verifiedAt ?? item.discoveredAt ?? 0);
     const previous = grouped.get(key);
     if (!previous) grouped.set(key, { ...item, id:key, recordCount:Number(item.recordCount) || 1 });
     else {
       const count = previous.recordCount + (Number(item.recordCount) || 1);
-      const previousAt = Number(previous.at ?? previous.verifiedAt ?? previous.discoveredAt ?? 0);
+      const previousAt = Number(previous.at ?? previous.t ?? previous.verifiedAt ?? previous.discoveredAt ?? 0);
       grouped.set(key, { ...(at > previousAt ? item : previous), id:key, recordCount:count });
     }
   }
-  return [...grouped.values()].sort((a,b)=>Number(b.at ?? b.verifiedAt ?? b.discoveredAt ?? 0)-Number(a.at ?? a.verifiedAt ?? a.discoveredAt ?? 0));
+  return [...grouped.values()].sort((a,b)=>Number(b.at ?? b.t ?? b.verifiedAt ?? b.discoveredAt ?? 0)-Number(a.at ?? a.t ?? a.verifiedAt ?? a.discoveredAt ?? 0));
 }
 
 export function tradeDisplayAmount(trade) {

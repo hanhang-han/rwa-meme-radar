@@ -15,6 +15,8 @@ from contextvars import ContextVar
 from decimal import Decimal, localcontext
 
 import aiosqlite
+
+from ..storage_runtime import async_connect
 import httpx
 import websockets
 from web3 import Web3
@@ -155,6 +157,9 @@ class _StreamWriteStore(ResearchStore):
 
 
 class ChainPoolStream:
+    write_derived_quotes = True
+    owns_retention = False
+
     def __init__(self, chain):
         self.chain = str(chain)
         prefix = ENV_NAMES[self.chain]
@@ -182,6 +187,7 @@ class ChainPoolStream:
         self.assets = {}
         self.relations = {}
         self.market_registry = {}
+        self.confirmation_cursor = 0
         self.headers = OrderedDict()
         self.live_header_lookups = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
         self.live_log_durations_ms = deque(maxlen=LIVE_DIAGNOSTIC_WINDOW)
@@ -240,23 +246,30 @@ class ChainPoolStream:
     async def init(self):
         if self.initialized:
             return
-        self.s = await store(self.chain)
-        async with self.s._guard_write():
-            await self.s.db.executescript("""
-                CREATE TABLE IF NOT EXISTS chain_stream_logs (
-                  chain TEXT NOT NULL, id TEXT NOT NULL, pool TEXT NOT NULL,
-                  block INTEGER NOT NULL, hash TEXT NOT NULL, at INTEGER NOT NULL,
-                  body TEXT NOT NULL, processed INTEGER NOT NULL DEFAULT 0,
-                  PRIMARY KEY(chain,id));
-                CREATE INDEX IF NOT EXISTS chain_stream_logs_block ON chain_stream_logs(chain,block);
-                CREATE INDEX IF NOT EXISTS chain_stream_logs_retention ON chain_stream_logs(chain,at,processed);
-                CREATE INDEX IF NOT EXISTS candles_unconfirmed ON candles(confirmed,openTime);
-            """)
-            await self.s.db.commit()
+        self.s = await self.open_store()
+        if getattr(self.s.db, 'backend', 'sqlite') == 'postgres':
+            from ..storage_schema import verify_tables
+            await verify_tables(self.s.db, ('chain_stream_logs',))
+        else:
+            async with self.s._guard_write():
+                await self.s.db.executescript("""
+                    CREATE TABLE IF NOT EXISTS chain_stream_logs (
+                      chain TEXT NOT NULL, id TEXT NOT NULL, pool TEXT NOT NULL,
+                      block INTEGER NOT NULL, hash TEXT NOT NULL, at INTEGER NOT NULL,
+                      body TEXT NOT NULL, processed INTEGER NOT NULL DEFAULT 0,
+                      PRIMARY KEY(chain,id));
+                    CREATE INDEX IF NOT EXISTS chain_stream_logs_block ON chain_stream_logs(chain,block);
+                    CREATE INDEX IF NOT EXISTS chain_stream_logs_retention ON chain_stream_logs(chain,at,processed);
+                    CREATE INDEX IF NOT EXISTS candles_unconfirmed ON candles(confirmed,openTime);
+                """)
+                await self.s.db.commit()
         await self.catalogue()
         await self._open_trade_db()
         await self._open_status_db()
         self.initialized = True
+
+    async def open_store(self):
+        return await store(self.chain)
 
     async def _open_trade_db(self):
         """Keep trade transactions off the shared connection's read queue."""
@@ -264,9 +277,10 @@ class ChainPoolStream:
             return
         # SQLite can otherwise hold the process-wide writer lock for 15 s
         # while another process owns the database. Retry outside that lock.
-        connection = await aiosqlite.connect(self.s.path, timeout=.25)
+        connection = await async_connect(self.s.path, timeout=.25)
         try:
-            await connection.execute("PRAGMA busy_timeout=250")
+            if getattr(connection, 'backend', 'sqlite') != 'postgres':
+                await connection.execute("PRAGMA busy_timeout=250")
         except BaseException:
             await connection.close()
             raise
@@ -280,9 +294,10 @@ class ChainPoolStream:
         """Keep telemetry away from both shared reads and live trade writes."""
         if self.status_db is not None or self.s.path == ":memory:":
             return
-        connection = await aiosqlite.connect(self.s.path, timeout=2)
+        connection = await async_connect(self.s.path, timeout=2)
         try:
-            await connection.execute("PRAGMA busy_timeout=2000")
+            if getattr(connection, 'backend', 'sqlite') != 'postgres':
+                await connection.execute("PRAGMA busy_timeout=2000")
         except BaseException:
             await connection.close()
             raise
@@ -778,9 +793,6 @@ class ChainPoolStream:
         raise ValueError('block-not-available')
 
     async def process_log(self, log):
-        pool = self.pools.get(address(log.get("address")))
-        if not pool or pool.get("verificationStatus") == "reorged":
-            return
         ident = event_key(log)
         block_hash = str(log.get("blockHash") or "").lower()
         if not block_hash or not log.get("transactionHash"):
@@ -788,6 +800,9 @@ class ChainPoolStream:
         if log.get("removed"):
             async with self.lock:
                 await self.retract_block(block_hash)
+            return
+        pool = self.pools.get(address(log.get("address")))
+        if not pool or pool.get("verificationStatus") == "reorged":
             return
         if self.irrelevant_sync(log):
             return
@@ -869,10 +884,11 @@ class ChainPoolStream:
                         "source": "Chain RPC", "finality": "provisional", "provider": "Chain RPC",
                         "receivedAt": log.get('_receivedAt') or now_ms(),
                     }, raw_log=raw_log if index == 0 else None)
-                with self._measure_live_stage("assetQuote"):
-                    await self.pool_asset_quote(pool, token, decoded, at, height, ident)
+                if self.write_derived_quotes:
+                    with self._measure_live_stage("assetQuote"):
+                        await self.pool_asset_quote(pool, token, decoded, at, height, ident)
                 accepted = True
-            if reserves or sqrt:
+            if self.write_derived_quotes and (reserves or sqrt):
                 for rel in self.relations.get(pool["pool"], []):
                     with self._measure_live_stage("relationQuote"):
                         ratio = pool_ratio(pool["token0"], rel["token"], d0, d1,
@@ -980,6 +996,10 @@ class ChainPoolStream:
     async def commit_trade(self, market, trade, *, raw_log=None):
         return await retry_busy_write(lambda: self._commit_trade_once(market, trade, raw_log=raw_log))
 
+    async def trade_usd_fields(self, db, scoped, market, trade):
+        from .trade_valuation import dated_usd_volume
+        return await dated_usd_volume(db, scoped, market, trade)
+
     async def _commit_trade_once(self, market, trade, *, raw_log=None):
         from .market_streams import BAR_MS, trade_to_candle
         from .trade_valuation import dated_usd_volume
@@ -990,7 +1010,7 @@ class ChainPoolStream:
         # global-write-lock transaction.
         db = self.trade_db or s.db
         with self._measure_live_stage("usdEvidence"):
-            usd_fields = await dated_usd_volume(db, s, market, trade)
+            usd_fields = await self.trade_usd_fields(db, s, market, trade)
         # Market identity, watched bars, and the fact selector do not depend on
         # the current database snapshot. Prepare them before BEGIN IMMEDIATE
         # so a busy stream does not hold SQLite's sole writer while building
@@ -1104,7 +1124,8 @@ class ChainPoolStream:
                     if opened >= (old.get("row") or {}).get("t", 0):
                         fact_rows.append(self._fact_params("market-candle", market.storage + ":" + bar, frame))
                         meta = {**meta, **market_frame, "source": "Chain RPC", "storage": market.storage,
-                            "lastSuccessfulAt": stamp, "lastSourceEventAt": max(trade["t"], old.get("sourceEventAt") or 0),
+                            "lastSuccessfulAt": stamp, "lastSourceEventAt": max(
+                                trade["t"], old.get("sourceEventAt") or 0, meta.get("lastSourceEventAt") or 0),
                             "stale": False, "error": None, "transport": "websocket",
                             "coverage": "observed", "nextRefreshAt": stamp + 60000}
                     marks = dict(meta.get("rowObservedAt") or {})
@@ -1148,6 +1169,242 @@ class ChainPoolStream:
             marks=dict(sorted(marks.items(),key=lambda item:int(item[0]),reverse=True)[:1000])
         await self._fact("candle-meta",market.candle_key(bar),{
             **meta,"rowObservedAt":marks,"lastObservationAt":stamp})
+
+    async def invalidate_time_coverage(self, after_block):
+        # A canonical change voids every interval extending beyond the last
+        # common ancestor, including empty blocks with no stored Swap logs.
+        async with self.s._guard_write():
+            await self.s.db.execute("DELETE FROM facts WHERE kind=? AND CAST(json_extract(body,'$.endBlock') AS INTEGER)>?",
+                (self.s.key('pool-time-coverage'), after_block))
+            await self.s.db.commit()
+
+    async def record_time_coverage(self, start, end, end_header, pools, logs):
+        """Publish time coverage only after an anchored, decoded full log page.
+
+        EVM timestamps have second precision even on subsecond chains. Exclude
+        both boundary seconds until an adjacent successful range is merged.
+        No since-verification checkpoint is promoted to a 24-hour assertion.
+        """
+        if (start <= 0 or end < start or not isinstance(end_header, dict)
+                or not HEX_HASH.fullmatch(str(end_header.get('hash') or '')) or not end_header.get('timestamp')):
+            return 0
+        previous = await self.rpc('eth_getBlockByNumber', [hex(start-1), False])
+        if not isinstance(previous, dict) or not HEX_HASH.fullmatch(str(previous.get('hash') or '')) or not previous.get('timestamp'):
+            return 0
+        start_ms = number(previous['timestamp'])*1000+1000
+        through_ms = number(end_header['timestamp'])*1000-1
+        if through_ms < start_ms:
+            return 0
+        expected = []
+        excluded = set()
+        swap_counts = {pool: 0 for pool in pools}
+        for log in logs:
+            topic = str((log.get('topics') or [''])[0]).lower()
+            if topic not in (SWAP_V2.lower(), SWAP_V3.lower()):
+                continue
+            pool_id = address(log.get('address'))
+            pool = self.pools.get(pool_id)
+            if not pool or pool_id not in swap_counts:
+                continue
+            swap_counts[pool_id] += 1
+            bases = self.bases(pool)
+            if not bases:
+                excluded.add(pool_id)
+            for token in bases:
+                expected.append((self.s.key(self.market(pool, token).storage), 'chain:'+self.chain+':'+event_key(log), pool_id))
+        # An unsupported ABI or incomplete decode cannot masquerade as an
+        # empty, completely covered hour. All expected market trades must
+        # already have been atomically persisted by process_log().
+        for offset in range(0, len(expected), 200):
+            batch = expected[offset:offset+200]
+            by_asset = {}
+            for asset, ident, _ in batch:
+                by_asset.setdefault(asset, []).append(ident)
+            selectors, parameters = [], []
+            for asset, ids in by_asset.items():
+                selectors.append('(asset=? AND id IN (' + ','.join('?' for _ in ids) + '))')
+                parameters.extend((asset, *ids))
+            rows = await self.s.fetchall('SELECT asset,id FROM trades WHERE ' + ' OR '.join(selectors),
+                                         tuple(parameters))
+            found = {(row[0], row[1]) for row in rows}
+            excluded.update(pool for asset, ident, pool in batch if (asset, ident) not in found)
+        pool_ids = [pool for pool in pools if pool not in excluded and self.bases(self.pools[pool])]
+        if not pool_ids:
+            return 0
+        # One bounded fact per pool/day; adjacent block ranges grow the same
+        # interval. Gaps have separate keys and cannot be bridged by time alone.
+        day = start_ms//86_400_000
+        ids = [pool+':'+str(day) for pool in pool_ids]
+        rows = await self.s.fetchall("SELECT id,body FROM facts WHERE kind=? AND CAST(json_extract(body,'$.day') AS INTEGER) BETWEEN ? AND ?",
+            (self.s.key('pool-time-coverage'), day-1, day))
+        existing, latest = {}, {}
+        for ident, body in rows:
+            value = json.loads(body)
+            existing[ident] = value
+            if value.get('pool') in pool_ids and value.get('endBlock', -1) > (latest.get(value['pool'], ('', {}))[1].get('endBlock', -1)):
+                latest[value['pool']] = (ident, value)
+        patches = []
+        for pool, ident in zip(pool_ids, ids):
+            old_ident, old = latest.get(pool, (ident, None))
+            value = {'pool': pool, 'chainId': self.chain, 'fromMs': start_ms, 'throughMs': through_ms,
+                'startBlock': start, 'endBlock': end, 'precedingBlockHash': str(previous['hash']).lower(),
+                'endBlockHash': str(end_header['hash']).lower(), 'canonical': True, 'decoded': True, 'day': day,
+                'scope': 'all-v2-v3-swap-logs-in-scanned-range', 'observedAt': now_ms(), 'swapLogCount': swap_counts[pool]}
+            if old and old.get('canonical') is True and start == old.get('endBlock', -2)+1 and old.get('endBlockHash') == str(previous['hash']).lower():
+                if old.get('day') == day:
+                    ident = old_ident
+                value.update(fromMs=old['fromMs'], startBlock=old['startBlock'], precedingBlockHash=old.get('precedingBlockHash'),
+                    swapLogCount=old.get('swapLogCount', 0)+swap_counts[pool])
+            elif old and old.get('startBlock', start) <= start <= end <= old.get('endBlock', -1):
+                continue  # A repeated verified range adds no coverage.
+            elif old:
+                ident += ':'+str(start)
+            patches.append((self.s.key('pool-time-coverage'), ident, json.dumps(value, separators=(',', ':'))))
+        if patches:
+            async with self.s._guard_write():
+                await self.s.db.executemany(FACT_UPSERT, patches)
+                await self.s.db.execute("DELETE FROM facts WHERE kind=? AND CAST(json_extract(body,'$.throughMs') AS INTEGER)<?",
+                    (self.s.key('pool-time-coverage'), now_ms()-8*86_400_000))
+                await self.s.db.commit()
+        return len(patches)
+
+    async def confirm_recent_trades(self, limit=12, budget_ms=None):
+        """Canonical confirmations and transaction initiators off the live path.
+
+        Swap.sender can be a router; only transaction.from is a trader address.
+        This bounded background lane never delays committing a received Swap.
+        Confirmation alone does not establish complete historical coverage.
+        """
+        from ..config import bounded_env_int
+        if not 1 <= limit <= 24:
+            raise ValueError('invalid-confirmation-limit')
+        if budget_ms is None:
+            budget_ms = bounded_env_int('POOL_TRADE_CONFIRMATION_BUDGET_MS', 12000, 1000, 15000)
+        if not isinstance(budget_ms, (int, float)) or not 0 < budget_ms <= 15000:
+            raise ValueError('invalid-confirmation-budget')
+        result = {'requested': 0, 'accepted': 0, 'updated': 0, 'failed': 0,
+                  'scannedMarkets': 0, 'scannedTrades': 0, 'timeBudgetExpired': False,
+                  'sampleLimitPerMarket': 24, 'marketLimit': 16, 'budgetMs': budget_ms}
+        try:
+            async with asyncio.timeout(budget_ms/1000):
+                await self._confirm_recent_trades(limit, result)
+        except TimeoutError:
+            # Each completed trade was committed separately. Cancellation
+            # rolls back only the current write and releases the shared RPC
+            # gate; already-published confirmations remain available.
+            result['timeBudgetExpired'] = True
+            result['failed'] += 1
+        result['noChange'] = not result['accepted'] and not result['failed']
+        return result
+
+    async def _confirm_recent_trades(self, limit, result):
+        from ..config import bounded_env_int
+        from ..realtime_schema import enqueue_events
+        s = self.trade_store or self.s
+        # A prefix range followed by ORDER BY t scanned every historical DEX
+        # trade and built a temporary sort in production. Read only known
+        # markets, rotating across bounded exact (asset,t) index lookups.
+        keys = {s.key(key) for key, value in self.market_registry.items()
+                if key.startswith('dex:') and (value.get('definition') or {}).get('venue') == 'dex'
+                and str((value.get('definition') or {}).get('chain_id')) == self.chain}
+        for pool in self.pools.values():
+            keys.update(s.key(self.market(pool, token).storage) for token in self.bases(pool))
+        keys = sorted(keys)
+        if not keys:
+            return
+        offset = self.confirmation_cursor % len(keys)
+        keys = (keys[offset:]+keys[:offset])[:result['marketLimit']]
+        result['requested'] += 1
+        tip = await self.rpc('eth_getBlockByNumber', ['latest', False])
+        if not isinstance(tip, dict) or not HEX_HASH.fullmatch(str(tip.get('hash') or '')):
+            result['failed'] += 1
+            return
+        head = number(tip['number'])
+        required = bounded_env_int(ENV_NAMES[self.chain]+'_TRADE_CONFIRMATIONS', 6, 1, 100)
+        rows = []
+        for asset in keys:
+            samples = await s.fetchall('''SELECT id,body FROM trades INDEXED BY trades_time
+                WHERE asset=? AND t>=? AND t<=? ORDER BY t DESC LIMIT ?''',
+                (asset, now_ms()-86_400_000, now_ms(), result['sampleLimitPerMarket']))
+            self.confirmation_cursor += 1
+            result['scannedMarkets'] += 1
+            result['scannedTrades'] += len(samples)
+            for ident, body in samples:
+                trade = json.loads(body)
+                height = trade.get('blockNumber')
+                if (trade.get('provider') == 'Chain RPC' and trade.get('finality') == 'provisional'
+                        and isinstance(height, int) and height <= head-required):
+                    rows.append((asset, ident, body))
+                    if len(rows) >= limit:
+                        break
+            if len(rows) >= limit:
+                break
+        headers, transactions = {}, {}
+        for asset, ident, body in rows:
+            trade = json.loads(body)
+            height, block_hash = trade.get('blockNumber'), trade.get('blockHash')
+            tx_hash = str(trade.get('hash') or '').lower()
+            if not isinstance(height, int) or not HEX_HASH.fullmatch(str(block_hash or '')) or not HEX_HASH.fullmatch(tx_hash):
+                result['failed'] += 1
+                continue
+            revision = self.removed_revisions.get(block_hash, 0)
+            try:
+                if height not in headers:
+                    headers[height] = await self.rpc('eth_getBlockByNumber', [hex(height), False])
+                    result['requested'] += 1
+                header = headers[height]
+                if not isinstance(header, dict) or str(header.get('hash') or '').lower() != block_hash.lower():
+                    result['failed'] += 1
+                    continue
+                if tx_hash not in transactions:
+                    try:
+                        transactions[tx_hash] = await self.rpc('eth_getTransactionByHash', [tx_hash])
+                    except (httpx.HTTPError, RuntimeError, ValueError):
+                        transactions[tx_hash] = None
+                    result['requested'] += 1
+                transaction = transactions[tx_hash]
+                sender = address((transaction or {}).get('from')) if isinstance(transaction, dict) else None
+                verified_from = bool(sender and str(transaction.get('hash') or '').lower() == tx_hash
+                    and str(transaction.get('blockHash') or '').lower() == block_hash.lower()
+                    and number(transaction.get('blockNumber')) == height)
+                patch = {'finality': 'confirmed', 'confirmedAt': now_ms(), 'confirmations': head-height,
+                    'canonicalBlockHash': str(header['hash']).lower(),
+                    'confirmationEvidence': {'method': 'canonical-block-header', 'blockNumber': height, 'blockHash': block_hash, 'head': head}}
+                provenance = trade.get('volumeProvenance') or {}
+                usd, quote_at = trade.get('volume'), provenance.get('quoteAt')
+                if (isinstance(usd, (int, float)) and not isinstance(usd, bool) and math.isfinite(usd) and usd > 0
+                        and trade.get('volumeCurrency') == 'USD' and provenance.get('timeKind') == 'market'
+                        and provenance.get('provider') and provenance.get('method') == 'native-quote-quantity-times-dated-usd-price'
+                        and isinstance(quote_at, (int, float)) and abs(quote_at-trade['t']) <= 30_000):
+                    patch['usdObservation'] = {'value': usd, 'currency': 'USD', 'at': quote_at,
+                        'method': 'trade-time-quote', 'provider': provenance['provider'],
+                        'quoteToken': provenance.get('quoteToken'), 'quotePriceUsd': provenance.get('quotePriceUsd'),
+                        'sourceEvidence': provenance.get('evidence')}
+                if verified_from:
+                    patch.update(txFrom=sender, txFromVerified=True, txFromSource='eth_getTransactionByHash',
+                        txFromEvidence={'transactionHash': tx_hash, 'blockHash': block_hash, 'blockNumber': height})
+                async with self.lock:
+                    if self.removed_revisions.get(block_hash, 0) != revision:
+                        continue
+                    async with s._guard_write():
+                        await s.db.execute('BEGIN IMMEDIATE')
+                        try:
+                            current = await s.fetchone('SELECT body FROM trades WHERE asset=? AND id=?', (asset, ident))
+                            if not current:
+                                await s.db.rollback()
+                                continue
+                            value = {**json.loads(current[0]), **patch}
+                            await s.db.execute('UPDATE trades SET body=? WHERE asset=? AND id=?', (json.dumps(value, separators=(',', ':')), asset, ident))
+                            await enqueue_events(s.db, [('trade', {**value, 'action': 'update'})])
+                            await s.db.commit()
+                        except BaseException:
+                            await s.db.rollback()
+                            raise
+                result['accepted'] += 1
+                result['updated'] += 1
+            except (ValueError, TypeError, KeyError, RuntimeError, httpx.HTTPError):
+                result['failed'] += 1
+        return
 
     async def close_elapsed_bars(self):
         """Close elapsed observed bars; never invent zero-volume price bars."""
@@ -1283,6 +1540,12 @@ class ChainPoolStream:
                 await s.db.rollback()
                 raise
 
+    async def retraction_pool(self, pool_id):
+        return self.pools.get(pool_id)
+
+    def retraction_bases(self, pool):
+        return self.bases(pool)
+
     async def retract_block(self, block_hash):
         self.removed_revisions[block_hash] = self.removed_revisions.get(block_hash, 0) + 1
         self.removed_revisions.move_to_end(block_hash)
@@ -1290,11 +1553,19 @@ class ChainPoolStream:
             self.removed_revisions.popitem(last=False)
         cur = await self.s.db.execute_fetchall("SELECT id,pool,body FROM chain_stream_logs WHERE chain=? AND hash=?", (self.chain, block_hash))
         rows = cur
+        removed_heights = []
         for row in rows:
-            pool = self.pools.get(row[1])
+            try:
+                removed_heights.append(number(json.loads(row[2])['blockNumber']))
+            except (TypeError, ValueError, KeyError):
+                continue
+        if removed_heights:
+            await self.invalidate_time_coverage(min(removed_heights)-1)
+        for row in rows:
+            pool = await self.retraction_pool(row[1])
             if not pool:
                 continue
-            for token in self.bases(pool):
+            for token in self.retraction_bases(pool):
                 await self.retract_trade(self.market(pool, token), "chain:" + self.chain + ":" + row[0])
                 base = await self.s.get("asset", token) or {}
                 if (base.get("priceProvenance") or {}).get("eventId") == row[0]:
@@ -1473,6 +1744,10 @@ class ChainPoolStream:
                 # Query canonical headers for stored log blocks instead of
                 # trusting the getLogs response as its own reorg proof.
                 await self.retract_orphans(start, end)
+                try:
+                    await self.record_time_coverage(start, end, after, [pool], logs)
+                except (ValueError, TypeError, KeyError, RuntimeError, httpx.HTTPError):
+                    pass
                 await self.s.put("pool-stream-backfill", pool, {
                     "pool": pool, "fromBlock": floor, "block": end,
                     "hash": str(after["hash"]).lower(), "updatedAt": now_ms(),
@@ -1549,6 +1824,7 @@ class ChainPoolStream:
                 async with self.lock:
                     for row in cur:
                         await self.retract_block(row[0])
+                await self.invalidate_time_coverage(rewind)
                 previous = rewind
                 anchors = [a for a in anchors if a["block"] <= rewind]
         start = int(previous) + 1 if previous is not None else max(0, height - initial_depth)
@@ -1570,6 +1846,7 @@ class ChainPoolStream:
             self.coverage_from = lane_coverage_from
         addresses = sorted(pool for pool, row in self.pools.items()
                            if row.get("verificationStatus") != "reorged")
+        selection_generation = getattr(self, 'selection_generation', None)
         processed_block = current.get("block")
         if not addresses:
             return {'caughtUp': True, 'head': height, 'processedBlock': previous}
@@ -1663,14 +1940,30 @@ class ChainPoolStream:
                 end_header = await self.rpc("eth_getBlockByNumber", [hex(end), False])
                 if not end_header or end_header["hash"].lower() != before["hash"].lower():
                     raise RuntimeError("chain-reorg-during-range")
+            if selection_generation != getattr(self, 'selection_generation', None):
+                raise RuntimeError('market-selection-changed-during-replay')
+            try:
+                await self.record_time_coverage(start, end, end_header, addresses, all_logs)
+            except (ValueError, TypeError, KeyError, RuntimeError, httpx.HTTPError):
+                pass  # Failed time evidence does not create a coverage claim.
             anchors.append({"block": end, "hash": end_header["hash"]})
             anchors = anchors[-128:]
-            await self.s.put("chain-stream-cursor", lane, {
-                "block": end, "hash": end_header["hash"], "coverageFrom": lane_coverage_from,
-                "updatedAt": now_ms(), "blockTime": number(end_header["timestamp"])*1000,
-                "poolCount": len(addresses), "anchors": anchors,
-                **({key: current[key] for key in ("rebasedAt", "rebasedFromBlock", "previousCoverageFrom")
-                    if key in current} if lane == "pools-live" else {})})
+            if selection_generation != getattr(self, 'selection_generation', None):
+                raise RuntimeError('market-selection-changed-during-replay')
+            async with self.lock:
+                if selection_generation != getattr(self, 'selection_generation', None):
+                    raise RuntimeError('market-selection-changed-during-replay')
+                await self.s.put("chain-stream-cursor", lane, {
+                    "block": end, "hash": end_header["hash"], "coverageFrom": lane_coverage_from,
+                    "updatedAt": now_ms(), "blockTime": number(end_header["timestamp"])*1000,
+                    "poolCount": len(addresses), "anchors": anchors,
+                    **({key: current[key] for key in ("rebasedAt", "rebasedFromBlock", "previousCoverageFrom")
+                        if key in current} if lane == "pools-live" else {})})
+                for pool_id in pending:
+                    await self.s.put("pool-stream-coverage", pool_id, {
+                        "pool": pool_id, "fromBlock": start, "observedAt": now_ms(), "coverage": "observed"})
+                self.pending_pools.difference_update(pending)
+                pending.clear()
             processed_block = end
             self.scan_page_metrics[lane].update({
                 "lastSuccessAt": now_ms(), "lastSuccessfulBlock": end,
@@ -1679,13 +1972,8 @@ class ChainPoolStream:
                 "lastRangeRpcMs": range_rpc_ms, "lastRangeLogs": len(all_logs),
                 "lastRangePages": (len(addresses) + page_size - 1) // page_size,
             })
-            for pool_id in pending:
-                await self.s.put("pool-stream-coverage", pool_id, {
-                    "pool": pool_id, "fromBlock": start, "observedAt": now_ms(), "coverage": "observed"})
-            self.pending_pools.difference_update(pending)
-            pending.clear()
             start = end + 1
-        if lane == "pools" and now_ms() - self.last_prune > 60_000:
+        if not self.owns_retention and lane == "pools" and now_ms() - self.last_prune > 60_000:
             tape_cutoff = now_ms() - 8 * 86_400_000
             await self.s.prune_market_trades('dex:', tape_cutoff)
             cutoff = now_ms() - 2 * 86_400_000
@@ -1885,10 +2173,19 @@ class ChainPoolStream:
         self.recovery_needed = False
         self.schedule_status_fact(force=True)
 
+    async def _reconcile_turn(self):
+        # The independent popular-market collector owns its retention and
+        # must never queue behind research/history work on this host.
+        if self.owns_retention:
+            return await self.reconcile_step()
+        from ..resource_budget import background_turn
+        async with background_turn('chainHistory:'+self.chain):
+            return await self.reconcile_step()
+
     async def reconcile(self):
         while True:
             try:
-                progress = await self.reconcile_step()
+                progress = await self._reconcile_turn()
                 self.status = "live" if progress['caughtUp'] else "catching-up"
                 await self.status_fact()
             except asyncio.CancelledError:
@@ -1936,7 +2233,9 @@ class ChainPoolStream:
                             replay = asyncio.create_task(self.reconcile())
                         while not reader.done():
                             try:
-                                if self.queue.empty():
+                                if self.retry_event is not None:
+                                    event, self.retry_event = self.retry_event, None
+                                elif self.queue.empty():
                                     event = await asyncio.wait_for(self.queue.get(), 1)
                                     self.record_live_event(event)
                                 else:
@@ -1944,7 +2243,7 @@ class ChainPoolStream:
                                 await self.process_queued(event)
                             except asyncio.TimeoutError:
                                 pass
-                            if now_ms() - self.last_catalogue > 60_000 and await self.catalogue():
+                            if (getattr(self, 'catalogue_changed', False) or now_ms() - self.last_catalogue > 60_000) and await self.catalogue():
                                 break  # reconnect with the full updated address filter
                             self.schedule_housekeeping()
                             self.schedule_status_fact()

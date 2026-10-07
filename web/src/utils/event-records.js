@@ -1,4 +1,4 @@
-const SUPPORTED_CHAINS = new Set(['196', '56', '4663']);
+const SUPPORTED_CHAINS = new Set(['196', '56', '4663', '5042']);
 
 export function normalizeEventAddress(value, chainId = '196') {
   let address = String(value ?? '').trim();
@@ -13,7 +13,7 @@ export function eventKey(event, fallbackChain = '196') {
   const chain = String(event?.chainId ?? fallbackChain);
   const id = String(event?.id ?? '');
   if (id) return `${chain}:${id}`;
-  return `${chain}:${normalizeEventAddress(event?.asset, chain)}:${Number(event?.t) || 0}:${event?.kind ?? ''}`;
+  return `${chain}:${normalizeEventAddress(event?.asset, chain)}:${Number(event?.t) || 0}:${event?.kind ?? ''}:${String(event?.pool??event?.relation?.pool??'').toLowerCase()}:${String(event?.stock??event?.relation?.stock??event?.ticker??'').toLowerCase()}`;
 }
 
 export function normalizeEvent(event, fallbackChain = '196') {
@@ -61,6 +61,12 @@ export function eventFromRelationship(row) {
     ticker: row?.ticker ?? relation.ticker,
     kind: row?.kind ?? 'verified',
     label: row?.label,
+    relation,
+    pool:row?.pool??relation.pool,
+    stock:row?.stock??relation.stock,
+    dex:row?.dex??relation.protocol,
+    liquidityUsd:row?.liquidityUsd??relation.liquidityUsd,
+    poolCreatedAt:row?.poolCreatedAt??relation.poolCreatedAt,
     t: row?.t ?? row?.at ?? relation.checkedAt,
   }, chainId);
 }

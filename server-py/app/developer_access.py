@@ -17,6 +17,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from .storage_runtime import is_postgres_path, sync_connect
+
 
 EMAIL = re.compile(r"^[^\s@]{1,64}@[^\s@]{1,253}$")
 SESSION_SECONDS = 7 * 24 * 60 * 60
@@ -40,19 +42,25 @@ def _path() -> Path:
     return Path(os.environ.get("DEVELOPER_DB_PATH", "data/developer-access.sqlite"))
 
 
+def _storage_key() -> str:
+    return ('postgres:' if is_postgres_path(_path()) else 'sqlite:')+str(_path().resolve())
+
+
 @contextmanager
 def connection():
     path = _path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    postgres = is_postgres_path(path)
+    if not postgres:
+        path.parent.mkdir(parents=True, exist_ok=True)
     # sqlite3 creates files with the process umask; explicitly restrict a new
     # credentials database before opening it.
-    if not path.exists():
+    if not postgres and not path.exists():
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(fd)
         except FileExistsError:
             pass
-    db = sqlite3.connect(path, timeout=10, isolation_level=None)
+    db = sync_connect(path, timeout=10, isolation_level=None)
     db.row_factory = sqlite3.Row
     try:
         db.execute("PRAGMA busy_timeout=10000")
@@ -63,7 +71,7 @@ def connection():
 
 
 def init() -> None:
-    path = str(_path().resolve())
+    path = _storage_key()
     with _schema_lock:
         if path in _initialized_paths:
             return

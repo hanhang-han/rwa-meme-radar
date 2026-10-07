@@ -4,6 +4,8 @@ import json
 import os
 import time
 
+from ..resource_budget import BackgroundTurnExpired, background_turn
+
 
 TASKS: dict[str, dict] = {}
 _running: set[asyncio.Task] = set()
@@ -96,52 +98,90 @@ async def _defer_for_live_backlog(status, defer_when, max_deferral_s, resume_sta
 
 def spawn_loop(name: str, interval_s: float, fn, initial_delay_s: float = 0, *,
                defer_when=None, max_deferral_s: float = 180,
-               resume_stagger_s: float = 0):
+               resume_stagger_s: float = 0, heavy: bool = False,
+               maintenance: bool = False, max_run_s: float | None = None,
+               priority: bool = False, budget_lane: str = 'research'):
     async def runner():
-        if initial_delay_s > 0:
-            TASKS[name] = {
-                "status": "scheduled",
-                "nextRunAt": int((time.time() + initial_delay_s) * 1000),
-                "error": None,
-            }
-            _save_health()
-            await asyncio.sleep(initial_delay_s)
-        next_run = time.monotonic()
-        while True:
-            status = TASKS.setdefault(name, {})
-            deferred = False
-            if defer_when is not None:
-                try:
-                    deferred = await _defer_for_live_backlog(
-                        status, defer_when, max_deferral_s, resume_stagger_s)
-                except asyncio.CancelledError:
-                    status.update(status='stopped', stoppedAt=int(time.time() * 1000))
+        status = TASKS.setdefault(name, {})
+        status['budgetLane'] = budget_lane if heavy else 'direct'
+        try:
+            if initial_delay_s > 0:
+                status.update(status="scheduled",
+                              nextRunAt=int((time.time() + initial_delay_s) * 1000),
+                              error=None)
+                _save_health()
+                await asyncio.sleep(initial_delay_s)
+            while True:
+                deferred = False
+                started = None
+                last_wait_save = 0.0
+                last_wait_reason = None
+
+                def budget_wait(details):
+                    nonlocal last_wait_save, last_wait_reason
+                    now = time.monotonic()
+                    reason = details['reason']
+                    status.update(status='deferred', outcome=reason, error=None,
+                                  budgetQueuedAt=details['queuedAt'],
+                                  budgetWaitMs=details['waitMs'],
+                                  resourcePressure=details['pressure'])
+                    # Resource admission can wait for minutes. Keep health
+                    # alive without writing a file on every permit poll.
+                    if reason != last_wait_reason or now - last_wait_save >= 5:
+                        last_wait_save, last_wait_reason = now, reason
+                        _save_health()
+
+                async def action():
+                    nonlocal started
+                    started = time.monotonic()
+                    status.update(status="running", startedAt=int(time.time() * 1000), error=None)
+                    status.pop('budgetQueuedAt', None)
+                    status.pop('budgetWaitMs', None)
+                    status.pop('resourcePressure', None)
+                    if deferred or last_wait_reason is not None:
+                        status.pop('outcome', None)
                     _save_health()
+                    return await fn()
+
+                try:
+                    if defer_when is not None:
+                        deferred = await _defer_for_live_backlog(
+                            status, defer_when, max_deferral_s, resume_stagger_s)
+                    if heavy:
+                        async with background_turn(name, maintenance=maintenance,
+                                                   on_wait=budget_wait, max_run_s=max_run_s,
+                                                   priority=priority, lane=budget_lane) as admission:
+                            status['lastBudgetWaitMs'] = admission['waitMs']
+                            status['maxRunSeconds'] = admission['maxRunSeconds']
+                            outcome = await action()
+                    else:
+                        outcome = await action()
+                    apply_result(status, outcome, int(time.time() * 1000))
+                except asyncio.CancelledError:
                     raise
-            started = time.time()
-            status.update(status="running", startedAt=int(started * 1000), error=None)
-            if deferred:
-                status.pop('outcome', None)
+                except BackgroundTurnExpired as e:
+                    status.update(status='error', outcome='time-budget-expired',
+                                  lastFailureAt=int(time.time() * 1000), error=str(e))
+                    print(f'[{name}] {e}; durable work will resume on the next turn', flush=True)
+                except Exception as e:  # noqa: BLE001 - a collector must never die
+                    status.update(status="error", lastFailureAt=int(time.time() * 1000),
+                                  error=f"{type(e).__name__}: {str(e)[:160]}")
+                    print(f"[{name}] {type(e).__name__}: {e}", flush=True)
+                finally:
+                    if started is not None:
+                        status["durationMs"] = int((time.monotonic() - started) * 1000)
+                # Cadence is a gap after completion, not a wall-clock slot to
+                # catch up. Slow jobs must not rerun continuously when a turn
+                # or its resource wait exceeded their nominal interval.
+                next_run = time.monotonic() + interval_s
+                status["nextRunAt"] = int((time.time() + interval_s) * 1000)
+                _save_health()
+                await asyncio.sleep(max(0, next_run - time.monotonic()))
+        except asyncio.CancelledError:
+            status.update(status="stopped", stoppedAt=int(time.time() * 1000))
+            status.pop('nextRunAt', None)
             _save_health()
-            try:
-                outcome = await fn()
-                apply_result(status, outcome, int(time.time() * 1000))
-            except asyncio.CancelledError:
-                status.update(status="stopped", stoppedAt=int(time.time() * 1000))
-                raise
-            except Exception as e:  # noqa: BLE001 - a collector must never die
-                status.update(status="error", lastFailureAt=int(time.time() * 1000),
-                              error=f"{type(e).__name__}: {str(e)[:160]}")
-                print(f"[{name}] {type(e).__name__}: {e}", flush=True)
-            finally:
-                status["durationMs"] = int((time.time() - started) * 1000)
-            # A deferred task must not immediately run a second time because
-            # its original cadence elapsed while waiting for live traffic.
-            next_run = max(next_run + interval_s,
-                           time.monotonic() + (interval_s if deferred else 0))
-            status["nextRunAt"] = int((time.time() + max(0, next_run - time.monotonic())) * 1000)
-            _save_health()
-            await asyncio.sleep(max(0, next_run - time.monotonic()))
+            raise
 
     task = asyncio.create_task(runner(), name=name)
     _running.add(task)

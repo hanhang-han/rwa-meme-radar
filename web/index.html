@@ -3,13 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f5f7fa" />
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
-    <title>STOCKSMEME RADAR</title>
+    <title>CliperX · 市场雷达</title>
+    <style>html,body{background:#f5f7fa;color:#172738}</style>
   </head>
   <body>
     <div id="app">
-      <section id="boot-status" role="status" style="max-width:560px;margin:15vh auto;padding:28px;font-family:system-ui,sans-serif;line-height:1.7;color:#334155">
-        <h1 style="font-size:22px">STOCKSMEME RADAR</h1>
+      <section id="boot-status" role="status" style="max-width:560px;margin:15vh auto;padding:28px;border:1px solid #e1e6ee;border-radius:12px;background:#fff;font-family:system-ui,sans-serif;line-height:1.7;color:#172738">
+        <h1 style="font-size:22px;letter-spacing:-.035em">CLIPERX</h1>
         <p id="boot-message">正在加载页面，请稍候… / Loading dashboard…</p>
         <button id="boot-retry" type="button" style="padding:8px 16px;cursor:pointer">重新加载 / Reload</button>
         <noscript><p>请启用 JavaScript 后查看行情页面。 / Please enable JavaScript.</p></noscript>
@@ -42,7 +44,7 @@
         observer.observe(document.getElementById('app'), { childList: true });
       })();
     </script>
-    <script src="./lightweight-charts.js" async></script>
+    <script type="module" src="/src/preload.js"></script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPoolRows, buildStockTheme, comparableVolume, hasBasicMarketData, isQualifiedMeme, isQualifiedPool, normalizeTicker, stockThemeName } from '../src/utils/stock-theme-model.js';
+import { buildPoolRows, buildRecordedPoolRows, buildStockTheme, comparableVolume, hasBasicMarketData, isQualifiedMeme, isQualifiedPool, normalizeTicker, stockAtlasCards, stockThemeCodeLabel, stockThemeName } from '../src/utils/stock-theme-model.js';
 
 const NOW = 2_000_000_000;
 const asset = (token, overrides = {}) => ({ chainId:'56', token, kind:'candidate', symbol:token, price:1,
@@ -106,4 +106,70 @@ test('stock theme uses the Chinese company name when old snapshots only provide 
   assert.equal(stockThemeName({stockIdentity:{nameZh:'自定义证券名称'},tokenName:'NVDAx'},'NVDA','zh'),'自定义证券名称');
   assert.equal(stockThemeName({stockIdentity:{nameEn:'NVIDIA'},tokenName:'NVDAx'},'NVDA','en'),'NVIDIA');
   assert.equal(stockThemeName(null,'ABCD','zh'),'ABCD');
+});
+
+test('Hong Kong wrappers display company names and secondary padded codes without changing lookup keys', () => {
+  for (const [ticker,name,english] of [['1','长江和记实业','CK Hutchison'],['700','腾讯控股','Tencent'],['1024','快手','Kuaishou'],['1038','长江基建','CK Infrastructure'],['1088','中国神华','China Shenhua'],['1093','石药集团','CSPC Pharmaceutical']]) {
+    const stock={stockCode:ticker,tokenName:'wrapper-name'};
+    assert.equal(stockThemeName(stock,ticker,'zh'),name);
+    assert.equal(stockThemeName(stock,ticker,'en'),english);
+    assert.equal(stockThemeCodeLabel(stock,ticker,'zh'),`港股 · ${ticker.padStart(5,'0')}`);
+    assert.equal(stockThemeCodeLabel(stock,ticker,'en'),`HK · ${ticker.padStart(5,'0')}`);
+    assert.equal(stock.stockCode,ticker);
+    assert.equal(normalizeTicker(ticker.padStart(5,'0')),ticker);
+  }
+  assert.equal(stockThemeCodeLabel(null,'NVDA','zh'),'NVDA');
+  assert.equal(stockThemeCodeLabel(null,'123456','zh'),'123456');
+  assert.equal(stockThemeCodeLabel({stockIdentity:{exchange:'SEHK'}},'5678','zh'),'港股 · 05678');
+});
+
+test('atlas emphasizes relationships but keeps an unmodified complete directory and an empty-theme fallback', () => {
+  const empty={ticker:'1',theme:{pairedCount:0,nameCount:0,volume:{known:0}}};
+  const paired={ticker:'700',theme:{pairedCount:1,nameCount:0,volume:{known:1}}};
+  const named={ticker:'1024',theme:{pairedCount:0,nameCount:2,volume:{known:0}}};
+  const directory=[empty,named,paired];
+  assert.deepEqual(stockAtlasCards(directory),[paired]);
+  assert.deepEqual(directory,[empty,named,paired]);
+  assert.deepEqual(stockAtlasCards([empty,named]),[named]);
+  assert.deepEqual(stockAtlasCards([empty]),[empty]);
+  assert.deepEqual(stockAtlasCards([]),[]);
+});
+
+const evm = digit => '0x'+digit.repeat(40);
+test('verified stale pool records remain visible without entering current A/B volume or counts',()=>{
+  const currentToken=evm('1'),oldToken=evm('2'),nameToken=evm('3'),stock=evm('4');
+  const stale=relation(oldToken,evm('6'),{stock,level:undefined,evidenceStatus:'liquidity-stale',liquidityAt:NOW-900001});
+  const result=buildStockTheme({ticker:'700',now:NOW,
+    assets:[asset(currentToken),asset(oldToken,{volume24h:999999}),asset(nameToken,{match:{level:'B',evidenceStatus:'name-only',ticker:'700'}})],
+    relations:[relation(currentToken,evm('5'),{stock}),stale]});
+  assert.equal(result.pairedCount,1);
+  assert.equal(result.nameCount,1);
+  assert.deepEqual(result.volume,{value:100,known:1,total:1,complete:true});
+  assert.equal(result.recordedPools.length,1);
+  assert.equal(result.recordedPools[0].relation,stale);
+  assert.equal(result.recordedPools[0].detailAvailable,true);
+  assert.equal(result.recordedPools[0].volume,undefined);
+  assert.equal(result.recordedPools[0].liquidity,undefined);
+});
+
+test('recorded pool identity is chain-scoped, deduplicated and never invents a detail destination',()=>{
+  const token=evm('1'),pool=evm('2'),stock=evm('3');
+  const old=relation(token,pool,{stock,level:undefined,checkedAt:NOW-100});
+  const latest={...old,checkedAt:NOW};
+  const otherChain={...old,chainId:'196'};
+  const rows=buildRecordedPoolRows([old,latest,otherChain,{...old,pool:evm('4'),status:'unverified'},{...old,pool:'invalid'}],[asset(token)]);
+  assert.equal(rows.length,2);
+  assert.equal(rows.find(row=>row.chainId==='56').relation,latest);
+  assert.equal(rows.find(row=>row.chainId==='56').detailAvailable,true);
+  assert.equal(rows.find(row=>row.chainId==='196').detailAvailable,false);
+  assert.equal(buildRecordedPoolRows([old,otherChain],[],{scope:'196'}).length,1);
+  assert.equal(buildRecordedPoolRows([old],[],{activeKeys:['56:'+pool]}).length,0);
+});
+
+test('unrelated and derivative historical records do not become theme Meme relationships',()=>{
+  const token=evm('1'),stock=evm('2');
+  const result=buildStockTheme({ticker:'700',now:NOW,assets:[asset(token,{assetCategory:'derivative'})],
+    relations:[relation(token,evm('3'),{stock,level:undefined}),relation(evm('4'),evm('5'),{stock,ticker:'QQQ',level:undefined})]});
+  assert.equal(result.recordedPools.length,0);
+  assert.equal(result.rows.length,0);
 });

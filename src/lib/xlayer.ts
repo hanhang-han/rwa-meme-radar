@@ -4,6 +4,7 @@ import { okxGet, okxPost, withRequestAllowance } from './okx-client';
 import { numeric, okxState, type RwaToken } from './okx';
 import { broadcastStream } from './stream';
 import { ResearchStore } from './research-store';
+import { postgresResearchEnabled } from './postgres-storage';
 import { matchStock, buildTickerSet } from './stocks';
 import { sectors, basketIndex } from './analytics';
 
@@ -26,11 +27,11 @@ const fresh = (at?: number | null, age = 900000) => !!at && Date.now() - at < ag
 const quoteSymbols = new Set(['USDT','USDC','USDG','DAI','WOKB','OKB','WETH','ETH','WBTC','BTC','XBTC']);
 const stores = new Map<string,ResearchStore>();
 function db() { const chain=chainId(); if(!stores.has(chain))stores.set(chain,new ResearchStore(process.env.RESEARCH_DB || 'data/research.sqlite',chain));return stores.get(chain)!; }
-function withReadDb<T>(action:(store:ResearchStore)=>T):T{
+async function withReadDb<T>(action:(store:ResearchStore)=>T|Promise<T>):Promise<T>{
   const chain=chainId(),file=process.env.RESEARCH_DB||'data/research.sqlite';
-  if(!existsSync(file))return action(db());
+  if(!existsSync(file)&&!postgresResearchEnabled())return action(db());
   const store=new ResearchStore(file,chain,{readOnly:true});
-  try{return action(store);}finally{store.close();}
+  try{return await action(store);}finally{await store.close();}
 }
 
 export interface XAsset {
@@ -130,23 +131,23 @@ export function normalizeXAsset(row:any, previous?:XAsset|null, now=Date.now()):
     kind:stock?'stock':quoteSymbols.has(symbol.toUpperCase())?'quote':previous?.kind??'candidate',
     match:stock?null:matchStock(symbol,String(row.tokenName??previous?.name??symbol),buildTickerSet(stocks.map(s=>s.stockCode))) };
 }
-function saveAsset(row:any) {
+async function saveAsset(row:any) {
   const key=addr(row.tokenContractAddress); if (!key) return null;
-  const asset=normalizeXAsset(row,db().get<XAsset>('asset',key)); if (!asset) return null;
-  db().put('asset',key,asset);
-  if (asset.price != null && Object.hasOwn(row,'price')) db().sample(key,asset.price,asset.marketCap,asset.fieldTimes?.price??asset.updatedAt??Date.now());
+  const asset=normalizeXAsset(row,await db().get<XAsset>('asset',key)); if (!asset) return null;
+  await db().put('asset',key,asset);
+  if (asset.price != null && Object.hasOwn(row,'price')) await db().sample(key,asset.price,asset.marketCap,asset.fieldTimes?.price??asset.updatedAt??Date.now());
   return asset;
 }
 async function metadata(address:string, force=false) {
-  const old=db().get<XAsset>('asset',address);
+  const old=await db().get<XAsset>('asset',address);
   if (!force && old && fresh(old.updatedAt,300000)) return old;
   const data=await okxGet('/api/v6/dex/market/token/search',{chains:chainId(),search:address});
   const row=items(data).find(r=>String(r.chainIndex)===chainId() && addr(r.tokenContractAddress)===address);
   if (!row) throw new Error('OKX 未返回该链/地址的元数据');
-  return saveAsset(row)!;
+  return (await saveAsset(row))!;
 }
 async function scanPools(address:string, block:string) {
-  const old=db().get<Scan>('scan',address);
+  const old=await db().get<Scan>('scan',address);
   const result:Scan={token:address,checkedAt:Date.now(),poolCount:0,status:'ready',error:null};
   try {
     const data=await okxGet('/api/v6/dex/market/token/top-liquidity',{chainIndex:chainId(),tokenContractAddress:address});
@@ -159,7 +160,7 @@ async function scanPools(address:string, block:string) {
         const checked=await verifyXPool(poolAddress,catalog().tokens,call,block);
         const p={pool:poolAddress,queryToken:address,checkedAt:Date.now(),block:parseInt(block,16),
           token0:checked.token0,token1:checked.token1,liquidityUsd:numeric(pool.liquidityUsd),protocol:String(pool.protocolName??''),feePct:numeric(String(pool.liquidityProviderFeePercent??'').replace('%','')),amounts:Array.isArray(pool.liquidityAmount)?pool.liquidityAmount:[],name:String(pool.pool??'')};
-        db().put('pool',poolAddress,p);
+        await db().put('pool',poolAddress,p);
         if (!checked.relation) continue;
         const r=checked.relation;
         // A top-pool response must actually contain the queried asset or its verified wrapper.
@@ -167,24 +168,24 @@ async function scanPools(address:string, block:string) {
         let asset=await metadata(r.token);
         if (asset.kind==='quote'||asset.kind==='stock'||asset.kind==='wrapped_stock') continue;
         const id=`${chainId()}:${poolAddress}:${r.token}:${r.stock.tokenContractAddress.toLowerCase()}`;
-        const previous=db().get<XRelation>('relation',id);
+        const previous=await db().get<XRelation>('relation',id);
         let stockBalance:string|null=null;
         try { stockBalance=BigInt(await call(r.stockSide,'0x70a08231'+poolAddress.slice(2).padStart(64,'0'),block)).toString(); } catch {}
         const relation:XRelation={id,chainId:chainId(),token:r.token,stock:r.stock.tokenContractAddress.toLowerCase(),stockSide:r.stockSide,
           ticker:r.stock.stockCode,pool:poolAddress,token0:checked.token0,token1:checked.token1,wrapper:r.wrapper,
           protocol:p.protocol,firstSeen:previous?.firstSeen??Date.now(),checkedAt:Date.now(),block:p.block,
           liquidityUsd:p.liquidityUsd,liquidityAt:p.checkedAt,stockBalance,feePct:numeric(String(pool.liquidityProviderFeePercent??'').replace('%','')),amounts:Array.isArray(pool.liquidityAmount)?pool.liquidityAmount:[],status:'verified',error:null};
-        db().put('relation',id,relation);
-        if (!previous || previous.status==='invalid') db().event(id+':verified:'+relation.checkedAt,r.token,
+        await db().put('relation',id,relation);
+        if (!previous || previous.status==='invalid') await db().event(id+':verified:'+relation.checkedAt,r.token,
           {kind:'verified',symbol:asset.symbol,ticker:relation.ticker,pool:poolAddress,label: r.wrapper?'包装股票配对已核验':'股票直接配对已核验'});
       } catch (error) {
         if(/request (allowance|budget) exhausted/.test(String(error)))throw error;
         result.status='partial';
-        db().put('pool-error',poolAddress,{pool:poolAddress,checkedAt:Date.now(),reason:'池接口、包装关系或元数据未完成核验'});
+        await db().put('pool-error',poolAddress,{pool:poolAddress,checkedAt:Date.now(),reason:'池接口、包装关系或元数据未完成核验'});
       }
     }
   } catch(error) { if(/request (allowance|budget) exhausted/.test(String(error)))throw error;result.status='error'; result.error=error instanceof Error?error.message:'Pool scan failed'; result.poolCount=old?.poolCount??0; }
-  db().put('scan',address,result);
+  await db().put('scan',address,result);
 }
 
 async function refreshProfile(asset:XAsset) {
@@ -193,7 +194,7 @@ async function refreshProfile(asset:XAsset) {
   if (!row || String(row.chainIndex)!==chainId() || addr(row.tokenContractAddress)!==asset.token) throw new Error('Advanced info chain/address mismatch');
   asset.risk={level:String(row.riskControlLevel??'0'),tags:Array.isArray(row.tokenTags)?row.tokenTags.map(String):[],top10:numeric(row.top10HoldPercent),checkedAt:Date.now()};
   asset.profile=row.stockProfile?{companyName:String(row.stockProfile.companyName??''),industry:String(row.stockProfile.industry??''),exchange:String(row.stockProfile.exchange??''),stockCode:String(row.stockProfile.stockCode??'')}:null;
-  asset.detailAt=Date.now(); db().put('asset',asset.token,asset);
+  asset.detailAt=Date.now(); await db().put('asset',asset.token,asset);
 }
 
 export function normalizeTrade(row:any, token:string) {
@@ -212,9 +213,10 @@ export async function refreshTrades(asset:XAsset): Promise<any[]> {
     const data=await okxGet('/api/v6/dex/market/trades',{chainIndex:chainId(),tokenContractAddress:asset.token,limit:'100',...(after?{after}:{})});
     if (!Array.isArray(data)) throw new Error('Invalid trades response');
     const normalized=data.map(r=>normalizeTrade(r,asset.token)).filter(Boolean) as any[];
-    if (normalized.some(r=>db().hasTrade(asset.token,r.id))) reached=true;
-    if(page===0)for(const r of normalized)if(!db().hasTrade(asset.token,r.id))fresh.push(r);
-    db().trades(asset.token,normalized);
+    const stored=await Promise.all(normalized.map(r=>db().hasTrade(asset.token,r.id)));
+    if(stored.some(Boolean))reached=true;
+    if(page===0)normalized.forEach((r,index)=>{if(!stored[index])fresh.push(r);});
+    await db().trades(asset.token,normalized);
     for(const row of normalized) oldest=Math.min(oldest,row.t);
     if(data.length<100) reached=true;
     lastCursor=String(data.at(-1)?.id??'');
@@ -232,8 +234,8 @@ export async function refreshTrades(asset:XAsset): Promise<any[]> {
     const data=await okxGet('/api/v6/dex/market/trades',{chainIndex:chainId(),tokenContractAddress:asset.token,limit:'100',after:cursor});
     if(!Array.isArray(data))throw new Error('Invalid backfill response');
     const rows=data.map(r=>normalizeTrade(r,asset.token)).filter(Boolean) as any[];
-    const bridged=data.length<100||rows.some(r=>db().hasTrade(asset.token,r.id));
-    db().trades(asset.token,rows);
+    const bridged=data.length<100||(await Promise.all(rows.map(r=>db().hasTrade(asset.token,r.id)))).some(Boolean);
+    await db().trades(asset.token,rows);
     for(const row of rows)asset.oldestTradeAt=Math.min(asset.oldestTradeAt,row.t);
     const next=String(data.at(-1)?.id??'');
     if(bridged||!next)gaps.shift();
@@ -243,7 +245,7 @@ export async function refreshTrades(asset:XAsset): Promise<any[]> {
   asset.gapDetected=gaps.length>0;
   asset.tradeCoverage=asset.gapDetected?'partial-gap': 'observed';
   asset.tradeCursor=lastCursor;asset.tradeAt=Date.now();asset.error=null;
-  db().put('asset',asset.token,asset);
+  await db().put('asset',asset.token,asset);
   return fresh;
 }
 
@@ -269,13 +271,13 @@ export async function refreshQuotes(assets:XAsset[]) {
       if (!Array.isArray(data)) throw new Error('Invalid quote response');
       for(const row of data) { const a=addr(row.tokenContractAddress); if(a) answered.add(a); }
       for(const row of data) {
-        const old=db().get<XAsset>('asset',addr(row.tokenContractAddress)??'');
+        const old=await db().get<XAsset>('asset',addr(row.tokenContractAddress)??'');
         if (!old || String(row.chainIndex)!==chainId()) continue;
         const mapped={...row};
         for(const [raw,target] of [['volume24H','volume'],['txs24H','txs'],['priceChange24H','change']])if(Object.hasOwn(row,raw))mapped[target]=row[raw];
-        const updated=saveAsset(mapped);
+        const updated=await saveAsset(mapped);
         if(updated&&updated.price!==(old?.price??null)){rebaseWatch(updated.token,updated.price);broadcastStream('price',{chainId:chainId(),token:updated.token,price:updated.price,change24h:updated.change24h??null,at:Date.now()});}
-        if(updated) db().put('quote-time',updated.token,{at:numeric(row.time)??Date.now()});
+        if(updated) await db().put('quote-time',updated.token,{at:numeric(row.time)??Date.now()});
       }
     } catch (e) {
       // One rejected chunk must not starve the rest of the round.
@@ -289,7 +291,7 @@ export async function refreshQuotes(assets:XAsset[]) {
 // provider calls, regardless of whether this legacy endpoint is visited.
 export async function refreshAssetOnDemand(address:string){
   const token=addr(address);if(!token)return;
-  db().put('watch',token,{token,chainId:chainId(),expiresAt:Date.now()+90_000});
+  await db().put('watch',token,{token,chainId:chainId(),expiresAt:Date.now()+90_000});
 }
 
 // Watched assets (detail pages) get their price straight from the pair
@@ -306,8 +308,8 @@ export async function refreshWatched(){
   if(!watched.size)return;
   await inNetwork('196', okxState, async () => {
     for(const token of [...watched.keys()]){
-      const asset=db().get<XAsset>('asset',token);if(!asset)continue;
-      const rel=db().all<XRelation>('relation').filter(r=>r.token===token&&r.status==='verified').sort((a,b)=>b.checkedAt-a.checkedAt)[0];
+      const asset=await db().get<XAsset>('asset',token);if(!asset)continue;
+      const rel=(await db().all<XRelation>('relation')).filter(r=>r.token===token&&r.status==='verified').sort((a,b)=>b.checkedAt-a.checkedAt)[0];
       if(!rel)continue;
       try{
         const raw=await xRpc('eth_call',[{to:rel.pool,data:'0x0902f1ac'},'latest']);
@@ -328,8 +330,8 @@ export async function refreshWatched(){
         const price=base.price*(ratio/ratioBase);
         if(!Number.isFinite(price)||price<=0)continue;
         base.mr=memeReserve;base.sr=stockReserve;
-        const old=db().get<XAsset>('asset',token);
-        const updated=saveAsset({tokenContractAddress:token,price,time:Date.now()});
+        const old=await db().get<XAsset>('asset',token);
+        const updated=await saveAsset({tokenContractAddress:token,price,time:Date.now()});
         if(updated&&updated.price!==(old?.price??null)){
           broadcastStream('price',{chainId:chainId(),token,price:updated.price,change24h:updated.change24h??null,at:Date.now()});
         }
@@ -344,9 +346,9 @@ export async function refreshLiveQuotes(){
   // Pin the scope to X Layer: the dashboard loop rotates chains via
   // AsyncLocalStorage, and db()/chainId() follow it.
   await inNetwork('196', okxState, async () => {
-    const relationAssets=new Set(db().all<XRelation>('relation').filter(r=>r.status!=='invalid').flatMap(r=>[r.token,r.stock]));
-    const basketAssets=new Set(db().all<any>('basket').flatMap(b=>b.members.map((m:any)=>m.token)));
-    const work=db().all<XAsset>('asset').filter(a=>a.kind==='stock'||(a.kind==='candidate'&&(relationAssets.has(a.token)||basketAssets.has(a.token))))
+    const relationAssets=new Set((await db().all<XRelation>('relation')).filter(r=>r.status!=='invalid').flatMap(r=>[r.token,r.stock]));
+    const basketAssets=new Set((await db().all<any>('basket')).flatMap(b=>b.members.map((m:any)=>m.token)));
+    const work=(await db().all<XAsset>('asset')).filter(a=>a.kind==='stock'||(a.kind==='candidate'&&(relationAssets.has(a.token)||basketAssets.has(a.token))))
       .filter(a=>(quoteMiss.get(a.token)??0)<3)
       .sort((a,b)=>(a.fieldTimes?.price??0)-(b.fieldTimes?.price??0)).slice(0,150);
     if(work.length)await refreshQuotes(work);
@@ -357,7 +359,7 @@ export async function refreshSideQuotes(){
   const chains=['56','4663'];
   const chain=chains[sideTurn%chains.length];sideTurn++;
   await inNetwork(chain, okxState, async () => {
-    const work=db().all<XAsset>('asset').filter(a=>a.kind==='stock'||a.kind==='candidate')
+    const work=(await db().all<XAsset>('asset')).filter(a=>a.kind==='stock'||a.kind==='candidate')
       .sort((a,b)=>(a.fieldTimes?.price??0)-(b.fieldTimes?.price??0)).slice(0,100);
     if(work.length)await refreshQuotes(work);
   });
@@ -376,38 +378,38 @@ export async function refreshXLayer() {
     if(BigInt(await xRpc('eth_chainId',[])).toString()!==chainId()) throw new Error('RPC chain identity mismatch');
     const block=await xRpc('eth_blockNumber',[]);
     // Recheck old pool endpoints even if they leave OKX's top five listing.
-    const relations=db().all<XRelation>('relation').sort((a,b)=>a.checkedAt-b.checkedAt).filter(r=>!fresh(r.checkedAt,600000)).slice(0,16);
+    const relations=(await db().all<XRelation>('relation')).sort((a,b)=>a.checkedAt-b.checkedAt).filter(r=>!fresh(r.checkedAt,600000)).slice(0,16);
     for(const r of relations) {
       try {
         const checked=await verifyXPool(r.pool,catalog().tokens,call,block);
         const valid=checked.relation?.token===r.token && checked.relation.stock.tokenContractAddress.toLowerCase()===r.stock;
-        if(!valid && r.status!=='invalid') db().event(`${r.id}:invalid:${Date.now()}`,r.token,{kind:'invalid',ticker:r.ticker,pool:r.pool,label:'配对证据变化，需复核'});
+        if(!valid && r.status!=='invalid') await db().event(`${r.id}:invalid:${Date.now()}`,r.token,{kind:'invalid',ticker:r.ticker,pool:r.pool,label:'配对证据变化，需复核'});
         r.status=valid?'verified':'invalid';r.error=null;r.checkedAt=Date.now();r.block=parseInt(block,16);
       }catch{r.error='本次复核失败，保留历史证据';}
-      db().put('relation',r.id,r);
+      await db().put('relation',r.id,r);
     }
-    const savedAssets=db().all<XAsset>('asset');
-    const scans=new Map(db().all<Scan>('scan').map(s=>[s.token,s]));
+    const savedAssets=(await db().all<XAsset>('asset'));
+    const scans=new Map((await db().all<Scan>('scan')).map(s=>[s.token,s]));
     await stage('activity',8,async()=>{
-    const all=db().all<XAsset>('asset').filter(a=>a.kind==='candidate');
-    const related=new Set(db().all<XRelation>('relation').map(r=>r.token));
+    const all=(await db().all<XAsset>('asset')).filter(a=>a.kind==='candidate');
+    const related=new Set((await db().all<XRelation>('relation')).map(r=>r.token));
     const selected=all.sort((a,b)=>Number(related.has(b.token))-Number(related.has(a.token)) || (a.tradeAt??0)-(b.tradeAt??0)).slice(0,1);
     // Also service oldest waiting candidates so a popular relation cannot starve them.
     const oldest=all.sort((a,b)=>(a.tradeAt??0)-(b.tradeAt??0)).slice(0,1);
     const work=[...new Map([...selected,...oldest].map(a=>[a.token,a])).values()];
     await refreshQuotes(work);
     for(let asset of work) {
-      asset=db().get<XAsset>('asset',asset.token)!;
+      asset=(await db().get<XAsset>('asset',asset.token))!;
       try {
         if(!fresh(asset.fieldTimes?.holders,3600000))asset=await metadata(asset.token,true);
         await refreshTrades(asset);
         if(!fresh(asset.detailAt,3600000)) await refreshProfile(asset);
         if(asset.match && !fresh(scans.get(asset.token)?.checkedAt,1800000)) await scanPools(asset.token,block);
-      }catch(error) {if(/request (allowance|budget) exhausted/.test(String(error)))throw error;asset.error=error instanceof Error?error.message:'Update failed';db().put('asset',asset.token,asset);}
+      }catch(error) {if(/request (allowance|budget) exhausted/.test(String(error)))throw error;asset.error=error instanceof Error?error.message:'Update failed';await db().put('asset',asset.token,asset);}
     }
     });
     await stage('pool-maintenance',6,async()=>{
-    const priorityStocks=[...new Set(db().all<XRelation>('relation').filter(r=>r.status==='verified'&&(r.liquidityUsd??0)>=1000).sort((a,b)=>(a.liquidityAt??0)-(b.liquidityAt??0)).map(r=>r.stock))].slice(0,2);
+    const priorityStocks=[...new Set((await db().all<XRelation>('relation')).filter(r=>r.status==='verified'&&(r.liquidityUsd??0)>=1000).sort((a,b)=>(a.liquidityAt??0)-(b.liquidityAt??0)).map(r=>r.stock))].slice(0,2);
     for(const address of priorityStocks)await scanPools(address,block);
     });
     await stage('discovery',4,async()=>{
@@ -416,9 +418,9 @@ export async function refreshXLayer() {
         const data=await okxGet('/api/v6/dex/market/token/hot-token',{chainIndex:chainId(),rankingType:'4',rankingTimeFrame:'4',limit:'40'});
         const rows=items(data);
         if(!Array.isArray(data)&&!Array.isArray(data?.list)) throw new Error('Invalid discovery response');
-        for(const row of rows) saveAsset(row);
+        for(const row of rows) await saveAsset(row);
         runState().hotAt=Date.now();
-      } catch(error) {db().put('source','hot',{status:'error',at:Date.now(),error:String(error)});}
+      } catch(error) {await db().put('source','hot',{status:'error',at:Date.now(),error:String(error)});}
     }
     // Every catalog asset eventually gets a turn; highest volume breaks ties.
     const stocks=[...catalog().tokens].sort((a,b)=>(scans.get(a.tokenContractAddress.toLowerCase())?.checkedAt??0)-(scans.get(b.tokenContractAddress.toLowerCase())?.checkedAt??0)||(b.volume24h??0)-(a.volume24h??0)).slice(0,2);
@@ -429,17 +431,17 @@ export async function refreshXLayer() {
     }
     });
     runState().status=runState().yielded?'partial':'ready';runState().updatedAt=Date.now();runState().error=null;
-    db().put('source','pipeline',{...runState(),running:false});
+    await db().put('source','pipeline',{...runState(),running:false});
   }catch(error) {
     const message=error instanceof Error?error.message:'Collection failed';
-    if(/request (allowance|budget) exhausted/.test(message)){runState().status='partial';runState().yielded=true;runState().error=null;db().put('source','pipeline',{...runState(),running:false});}
+    if(/request (allowance|budget) exhausted/.test(message)){runState().status='partial';runState().yielded=true;runState().error=null;await db().put('source','pipeline',{...runState(),running:false});}
     else{runState().status=runState().updatedAt?'stale':'error';runState().error=message;}
   }
   finally {
     runState().running=false;
-    const latest=Math.max(0,...db().all<XAsset>('asset').map(a=>Math.max(a.tradeAt??0,...Object.values(a.fieldTimes??{}))),...db().all<XRelation>('relation').map(r=>r.checkedAt));
+    const latest=Math.max(0,...(await db().all<XAsset>('asset')).map(a=>Math.max(a.tradeAt??0,...Object.values(a.fieldTimes??{}))),...(await db().all<XRelation>('relation')).map(r=>r.checkedAt));
     runState().lastProgressAt=latest||null;
-    db().put('source','pipeline',{...runState(),running:false});
+    await db().put('source','pipeline',{...runState(),running:false});
   }
 }
 
@@ -456,36 +458,40 @@ function catalogueAsset(stock:RwaToken,previous?:XAsset|null){
 export function groupCandidates(assets:XAsset[],relations:XRelation[]) {
   const groups=new Map<string,XAsset[]>();
   for(const a of assets.filter(a=>a.kind==='candidate')) {
-    const key=a.symbol.normalize('NFKC').trim().toLowerCase().replace(/\s+/g,' ');
+    const symbol=typeof a.symbol==='string'?a.symbol.normalize('NFKC').trim().toLowerCase().replace(/\s+/g,' '):'';
+    // Quote-only records may arrive before token metadata. Keep unknown
+    // tokens separate by their chain/address; no shared invented ticker.
+    const key=symbol||`${a.chain??chainId()}:${a.token}`;
     groups.set(key,[...(groups.get(key)??[]),a]);
   }
   const score=(a:XAsset)=> (relations.some(r=>r.token===a.token&&(r.chainId??'196')===a.chain&&r.status==='verified')?1e9:0)
     +(a.match?1e6:0)+Math.log10(1+Math.max(0,a.volume24h??0))*100;
-  return [...groups.values()].map(list=>{list.sort((a,b)=>score(b)-score(a));return {symbol:list[0].symbol,count:list.length,members:list};})
+  return [...groups.values()].map(list=>{list.sort((a,b)=>score(b)-score(a));return {symbol:list[0].symbol??null,count:list.length,members:list};})
     .sort((a,b)=>score(b.members[0])-score(a.members[0]));
 }
-function sectorViews(_assets:XAsset[],_relations:XRelation[],store:ResearchStore) {
+async function sectorViews(_assets:XAsset[],_relations:XRelation[],store:ResearchStore) {
   // The worker owns basket membership, baseline and samples. GET requests
   // must never establish or reset an index merely because someone visits.
-  const views=new Map(store.all<any>('basket-view').map(v=>[v.sector,v]));
+  const views=new Map((await store.all<any>('basket-view')).map(v=>[v.sector,v]));
   return Object.keys(sectors).map(sector=>views.get(sector)??{
     sector,chainId:chainId(),value:null,members:0,components:[],history:[],
     status:'pending',reason:'等待行业篮子定时计算',
   });
 }
-export function xLayerState() {
-  return withReadDb(store=>{
-  const assets=store.all<XAsset>('asset').map(a=>quoteSymbols.has(a.symbol.toUpperCase())?{...a,kind:'quote' as const}:a);
+export async function xLayerState() {
+  return withReadDb(async store=>{
+  const assets=(await store.all<XAsset>('asset')).map(a=>quoteSymbols.has(typeof a.symbol==='string'?a.symbol.toUpperCase():'')?{...a,kind:'quote' as const}:a);
   const candidateIds=new Set(assets.filter(a=>a.kind==='candidate').map(a=>a.token));
-  const relations=store.all<XRelation>('relation').filter(r=>candidateIds.has(r.token)), scans=store.all<Scan>('scan');
+  const relations=(await store.all<XRelation>('relation')).filter(r=>candidateIds.has(r.token)), scans=await store.all<Scan>('scan');
   const verified=relations.filter(r=>r.status==='verified'&&fresh(r.checkedAt,3600000));
   const valued=verified.filter(r=>r.liquidityUsd!=null&&fresh(r.liquidityAt??r.checkedAt,3600000));
-  const old=store.get<any>('source','pipeline');
+  const old=await store.get<any>('source','pipeline');
+  const pools=await store.all('pool');
   return { ...runState(),updatedAt:runState().updatedAt??old?.updatedAt??null,
     coverage:{catalog:catalog().tokens.length,scanned:scans.filter(s=>catalog().tokens.some(t=>t.tokenContractAddress.toLowerCase()===s.token)).length,
-      errors:scans.filter(s=>s.status!=='ready').length,pools:store.all('pool').length,
+      errors:scans.filter(s=>s.status!=='ready').length,pools:pools.length,
       scope:'OKX 每资产流动性前 5 池；链上核验 token0/token1 与 asset()/underlying()；不覆盖无独立池地址的池接口'},
-    assets,relations,pools:store.all('pool'),signals:store.events(undefined,100).filter(event=>candidateIds.has(event.asset)),groups:groupCandidates(assets,relations),sectors:sectorViews(assets,relations,store),
+    assets,relations,pools,signals:(await store.events(undefined,100)).filter(event=>candidateIds.has(event.asset)),groups:groupCandidates(assets,relations),sectors:await sectorViews(assets,relations,store),
     metrics:{verifiedPools:verified.length,verifiedAssets:new Set(verified.map(r=>r.token)).size,
       actionableAssets:new Set(verified.filter(r=>(r.liquidityUsd??0)>=1000&&fresh(r.liquidityAt??r.checkedAt,3600000)).map(r=>r.token)).size,
       pairedLiquidityUsd:valued.length?valued.reduce((n,r)=>n+r.liquidityUsd!,0):null,
@@ -494,18 +500,18 @@ export function xLayerState() {
       stockFlow:{value:null,reason:'待归集配对池 LP 加入/退出事件；流动性余额不作为净流量'}} };
   });
 }
-export function xLayerDetail(address:string) {
+export async function xLayerDetail(address:string) {
   const token=addr(address); if(!token) return null;
-  return withReadDb(store=>{
-  let asset=store.get<XAsset>('asset',token);
-  const stock=catalog().tokens.find(s=>s.tokenContractAddress.toLowerCase()===token)??store.get<RwaToken>('stock',token);
+  return withReadDb(async store=>{
+  let asset=await store.get<XAsset>('asset',token);
+  const stock=catalog().tokens.find(s=>s.tokenContractAddress.toLowerCase()===token)??await store.get<RwaToken>('stock',token);
   if(!asset&&stock) asset=catalogueAsset(stock);
   if(!asset) return null;
-  const relations=store.all<XRelation>('relation').filter(r=>r.token===token||r.stock===token);
-  const recent=store.recentTrades(token);
-  return {asset,stock,relations,trades:recent,activity:store.activity(token,Date.now()-86400000),samples:store.samples(token),
-    events:store.events(token),pools:store.all<any>('pool').filter(p=>p.token0===token||p.token1===token),scan:store.get<Scan>('scan',token),
-    stocks:relations.map(r=>({relation:r,stock:catalog().tokens.find(s=>s.tokenContractAddress.toLowerCase()===r.stock),profile:store.get<XAsset>('asset',r.stock)?.profile})),
+  const relations=(await store.all<XRelation>('relation')).filter(r=>r.token===token||r.stock===token);
+  const recent=await store.recentTrades(token);
+  return {asset,stock,relations,trades:recent,activity:await store.activity(token,Date.now()-86400000),samples:await store.samples(token),
+    events:await store.events(token),pools:(await store.all<any>('pool')).filter(p=>p.token0===token||p.token1===token),scan:await store.get<Scan>('scan',token),
+    stocks:await Promise.all(relations.map(async r=>({relation:r,stock:catalog().tokens.find(s=>s.tokenContractAddress.toLowerCase()===r.stock),profile:(await store.get<XAsset>('asset',r.stock))?.profile}))),
     analysis:{method:'规则解读 · 链上证据与 OKX 行情',
       conclusion:relations.some(r=>r.status==='verified')?'已核验股票配对；请结合证据时效和资金规模判断。':asset.match?`名称命中 ${asset.match.ticker}，尚无已核验资金关系。`:'当前覆盖范围尚未核验股票配对关系。',
       correlation:{value:null,reason:'尚未验证独立股票现货行情与独立 Meme 价格，避免配对计价造成机械相关'},
@@ -515,4 +521,4 @@ export function xLayerDetail(address:string) {
   });
 }
 
-export function networkEvents(before?:{t:number;id:string},limit=50){return withReadDb(store=>store.eventsPage(before,limit));}
+export async function networkEvents(before?:{t:number;id:string},limit=50){return withReadDb(store=>store.eventsPage(before,limit));}

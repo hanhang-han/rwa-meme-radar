@@ -10,8 +10,8 @@ import time
 
 
 MARKET_MAX_AGE_MS = 30 * 60_000
-HOLDER_MAX_AGE_MS = 24 * 60 * 60_000
-SCAN_MAX_AGE_MS = 24 * 60 * 60_000
+HOLDER_MAX_AGE_MS = 6 * 60 * 60_000
+SCAN_MAX_AGE_MS = 6 * 60 * 60_000
 MAX_ASOF_SKEW_MS = 5 * 60_000
 FLAGS = ('wash_suspect', 'thin_spike', 'contract_risk', 'concentrated', 'holder_anomaly', 'liquidity_unlock')
 SCAN_PROVIDERS = ('OKX Onchain OS', 'Onchain OS', 'GoPlus')
@@ -41,21 +41,23 @@ def safety_checks(asset, now):
     """
     scan = asset.get('tokenScan') or {}
     observation = asset.get('securityObservation') or {}
-    result = {key: _check() for key in ('tax', 'permissions', 'concentration', 'liquidityLock')}
+    result = {key: _check() for key in ('tax', 'permissions', 'concentration', 'creatorHolding', 'liquidityLock')}
     valid_scan = (scan.get('provider') in SCAN_PROVIDERS and scan.get('status') in ('partial', 'complete')
                   and _fresh(scan.get('checkedAt'), now, SCAN_MAX_AGE_MS))
     if valid_scan:
         provenance = {key: scan.get(key) for key in ('provider', 'checkedAt', 'timeKind', 'sourceUrl')}
         buy, sell, honeypot = scan.get('buyTaxPct'), scan.get('sellTaxPct'), scan.get('honeypot')
+        cannot_sell = scan.get('cannotSellAll') if isinstance(scan.get('cannotSellAll'), bool) else None
         buy = buy if _number(buy) and 0 <= buy <= 100 else None
         sell = sell if _number(sell) and 0 <= sell <= 100 else None
         honeypot = honeypot if isinstance(honeypot, bool) else None
-        triggers = (['honeypot'] if honeypot else []) + (['buyTaxPct'] if buy is not None and buy > 10 else []) + (['sellTaxPct'] if sell is not None and sell > 10 else [])
+        triggers = (['honeypot'] if honeypot else []) + (['cannotSellAll'] if cannot_sell else []) + (['buyTaxPct'] if buy is not None and buy > 10 else []) + (['sellTaxPct'] if sell is not None and sell > 10 else [])
         known = buy is not None and sell is not None and honeypot is not None
         result['tax'] = {**_check('triggered' if triggers else 'clear' if known else 'unknown',
             'scan-trigger' if triggers else 'scan-clear' if known else 'incomplete-scan',
-            {'buyTaxPct': buy, 'sellTaxPct': sell, 'honeypot': honeypot,
-             'thresholdPct': 10, 'triggers': triggers}), **provenance}
+            {'buyTaxPct': buy, 'sellTaxPct': sell, 'honeypot': honeypot, 'cannotSellAll': cannot_sell,
+             'thresholdPct': 10, 'redTaxThresholdPct': 50, 'triggers': triggers}), **provenance,
+            'severity': 'red' if honeypot or cannot_sell or (buy is not None and buy > 50) or (sell is not None and sell > 50) else 'yellow' if triggers else 'green' if known else 'gray'}
         fields = ('mintable', 'pausable', 'blacklist', 'ownerChangeBalance', 'canTakeBackOwnership', 'hiddenOwner', 'selfDestruct')
         evidence = {key: scan.get(key) if isinstance(scan.get(key), bool) else None for key in fields}
         triggers = [key for key, value in evidence.items() if value is True]
@@ -77,12 +79,28 @@ def safety_checks(asset, now):
             and _number(top10) and 0 <= top10 <= 100
             and _fresh(distribution.get('checkedAt'), now, HOLDER_MAX_AGE_MS)):
         result['concentration'] = {**_check('triggered' if top10 > 50 else 'clear', 'threshold-exceeded' if top10 > 50 else 'below-threshold',
-            {'top10AdjustedPercent': top10, 'thresholdPct': 50, 'exclusionsApplied': True}),
-            'provider': distribution['provider'], 'checkedAt': distribution['checkedAt']}
+            {'top10AdjustedPercent': top10, 'thresholdPct': 50, 'exclusionsApplied': True,
+             'contractAddressCount': distribution.get('contractAddressCount'), 'scope': distribution.get('scope'),
+             'sampleHolderCount': distribution.get('sampleHolderCount'), 'excludedAddresses': distribution.get('excludedAddresses')}),
+            'provider': distribution['provider'], 'checkedAt': distribution['checkedAt'],
+            'severity': 'yellow' if top10 > 50 else 'green'}
     elif (observation.get('provider') == 'GoPlus'
           and _fresh(observation.get('checkedAt'), now, HOLDER_MAX_AGE_MS)):
         result['concentration'] = {**_check(reason='address-exclusions-unavailable', evidence=observation.get('holders') or {}),
             'provider': observation['provider'], 'checkedAt': observation['checkedAt']}
+
+    creator = scan.get('creatorHoldingPercent')
+    creator_address = scan.get('creatorAddress')
+    if valid_scan and creator_address and _number(creator) and 0 <= creator <= 100:
+        flagged = creator > 10
+        result['creatorHolding'] = {**_check('triggered' if flagged else 'clear',
+            'threshold-exceeded' if flagged else 'below-threshold',
+            {'creatorAddress': creator_address, 'creatorHoldingPercent': creator, 'thresholdPct': 10,
+             'scope': 'creator-address-holding', 'launchpadCreatorMayBeContract': True}),
+            'provider': scan['provider'], 'checkedAt': scan['checkedAt'], 'severity': 'yellow' if flagged else 'green'}
+    elif scan.get('checkedAt'):
+        result['creatorHolding'] = {**_check(reason='creator-holding-unavailable' if valid_scan else 'stale-scan'),
+            'provider': scan.get('provider'), 'checkedAt': scan.get('checkedAt')}
 
     if (observation.get('provider') == 'GoPlus'
             and _fresh(observation.get('checkedAt'), now, SCAN_MAX_AGE_MS)):
@@ -93,12 +111,15 @@ def safety_checks(asset, now):
                 and locked + burned + unlocked <= 100.000001 and (ends is None or (_number(ends) and now < ends))):
             # Bounds are enough: 96% demonstrably locked passes even if the
             # remaining 4% are unknown; >5% demonstrably unlocked is notable.
-            status = 'clear' if locked + burned >= 95 else 'triggered' if unlocked > 5 else 'unknown'
+            status = 'clear' if locked + burned >= 90 else 'triggered' if unlocked > 10 else 'unknown'
             reason = 'lp-lock-observed' if status == 'clear' else 'lp-unlocked-observed' if status == 'triggered' else 'lp-coverage-incomplete'
         else:
             status, reason = 'unknown', 'lp-lock-expired' if _number(ends) and now >= ends else lp.get('reason', 'lp-evidence-unavailable')
-        result['liquidityLock'] = {**_check(status, reason, {**lp, 'minimumLockedPercent': 95}),
-            'provider': observation['provider'], 'checkedAt': observation['checkedAt']}
+        result['liquidityLock'] = {**_check(status, reason, {**lp, 'minimumLockedPercent': 90}),
+            'provider': observation['provider'], 'checkedAt': observation['checkedAt'],
+            'severity': 'yellow' if status == 'triggered' else 'green' if status == 'clear' else 'gray'}
+    for check in result.values():
+        check.setdefault('severity', 'yellow' if check['status'] == 'triggered' else 'green' if check['status'] == 'clear' else 'gray')
     return result
 
 
@@ -222,6 +243,8 @@ def assess_risk(asset: dict, aggregate_market: dict | None = None, now: float | 
             'threshold': {'holderAddresses': 1_000_000, 'totalLiquidityUsd': 5_000_000},
         })
 
+    if safety['creatorHolding']['status'] == 'triggered' and checks['concentrated']['status'] != 'triggered':
+        checks['concentrated'] = safety['creatorHolding']
     flags = [flag for flag in FLAGS if checks[flag]['status'] == 'triggered']
     statuses = [check['status'] for check in checks.values()]
     status = ('flagged' if flags else 'clear' if all(item == 'clear' for item in statuses)

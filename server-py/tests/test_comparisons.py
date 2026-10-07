@@ -79,7 +79,7 @@ class ComparisonTest(unittest.TestCase):
                 mock_w3 = SimpleNamespace(eth=SimpleNamespace(get_block=lambda _: {'number':123, 'timestamp':NOW//1000}))
                 empty = await ResearchStore(d+'/db.sqlite', '56').connect()
                 try:
-                    with patch('app.collectors.main_round.store', AsyncMock(side_effect=lambda chain: s if chain == '196' else empty)), patch('app.collectors.main_round.now_ms', return_value=NOW), patch('app.collectors.main_round.chain_web3', return_value=mock_w3), patch('app.collectors.main_round._check_rpc_identity', AsyncMock()), patch('app.collectors.main_round.cached_decimals', AsyncMock(side_effect=[6,18])), patch('app.collectors.main_round.rpc_call', AsyncMock(return_value=raw)) as rpc:
+                    with patch('app.collectors.main_round.token_identity', return_value={'eligibleForPair':True}), patch('app.collectors.main_round.store', AsyncMock(side_effect=lambda chain: s if chain == '196' else empty)), patch('app.collectors.main_round.now_ms', return_value=NOW), patch('app.collectors.main_round.chain_web3', return_value=mock_w3), patch('app.collectors.main_round._check_rpc_identity', AsyncMock()), patch('app.collectors.main_round.cached_decimals', AsyncMock(side_effect=[6,18])), patch('app.collectors.main_round.rpc_call', AsyncMock(return_value=raw)) as rpc:
                         await refresh_liquidity()
                         rpc.assert_called_once_with('pool', '0x0902f1ac', 123)
                     quote = await s.get('pool-quote', 'pool')

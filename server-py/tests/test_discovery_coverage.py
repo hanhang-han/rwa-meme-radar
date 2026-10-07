@@ -1,5 +1,7 @@
 """External-index coverage cannot be promoted from a partial provider sample."""
 import tempfile
+import asyncio
+import httpx
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -23,6 +25,43 @@ def pair(pool=POOL, *, chain="bsc", stock=STOCK, other=OTHER):
 
 
 class DiscoveryCoverageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_supported_network_token_absent_from_index_is_not_provider_outage(self):
+        from app.collectors.discovery_coverage import _fetch
+        transport=httpx.MockTransport(lambda request: httpx.Response(404, json={'errors':['not indexed']}))
+        async with httpx.AsyncClient(transport=transport) as client:
+            self.assertEqual(await _fetch(client, STOCK, '196'), [])
+
+    async def test_resume_after_cancellation_and_manifest_subject_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = directory+'/research.sqlite'
+            system = await ResearchStore(path, 'system').connect()
+            chain = await ResearchStore(path, CHAIN).connect()
+            async def select(scope):
+                return system if scope == 'system' else chain
+            subjects = [f'0x{i:040x}' for i in range(1, 6)]
+            calls = []
+            async def interrupted(token):
+                calls.append(token)
+                if token == subjects[1]:
+                    raise asyncio.CancelledError()
+                return []
+            try:
+                with patch('app.collectors.discovery_coverage.store', side_effect=select):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await reconcile_bnb(fetch=interrupted, contracts=subjects, request_spacing=0)
+                    self.assertEqual((await system.get('discovery-scan', CHAIN))['cursor'], 1)
+                    resumed = AsyncMock(return_value=[])
+                    await reconcile_bnb(fetch=resumed, contracts=subjects, max_contracts=2, request_spacing=0)
+                    self.assertEqual([c.args[0] for c in resumed.await_args_list], subjects[1:3])
+                    self.assertEqual((await system.get(REPORT_KIND, CHAIN))['unqueriedContracts'], 2)
+                    restarted = AsyncMock(return_value=[])
+                    await reconcile_bnb(fetch=restarted, contracts=subjects+[OTHER], max_contracts=1, request_spacing=0)
+                    self.assertEqual(restarted.await_args.args[0], subjects[0])
+                    self.assertEqual((await system.get(REPORT_KIND, CHAIN))['checkedContracts'], 1)
+            finally:
+                await chain.close()
+                await system.close()
+
     def test_pairs_require_exact_chain_and_stock_side(self):
         valid, bad, capped = normalize_pairs([
             pair(), pair(UNKNOWN, chain="ethereum"), pair(UNKNOWN, stock=OTHER, other=UNKNOWN),

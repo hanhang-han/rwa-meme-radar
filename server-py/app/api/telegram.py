@@ -30,3 +30,24 @@ async def bind_telegram(request: Request):
 async def unlink_telegram(request: Request):
     user, _ = await _write_session(request)
     return JSONResponse(await asyncio.to_thread(telegram_alerts.unlink, user['id']), headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/health')
+async def telegram_health(request: Request):
+    user, _ = await _session(request)
+    return JSONResponse(await asyncio.to_thread(telegram_alerts.health, user['id']), headers={'Cache-Control': 'no-store'})
+
+
+@router.post('/dry-run')
+async def telegram_dry_run(request: Request):
+    user, _ = await _write_session(request)
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise access.AccessError('invalid-alert-preview')
+        result = await telegram_alerts.dry_run(user['id'], body.get('category'), body.get('assetKey'), body.get('tradeId'))
+    except access.AccessError as exc:
+        _raise(exc)
+    except (ValueError, TypeError):
+        _raise(access.AccessError('invalid-alert-preview'))
+    return JSONResponse(result, headers={'Cache-Control': 'no-store'})

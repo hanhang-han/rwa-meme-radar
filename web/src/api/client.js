@@ -5,11 +5,23 @@ const mountedDashboard = typeof location === 'undefined'
   : location.pathname.match(/^\/(dashboardv2|dashboard)(?:\/|$)/);
 export const API_BASE = mountedDashboard ? `/${mountedDashboard[1]}/api/` : '/api/';
 
+const inFlight = new Map();
 export async function getJSON(path, timeoutMs = 25000) {
+  const url = API_BASE + path.replace(/^\//, '');
+  // Page initialization and stream bootstrap share one request. Consumers
+  // receive independent objects because stores annotate and merge their rows.
+  if (!inFlight.has(url)) {
+    const request = fetchJSON(url, timeoutMs).finally(() => inFlight.delete(url));
+    inFlight.set(url, request);
+  }
+  return structuredClone(await inFlight.get(url));
+}
+
+async function fetchJSON(url, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(API_BASE + path.replace(/^\//, ''), {signal: controller.signal});
+    const res = await fetch(url, {signal: controller.signal});
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch (error) {
@@ -22,8 +34,11 @@ export async function getDashboard(view = 'market') {
   return getJSON(`/dashboard?view=${view}`, view === 'overview' ? 15000 : 45000);
 }
 
-export async function getFeed(chainId) {
-  return getJSON(`/feed${chainId ? `?chain=${encodeURIComponent(chainId)}` : ''}`);
+export async function getFeed(chainId, { fresh = false } = {}) {
+  const query = new URLSearchParams();
+  if (chainId) query.set('chain', chainId);
+  if (fresh) query.set('fresh', '1');
+  return getJSON(`/feed${query.size ? `?${query}` : ''}`);
 }
 
 export async function getDataHealth() {

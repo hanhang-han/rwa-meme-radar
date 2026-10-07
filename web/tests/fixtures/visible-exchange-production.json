@@ -1,0 +1,158 @@
+{
+  "origin": "Public quote subscription captured on 2026-10-03",
+  "finishedAt": 1791014863796,
+  "snapshots": {
+    "memes": {
+      "packet": {
+        "groups": [
+          {
+            "representative": {
+              "chainId": "56",
+              "token": "0x0a092e544da31150b439a1aaa1a3a2214a867f46",
+              "symbol": "CT",
+              "price": 0.5306083295129784,
+              "priceCurrency": "USD",
+              "priceScope": "dex",
+              "quoteType": "dex",
+              "venue": "dex",
+              "provider": "OKX",
+              "quoteAt": 1791013992926.0,
+              "fieldTimes": {
+                "price": 1791013992926.0,
+                "buys24h": 1791001317066,
+                "sells24h": 1791001317066,
+                "holders": 1791013992926.0,
+                "volume24h": 1791013992926.0,
+                "change24h": 1791013992926.0
+              },
+              "fieldSources": {
+                "price": "OKX",
+                "holders": "OKX",
+                "volume24h": "OKX",
+                "change24h": "OKX"
+              },
+              "fieldScopes": {
+                "price": "token",
+                "volume24h": "token",
+                "change24h": "token"
+              },
+              "volume24h": 165613626.61499333,
+              "volumeCurrency": "USD",
+              "volumeScope": "token"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "event": "price",
+      "id": "60006404",
+      "data": {
+        "chainId": "56",
+        "token": "0x0a092e544da31150b439a1aaa1a3a2214a867f46",
+        "venue": "binance-alpha",
+        "marketId": "ALPHA_1228USDT",
+        "symbol": "CT",
+        "quoteType": "exchange-token",
+        "priceCurrency": "USDT",
+        "volumeCurrency": "USDT",
+        "priceScope": "exchange",
+        "volumeScope": "exchange",
+        "source": "Binance Alpha",
+        "provider": "Binance Alpha",
+        "price": 0.52865068,
+        "change24h": -13.046,
+        "volume24h": 146837684.65642706,
+        "marketAt": 1791014785939,
+        "sourceEventAt": 1791014785939,
+        "statisticsAt": 1791014785939,
+        "receivedAt": 1791014785981,
+        "exchangeTrades24h": 5111575,
+        "persistedAt": 1791014787043,
+        "timeKind": "market",
+        "quoteAt": 1791014785939,
+        "priceProvenance": {
+          "timeKind": "market",
+          "marketAt": 1791014785939,
+          "venue": "binance-alpha",
+          "dependencies": [],
+          "dependenciesComplete": true
+        }
+      }
+    },
+    {
+      "event": "price",
+      "id": "60006451",
+      "data": {
+        "chainId": "56",
+        "token": "0x0a092e544da31150b439a1aaa1a3a2214a867f46",
+        "venue": "binance-alpha",
+        "marketId": "ALPHA_1228USDT",
+        "symbol": "CT",
+        "quoteType": "exchange-token",
+        "priceCurrency": "USDT",
+        "volumeCurrency": "USDT",
+        "priceScope": "exchange",
+        "volumeScope": "exchange",
+        "source": "Binance Alpha",
+        "provider": "Binance Alpha",
+        "price": 0.52886444,
+        "change24h": -13.008,
+        "volume24h": 146841659.25298756,
+        "marketAt": 1791014787191,
+        "sourceEventAt": 1791014787393,
+        "statisticsAt": 1791014787030,
+        "receivedAt": 1791014787434,
+        "exchangeTrades24h": 5111681,
+        "persistedAt": 1791014787738,
+        "timeKind": "market",
+        "quoteAt": 1791014787191,
+        "priceProvenance": {
+          "timeKind": "market",
+          "marketAt": 1791014787191,
+          "venue": "binance-alpha",
+          "dependencies": [],
+          "dependenciesComplete": true
+        }
+      }
+    },
+    {
+      "event": "price",
+      "id": "60006511",
+      "data": {
+        "chainId": "56",
+        "token": "0x0a092e544da31150b439a1aaa1a3a2214a867f46",
+        "venue": "binance-alpha",
+        "marketId": "ALPHA_1228USDT",
+        "symbol": "CT",
+        "quoteType": "exchange-token",
+        "priceCurrency": "USDT",
+        "volumeCurrency": "USDT",
+        "priceScope": "exchange",
+        "volumeScope": "exchange",
+        "source": "Binance Alpha",
+        "provider": "Binance Alpha",
+        "price": 0.52887162,
+        "change24h": -13.01,
+        "volume24h": 146843853.9408634,
+        "marketAt": 1791014788057,
+        "sourceEventAt": 1791014788242,
+        "statisticsAt": 1791014788067,
+        "receivedAt": 1791014788283,
+        "exchangeTrades24h": 5111804,
+        "persistedAt": 1791014788314,
+        "timeKind": "market",
+        "quoteAt": 1791014788057,
+        "priceProvenance": {
+          "timeKind": "market",
+          "marketAt": 1791014788057,
+          "venue": "binance-alpha",
+          "dependencies": [],
+          "dependenciesComplete": true
+        }
+      }
+    }
+  ]
+}

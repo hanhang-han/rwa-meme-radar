@@ -26,10 +26,22 @@ test('including incomplete data never bypasses a fresh price selection',()=>{
  assert.equal(memeQuoteMatches({...current,price:null},filter,now),false);
  assert.equal(memeQuoteMatches({...current,price:0},filter,now),false);
 });
-test('without an explicit fresh price filter incomplete historical data is visible only when requested',()=>{
+test('default browsing retains historical and incomplete records while explicit complete-data filtering works',()=>{
  const asset={...current,volume24h:null,fieldTimes:{price:now-900001}};
- assert.equal(memeQuoteMatches(asset,memeFilterValues({fresh:'0'}),now),false);
+ const defaults=memeFilterValues();
+ assert.equal(defaults.relation,'all');assert.equal(defaults.fresh,'0');assert.equal(defaults.showMissing,true);
+ assert.equal(memeQuoteMatches(asset,defaults,now),true);
+ assert.equal(memeQuoteMatches({kind:'candidate',token:'0xb'},defaults,now),true);
+ assert.equal(memeQuoteMatches(asset,memeFilterValues({fresh:'0',showMissing:'0'}),now),false);
  assert.equal(memeQuoteMatches(asset,memeFilterValues({fresh:'0',showMissing:'1'}),now),true);
+});
+test('explicit relationship, freshness and legacy filters keep their chosen scope',()=>{
+ const chosen=memeFilterValues({rel:'A',fresh:'1',showMissing:'0',minLiq:'10000',risk:'hide'});
+ assert.equal(chosen.relation,'A');assert.equal(chosen.fresh,'1');assert.equal(chosen.showMissing,false);
+ assert.equal(chosen.minLiquidity,'10000');assert.equal(chosen.hideRisk,true);
+ assert.equal(memeFilterValues({filter:'verified'}).relation,'A');
+ assert.equal(memeFilterValues({filter:'name'}).relation,'B');
+ assert.equal(memeFilterValues({filter:'related'}).fresh,'1');
 });
 test('active KPI still has its exact independent qualification rather than requiring volume',()=>{
  const filter=memeFilterValues({qualified:'1',new:'24h',fresh:'0'});

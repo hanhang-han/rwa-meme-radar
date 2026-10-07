@@ -1,0 +1,704 @@
+{
+  "version": "hk-underlyings-v1",
+  "securities": {
+    "1": {
+      "symbol": "CKHUTX",
+      "zh": "长江和记实业",
+      "en": "CK Hutchison Holdings",
+      "source": "https://www1.hkexnews.hk/listedco/listconews/sehk/2025/0828/2025082800501.pdf"
+    },
+    "2": {
+      "symbol": "CLPHDX",
+      "zh": "中电控股",
+      "en": "CLP",
+      "source": "https://gu.qq.com/hk00002",
+      "underlyingIsin": "HK0002007356",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "3": {
+      "symbol": "HKCGAX",
+      "zh": "香港中华煤气",
+      "en": "Hong Kong and China Gas",
+      "source": "https://gu.qq.com/hk00003",
+      "underlyingIsin": "HK0003000038",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "4": {
+      "symbol": "WRFHDX",
+      "zh": "九龙仓集团",
+      "en": "The Wharf Holdings",
+      "source": "https://gu.qq.com/hk00004",
+      "underlyingIsin": "HK0004000045",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "6": {
+      "symbol": "PWAHLX",
+      "zh": "电能实业",
+      "en": "Power Assets",
+      "source": "https://gu.qq.com/hk00006",
+      "underlyingIsin": "HK0006000050",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "12": {
+      "symbol": "HNDLDX",
+      "zh": "恒基地产",
+      "en": "Henderson Land Development",
+      "source": "https://gu.qq.com/hk00012",
+      "underlyingIsin": "HK0012000102",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "27": {
+      "symbol": "GENTEX",
+      "zh": "银河娱乐",
+      "en": "Galaxy Entertainment",
+      "source": "https://gu.qq.com/hk00027",
+      "underlyingIsin": "HK0027032686",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "66": {
+      "symbol": "MTRCPX",
+      "zh": "港铁公司",
+      "en": "MTR",
+      "source": "https://gu.qq.com/hk00066",
+      "underlyingIsin": "HK0066009694",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "83": {
+      "symbol": "SINOX",
+      "zh": "信和置业",
+      "en": "Sino Land",
+      "source": "https://gu.qq.com/hk00083",
+      "underlyingIsin": "HK0083000502",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "135": {
+      "symbol": "KUNLX",
+      "zh": "昆仑能源",
+      "en": "Kunlun Energy",
+      "source": "https://gu.qq.com/hk00135",
+      "underlyingIsin": "BMG5320C1082",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "144": {
+      "symbol": "CMERPX",
+      "zh": "招商局港口",
+      "en": "China Merchants Port",
+      "source": "https://gu.qq.com/hk00144",
+      "underlyingIsin": "HK0144000764",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "175": {
+      "symbol": "GEELX",
+      "zh": "吉利汽车",
+      "en": "Geely Automobile",
+      "source": "https://gu.qq.com/hk00175",
+      "underlyingIsin": "KYG3777B1032",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "267": {
+      "symbol": "CITICX",
+      "zh": "中信股份",
+      "en": "CITIC",
+      "source": "https://gu.qq.com/hk00267",
+      "underlyingIsin": "HK0267001375",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "288": {
+      "symbol": "WHGROX",
+      "zh": "万洲国际",
+      "en": "WH",
+      "source": "https://gu.qq.com/hk00288",
+      "underlyingIsin": "KYG960071028",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "291": {
+      "symbol": "CRESBX",
+      "zh": "华润啤酒",
+      "en": "China Resources Beer Holdings",
+      "source": "https://gu.qq.com/hk00291",
+      "underlyingIsin": "HK0291001490",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "293": {
+      "symbol": "CTPCAX",
+      "zh": "国泰航空",
+      "en": "Cathay Pacific Airways",
+      "source": "https://gu.qq.com/hk00293",
+      "underlyingIsin": "HK0293001514",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "322": {
+      "symbol": "TNGYIX",
+      "zh": "康师傅控股",
+      "en": "Tingyi",
+      "source": "https://gu.qq.com/hk00322",
+      "underlyingIsin": "KYG8878S1030",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "386": {
+      "symbol": "CPETCX",
+      "zh": "中国石油化工股份",
+      "en": "China Petroleum & Chemical",
+      "source": "https://gu.qq.com/hk00386",
+      "underlyingIsin": "CNE1000002Q2",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "388": {
+      "symbol": "HKEXCX",
+      "zh": "香港交易所",
+      "en": "Hong Kong Exchanges and Clearing",
+      "source": "https://gu.qq.com/hk00388",
+      "underlyingIsin": "HK0388045442",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "522": {
+      "symbol": "ASMPTX",
+      "zh": "ASMPT",
+      "en": "ASMPT",
+      "source": "https://gu.qq.com/hk00522",
+      "underlyingIsin": "KYG0535Q1331",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "625": {
+      "symbol": "SHEINX",
+      "zh": "希音-W",
+      "en": "SHEIN",
+      "source": "https://gu.qq.com/hk00625",
+      "underlyingIsin": "KYG237451052",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "688": {
+      "symbol": "COVELX",
+      "zh": "中国海外发展",
+      "en": "China Overseas Land & Investment",
+      "source": "https://gu.qq.com/hk00688",
+      "underlyingIsin": "HK0688002218",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "700": {
+      "symbol": "TCENTX",
+      "zh": "腾讯控股",
+      "en": "Tencent",
+      "source": "https://gu.qq.com/hk00700",
+      "underlyingIsin": "KYG875721634",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "836": {
+      "symbol": "CRESPX",
+      "zh": "华润电力",
+      "en": "China Resources Power",
+      "source": "https://gu.qq.com/hk00836",
+      "underlyingIsin": "HK0836012952",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "916": {
+      "symbol": "CLONPX",
+      "zh": "龙源电力",
+      "en": "China Longyuan Power",
+      "source": "https://gu.qq.com/hk00916",
+      "underlyingIsin": "CNE100000HD4",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "939": {
+      "symbol": "CCONBX",
+      "zh": "建设银行",
+      "en": "China Construction Bank",
+      "source": "https://gu.qq.com/hk00939",
+      "underlyingIsin": "CNE1000002H1",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "966": {
+      "symbol": "CTINSX",
+      "zh": "中国太平",
+      "en": "China Taiping Insurance",
+      "source": "https://gu.qq.com/hk00966",
+      "underlyingIsin": "HK0000055878",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1024": {
+      "symbol": "KUAIX",
+      "zh": "快手",
+      "en": "Kuaishou Technology",
+      "source": "https://ir.kuaishou.com/node/6441/pdf"
+    },
+    "1038": {
+      "symbol": "CKINFX",
+      "zh": "长江基建集团",
+      "en": "CK Infrastructure Holdings",
+      "source": "https://www1.hkexnews.hk/listedco/listconews/sehk/2022/0408/2022040800581.pdf"
+    },
+    "1088": {
+      "symbol": "CSHEEX",
+      "zh": "中国神华",
+      "en": "China Shenhua Energy",
+      "source": "https://gu.qq.com/hk01088",
+      "underlyingIsin": "CNE1000002R0",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1093": {
+      "symbol": "CSPCX",
+      "zh": "石药集团",
+      "en": "CSPC Pharmaceutical",
+      "source": "https://gu.qq.com/hk01093",
+      "underlyingIsin": "HK1093012172",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1109": {
+      "symbol": "CRESLX",
+      "zh": "华润置地",
+      "en": "China Resources Land",
+      "source": "https://gu.qq.com/hk01109",
+      "underlyingIsin": "KYG2108Y1052",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1113": {
+      "symbol": "CKAHX",
+      "zh": "长实集团",
+      "en": "CK Asset",
+      "source": "https://gu.qq.com/hk01113",
+      "underlyingIsin": "KYG2177B1014",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1177": {
+      "symbol": "SNBIOX",
+      "zh": "中国生物制药",
+      "en": "Sino Biopharmaceutical",
+      "source": "https://gu.qq.com/hk01177",
+      "underlyingIsin": "KYG8167W1380",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1208": {
+      "symbol": "MMGX",
+      "zh": "五矿资源",
+      "en": "MMG",
+      "source": "https://gu.qq.com/hk01208",
+      "underlyingIsin": "HK1208013172",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1209": {
+      "symbol": "CRESMX",
+      "zh": "华润万象生活",
+      "en": "China Resources Mixc Lifestyle Services",
+      "source": "https://gu.qq.com/hk01209",
+      "underlyingIsin": "KYG2122G1064",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1211": {
+      "symbol": "BYDCOX",
+      "zh": "比亚迪股份",
+      "en": "BYD",
+      "source": "https://gu.qq.com/hk01211",
+      "underlyingIsin": "CNE100000296",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1299": {
+      "symbol": "AIAGRX",
+      "zh": "友邦保险",
+      "en": "AIA",
+      "source": "https://gu.qq.com/hk01299",
+      "underlyingIsin": "HK0000069689",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1308": {
+      "symbol": "SITCX",
+      "zh": "海丰国际",
+      "en": "SITC International",
+      "source": "https://gu.qq.com/hk01308",
+      "underlyingIsin": "KYG8187G1055",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1378": {
+      "symbol": "CHONGX",
+      "zh": "中国宏桥",
+      "en": "China Hongqiao",
+      "source": "https://gu.qq.com/hk01378",
+      "underlyingIsin": "KYG211501005",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1398": {
+      "symbol": "ICBCX",
+      "zh": "工商银行",
+      "en": "Industrial And Commercial Bank Of China",
+      "source": "https://gu.qq.com/hk01398",
+      "underlyingIsin": "CNE1000003G1",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1519": {
+      "symbol": "JTGEXX",
+      "zh": "极兔速递-W",
+      "en": "J&T Global Express",
+      "source": "https://gu.qq.com/hk01519",
+      "underlyingIsin": "KYG4990A1040",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1658": {
+      "symbol": "PSBOCX",
+      "zh": "邮储银行",
+      "en": "Postal Savings Bank Of China",
+      "source": "https://gu.qq.com/hk01658",
+      "underlyingIsin": "CNE1000029W3",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1810": {
+      "symbol": "XIAOX",
+      "zh": "小米集团-W",
+      "en": "Xiaomi",
+      "source": "https://gu.qq.com/hk01810",
+      "underlyingIsin": "KYG9830T1067",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1818": {
+      "symbol": "ZHAOMX",
+      "zh": "招金矿业",
+      "en": "Zhaojin Mining Industry",
+      "source": "https://gu.qq.com/hk01818",
+      "underlyingIsin": "CNE1000004R6",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1876": {
+      "symbol": "BDWAPX",
+      "zh": "百威亚太",
+      "en": "Budweiser Brewing Co APAC",
+      "source": "https://gu.qq.com/hk01876",
+      "underlyingIsin": "KYG1674K1013",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1913": {
+      "symbol": "PRADX",
+      "zh": "普拉达",
+      "en": "Prada",
+      "source": "https://gu.qq.com/hk01913",
+      "underlyingIsin": "IT0003874101",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1919": {
+      "symbol": "COSCX",
+      "zh": "中远海控",
+      "en": "COSCO SHIPPING",
+      "source": "https://gu.qq.com/hk01919",
+      "underlyingIsin": "CNE1000002J7",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1928": {
+      "symbol": "SNDSCX",
+      "zh": "金沙中国有限公司",
+      "en": "Sands China",
+      "source": "https://gu.qq.com/hk01928",
+      "underlyingIsin": "KYG7800X1079",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1929": {
+      "symbol": "CTFJWX",
+      "zh": "周大福",
+      "en": "Chow Tai Fook Jewellery",
+      "source": "https://gu.qq.com/hk01929",
+      "underlyingIsin": "KYG211461085",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1972": {
+      "symbol": "SWPRPX",
+      "zh": "太古地产",
+      "en": "Swire Properties",
+      "source": "https://gu.qq.com/hk01972",
+      "underlyingIsin": "HK0000063609",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "1997": {
+      "symbol": "WHRFRX",
+      "zh": "九龙仓置业",
+      "en": "Wharf Real Estate Investment",
+      "source": "https://gu.qq.com/hk01997",
+      "underlyingIsin": "KYG9593A1040",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2020": {
+      "symbol": "ANTASX",
+      "zh": "安踏体育",
+      "en": "ANTA Sports Products",
+      "source": "https://gu.qq.com/hk02020",
+      "underlyingIsin": "KYG040111059",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2097": {
+      "symbol": "MIXUX",
+      "zh": "蜜雪集团",
+      "en": "Mixue",
+      "source": "https://gu.qq.com/hk02097",
+      "underlyingIsin": "CNE100006T36",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2259": {
+      "symbol": "ZJGLDX",
+      "zh": "紫金黄金国际",
+      "en": "Zijin Gold International",
+      "source": "https://gu.qq.com/hk02259",
+      "underlyingIsin": "HK0001200002",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2268": {
+      "symbol": "WXXDCX",
+      "zh": "药明合联",
+      "en": "WuXi XDC Cayman",
+      "source": "https://gu.qq.com/hk02268",
+      "underlyingIsin": "KYG9808A1058",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2269": {
+      "symbol": "WUXIBX",
+      "zh": "药明生物",
+      "en": "WuXi Biologics",
+      "source": "https://gu.qq.com/hk02269",
+      "underlyingIsin": "KYG970081173",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2313": {
+      "symbol": "SZIGHX",
+      "zh": "申洲国际",
+      "en": "Shenzhou International",
+      "source": "https://gu.qq.com/hk02313",
+      "underlyingIsin": "KYG8087W1015",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2318": {
+      "symbol": "PICOX",
+      "zh": "中国平安",
+      "en": "Ping An Insurance Group Co. of China",
+      "source": "https://gu.qq.com/hk02318",
+      "underlyingIsin": "CNE1000003X6",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2319": {
+      "symbol": "CMENDX",
+      "zh": "蒙牛乳业",
+      "en": "China Mengniu Dairy",
+      "source": "https://gu.qq.com/hk02319",
+      "underlyingIsin": "KYG210961051",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2328": {
+      "symbol": "PICCX",
+      "zh": "中国财险",
+      "en": "PICC Property and Casualty",
+      "source": "https://gu.qq.com/hk02328",
+      "underlyingIsin": "CNE100000593",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2382": {
+      "symbol": "SUOPTX",
+      "zh": "舜宇光学科技",
+      "en": "Sunny Optical Technology Group",
+      "source": "https://gu.qq.com/hk02382",
+      "underlyingIsin": "KYG8586D1097",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2388": {
+      "symbol": "BOCHKX",
+      "zh": "中银香港",
+      "en": "BOC Hong Kong",
+      "source": "https://gu.qq.com/hk02388",
+      "underlyingIsin": "HK2388011192",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2618": {
+      "symbol": "JDLOGX",
+      "zh": "京东物流",
+      "en": "JD Logistics",
+      "source": "https://gu.qq.com/hk02618",
+      "underlyingIsin": "KYG5074S1012",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2628": {
+      "symbol": "CLINSX",
+      "zh": "中国人寿",
+      "en": "China Life Insurance",
+      "source": "https://gu.qq.com/hk02628",
+      "underlyingIsin": "CNE1000002L3",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "2688": {
+      "symbol": "ENNHLX",
+      "zh": "新奥能源",
+      "en": "ENN Energy",
+      "source": "https://gu.qq.com/hk02688",
+      "underlyingIsin": "KYG3066L1014",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "3328": {
+      "symbol": "BOCOMX",
+      "zh": "交通银行",
+      "en": "Bank of Communications",
+      "source": "https://gu.qq.com/hk03328",
+      "underlyingIsin": "CNE100000205",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "3690": {
+      "symbol": "MEITX",
+      "zh": "美团-W",
+      "en": "Meituan",
+      "source": "https://gu.qq.com/hk03690",
+      "underlyingIsin": "KYG596691041",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "3808": {
+      "symbol": "SINOTX",
+      "zh": "中国重汽",
+      "en": "Sinotruk",
+      "source": "https://gu.qq.com/hk03808",
+      "underlyingIsin": "HK3808041546",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "3988": {
+      "symbol": "BANKCX",
+      "zh": "中国银行",
+      "en": "Bank Of China",
+      "source": "https://gu.qq.com/hk03988",
+      "underlyingIsin": "CNE1000001Z5",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "6181": {
+      "symbol": "LAOPGX",
+      "zh": "老铺黄金",
+      "en": "Laopu Gold",
+      "source": "https://gu.qq.com/hk06181",
+      "underlyingIsin": "CNE100006JG0",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "6618": {
+      "symbol": "JDHLTX",
+      "zh": "京东健康",
+      "en": "JD Health International",
+      "source": "https://gu.qq.com/hk06618",
+      "underlyingIsin": "KYG5074A1004",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "6690": {
+      "symbol": "HAIERX",
+      "zh": "海尔智家",
+      "en": "Haier Smart Home",
+      "source": "https://gu.qq.com/hk06690",
+      "underlyingIsin": "CNE1000048K8",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "6862": {
+      "symbol": "HAIDLX",
+      "zh": "海底捞",
+      "en": "Haidilao International",
+      "source": "https://gu.qq.com/hk06862",
+      "underlyingIsin": "KYG4290A1013",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "6969": {
+      "symbol": "SMOIHX",
+      "zh": "思摩尔国际",
+      "en": "Smoore International",
+      "source": "https://gu.qq.com/hk06969",
+      "underlyingIsin": "KYG8245V1023",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "9633": {
+      "symbol": "NONGX",
+      "zh": "农夫山泉",
+      "en": "Nongfu Spring",
+      "source": "https://gu.qq.com/hk09633",
+      "underlyingIsin": "CNE100004272",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "9660": {
+      "symbol": "HRZRBX",
+      "zh": "地平线机器人-W",
+      "en": "Horizon Robotics",
+      "source": "https://gu.qq.com/hk09660",
+      "underlyingIsin": "KYG4602S1057",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "9973": {
+      "symbol": "CRAUTX",
+      "zh": "奇瑞汽车",
+      "en": "Chery Automobile",
+      "source": "https://gu.qq.com/hk09973",
+      "underlyingIsin": "CNE1000073Z4",
+      "issuerSource": "https://api.xstocks.fi/api/v2/public/assets",
+      "identityBasis": "pinned-issuer-security-and-exact-hk-reference"
+    },
+    "9992": {
+      "symbol": "POPMTX",
+      "zh": "泡泡玛特",
+      "en": "Pop Mart International Group Limited",
+      "source": "https://www.hkex.com.hk/Market-Data/Securities-Prices/Equities/Equities-Quote?sym=9992&sc_lang=en"
+    }
+  }
+}

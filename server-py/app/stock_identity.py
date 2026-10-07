@@ -1,7 +1,7 @@
 """Pinned issuer deployment identities and conservative A/B relation rules.
 
-The xStocks API is sampled when preparing a release, never during a user
-request or a collection round. An OKX/RH catalogue row or an ERC-4626
+Issuer APIs are sampled when preparing a release, never during a user
+request or a collection round. An unaudited OKX/RH catalogue row or an ERC-4626
 ``asset()`` response alone is not issuer authorisation of a contract.
 """
 from __future__ import annotations
@@ -16,6 +16,7 @@ from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "src" / "catalogues"
 MANIFEST = DATA_DIR / "official-stock-tokens.v1.json"
+ROBINHOOD_MANIFEST = DATA_DIR / "robinhood-stock-tokens.v1.json"
 KEYWORDS = DATA_DIR / "stock-keywords.v1.json"
 ADDRESS = re.compile(r"0x[0-9a-f]{40}\Z", re.I)
 RULE_VERSION = "official-pool-a-b-v1"
@@ -62,7 +63,53 @@ def _manifest() -> tuple[dict, dict[tuple[str, str], dict]]:
                     "sourceDocs": source["sourceDocs"],
                     "sourceAt": source["capturedAt"], "manifestVersion": source["version"],
                 }
-    return source, index
+    robinhood = json.loads(ROBINHOOD_MANIFEST.read_text(encoding="utf-8"))
+    if (robinhood.get('provenance') != 'official-api-pinned-snapshot'
+            or not robinhood.get('version') or not robinhood.get('capturedAt')
+            or robinhood.get('sourceUrl') != 'https://api.robinhood.com/rhj/assets'
+            or robinhood.get('issuer') != 'Robinhood Assets (Jersey) Limited'):
+        raise ValueError('Robinhood identity manifest provenance missing')
+    seen_assets = set()
+    for asset in robinhood['assets']:
+        asset_id = asset.get('assetId')
+        ticker = asset.get('ticker')
+        isin = asset.get('underlyingIsin')
+        if (not isinstance(asset_id, str) or not re.fullmatch(r'0x[0-9a-fA-F]{64}', asset_id)
+                or asset_id in seen_assets or not isinstance(ticker, str)
+                or not re.fullmatch(r'[A-Z0-9.\-]{1,24}', ticker)
+                or ticker != asset.get('tokenSymbol') or not asset.get('nameEn')
+                or not isinstance(isin, str) or not re.fullmatch(r'[A-Z]{2}[A-Z0-9]{9}\d', isin)
+                or set(asset.get('deployments') or {}) != {'4663'}):
+            raise ValueError('Invalid Robinhood issuer asset')
+        seen_assets.add(asset_id)
+        deployment = asset['deployments']['4663']
+        address = _address(deployment.get('native'))
+        if not address or int(address, 16) == 0 or set(deployment) != {'native'}:
+            raise ValueError('Invalid Robinhood issuer deployment')
+        key = ('4663', address)
+        if key in index:
+            raise ValueError('Conflicting official deployment addresses')
+        index[key] = {
+            'chainId': '4663', 'address': address, 'underlyingId': 'robinhood:'+asset_id,
+            'ticker': ticker, 'tokenSymbol': ticker, 'nameEn': asset['nameEn'],
+            'underlyingIsin': isin, 'issuer': robinhood['issuer'], 'tokenKind': 'native',
+            'version': 'v1', 'verificationStatus': 'official',
+            'eligibleForPair': asset.get('assetStatus') == 'ASSET_STATUS_ACTIVE',
+            'sourceUrl': robinhood['sourceUrl'], 'sourceDocs': robinhood['sourceDocs'],
+            'sourceAt': robinhood['capturedAt'], 'manifestVersion': robinhood['version'],
+        }
+    if not seen_assets:
+        raise ValueError('Empty Robinhood identity manifest')
+    issuers = [{k: item[k] for k in ('version', 'capturedAt', 'sourceUrl')}
+               for item in (source, robinhood)]
+    return {**source, 'version': source['version']+'+'+robinhood['version'], 'issuers': issuers}, index
+
+
+def chain_manifest_version(chain: str) -> str:
+    """A Robinhood release must not reset X Layer/BNB discovery cursors."""
+    versions = {row['manifestVersion'] for (cid, _), row in _manifest()[1].items()
+                if cid == str(chain)}
+    return '+'.join(sorted(versions))
 
 
 def manifest_status() -> dict:
@@ -74,16 +121,21 @@ def manifest_status() -> dict:
                 "reason": type(exc).__name__}
     return {"status": "ready", "version": source["version"],
             "sourceAt": source["capturedAt"], "sourceUrl": source["sourceUrl"],
-            "entries": len(index)}
+            "entries": len(index), "issuers": source.get('issuers', []),
+            "entriesByChain": {chain: sum(cid == chain for cid, _ in index)
+                               for chain in ('196', '56', '4663')}}
 
 
 def token_identity(chain_id, address, reported_ticker=None) -> dict:
     chain = str(chain_id or "")
     canonical = _address(address)
     try:
-        hit = _manifest()[1].get((chain, canonical)) if canonical else None
+        source, index = _manifest()
+        hit = index.get((chain, canonical)) if canonical else None
+        manifest_version = source['version']
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         hit = None
+        manifest_version = None
     if hit:
         return dict(hit)
     return {
@@ -92,7 +144,9 @@ def token_identity(chain_id, address, reported_ticker=None) -> dict:
         "issuer": None, "tokenKind": None, "version": None,
         "verificationStatus": "unverified", "eligibleForPair": False,
         "sourceUrl": None, "sourceAt": None,
-        "manifestVersion": manifest_status().get("version"),
+        # Identity misses need the loaded manifest's version, not a new count
+        # of every deployment in every chain for each unknown token.
+        "manifestVersion": manifest_version,
     }
 
 
@@ -204,7 +258,22 @@ def match_name(symbol: str | None, name: str | None) -> dict | None:
         return None
     hit = _match_name_cached(str(symbol or "").strip(), str(name or ""))
     if not hit:
-        return None
+        # Reviewed aliases remain B-level clues. Review revocation takes effect
+        # on the next projection without changing issuer/pool identity rules.
+        try:
+            from .product_social import confirmed_aliases, alias_matches
+            aliases = confirmed_aliases()
+            haystack = f'{symbol or ""} {name or ""}'
+            matches = alias_matches(haystack, aliases)
+            if len(matches) != 1:
+                return None
+            ticker = matches[0]
+            item = next(a for a in aliases if a['ticker'] == ticker and alias_matches(haystack, [a]))
+            return {'level': 'B', 'ticker': ticker, 'matchType': 'reviewed-alias',
+                    'keyword': item['alias'], 'ruleVersion': 'reviewed-alias-v1',
+                    'evidenceStatus': 'name-only', 'reviewedAt': item['reviewed_at']}
+        except (OSError, ValueError, KeyError, __import__('sqlite3').Error):
+            return None
     ticker, match_type, term, version = hit
     return {"level": "B", "ticker": ticker, "matchType": match_type,
             "keyword": term, "ruleVersion": version,

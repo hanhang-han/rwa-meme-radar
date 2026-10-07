@@ -16,3 +16,11 @@ web/dist/
 __pycache__/
 *.pyc
 server-py/.venv/
+.gstack/
+
+# Local personal agreements and generated release/source archives
+/*_Fovea_*.docx
+/docs/acceptance/**/*.tar
+/docs/acceptance/**/*.tar.gz
+/docs/acceptance/**/*.tgz
+/docs/acceptance/**/*.zip

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" aria-labelledby="title">
+  <title id="title">CliperX</title>
+  <style>
+    .c { stroke: #211e1a; }
+    .signal { stroke: #8a682e; }
+    @media (prefers-color-scheme: dark) {
+      .c { stroke: #f2eadc; }
+      .signal { stroke: #d0af72; }
+    }
+  </style>
+  <path class="c" d="M46 13C42 10 37 8.5 31.5 8.5 18.5 8.5 9 18.7 9 32s9.5 23.5 22.5 23.5C37 55.5 42 54 46 51" stroke-width="7.5" stroke-linecap="round"/>
+  <path class="signal" d="m19 39 8-7 6 4 12-12" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

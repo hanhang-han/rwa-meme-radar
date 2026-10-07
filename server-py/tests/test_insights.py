@@ -47,7 +47,6 @@ class InsightTests(unittest.IsolatedAsyncioTestCase):
             }],
         }
         self.patches = [
-            patch.object(insights, 'store', AsyncMock(return_value=self.db)),
             patch.object(insights, 'read_token_projection', AsyncMock(return_value=self.snapshot)),
         ]
         for p in self.patches:
@@ -60,21 +59,21 @@ class InsightTests(unittest.IsolatedAsyncioTestCase):
         await self.db.close()
         self.tmp.cleanup()
 
-    async def test_immediate_four_lines_from_real_scope_and_null_missing_fields(self):
-        with patch.object(insights, 'ai_narrate', AsyncMock()) as model:
+    async def test_immediate_three_lines_from_real_scope_and_null_missing_fields(self):
+        with patch('app.ai.ai_narrate', AsyncMock()) as model:
             result = await insights.request_insight('56', self.token, 'zh')
         model.assert_not_awaited()
         self.assertEqual((result['status'], result['source'], result['stale']),
                          ('ready', 'template', False))
-        self.assertEqual(len(result['lines']), 4)
-        self.assertTrue(all(len(line) <= 40 for line in result['lines']))
+        self.assertEqual(len(result['lines']), 3)
+        self.assertTrue(all(len(line) <= 180 for line in result['lines']))
         self.assertEqual(result['facts']['volumeLiquidityRatio'], 70.03)
-        self.assertIn('该池成交', result['lines'][1])
+        self.assertIn('同池成交', result['lines'][1])
         self.assertEqual(result['facts']['top10AdjustedPercent'], 52.5)
         self.assertIsNone(result['facts']['uniqueTraderAddresses'])
         self.assertIsNone(result['facts']['creatorHoldingPercent'])
-        self.assertIn('交易地址、创建者持仓等暂无数据', result['lines'][3])
-        self.assertIn('税费、前 10 持仓需留意', result['lines'][2])
+        self.assertIsNotNone(result['facts']['dataAsOf'])
+        self.assertIn('前十持仓 52.5%', result['lines'][2])
         self.assertNotIn('股票池净买入', result['text'])
 
     async def test_b_grade_and_missing_pool_never_get_verified_readout(self):
@@ -116,7 +115,7 @@ class InsightTests(unittest.IsolatedAsyncioTestCase):
         base = template_lines(facts, 'zh')
         self.assertEqual(validate_model_text('\n'.join(base), facts, 'zh'), base)
         invented = copy.copy(base)
-        invented[1] = invented[1].replace('+125.5%', '+999.9%')
+        invented[1] = invented[1].replace('$2.0M', '$999.9M')
         self.assertIsNone(validate_model_text('\n'.join(invented), facts, 'zh'))
         advised = copy.copy(base)
         advised[1] = '行情：建议买入。'
@@ -125,7 +124,7 @@ class InsightTests(unittest.IsolatedAsyncioTestCase):
         fake_risk[2] = '风险：全部安全。'
         self.assertIsNone(validate_model_text('\n'.join(fake_risk), facts, 'zh'))
 
-    async def test_extreme_real_values_still_fit_four_line_limit(self):
+    async def test_extreme_real_values_preserve_three_fact_sentences(self):
         self.snapshot['asset']['symbol'] = 'SUPERCALIFRAGILISTIC'
         self.snapshot['asset']['change24h'] = 123456789.12345
         self.snapshot['relations'][0]['ticker'] = 'LONGSTOCKTICKER123456'
@@ -134,62 +133,36 @@ class InsightTests(unittest.IsolatedAsyncioTestCase):
         facts = build_fact_packet(self.snapshot, '56', self.token)
         for lang in ('zh', 'en'):
             lines = template_lines(facts, lang)
-            self.assertEqual(len(lines), 4)
-            self.assertTrue(all(len(line) <= 40 for line in lines))
+            self.assertEqual(len(lines), 3)
+            self.assertTrue(all(len(line) <= 180 for line in lines))
             self.assertEqual(validate_model_text('\n'.join(lines), facts, lang), lines)
 
-    async def test_worker_only_uses_exact_hash_and_one_validated_generation(self):
-        with patch.dict('os.environ', {'INSIGHT_MODEL_PUBLISH': '1'}), \
-             patch.object(insights, 'ai_enabled', return_value=True), \
-             patch.object(insights, 'ai_narrate', AsyncMock()) as model:
+    async def test_env_cannot_enable_model_rewriting_or_paid_demand(self):
+        with patch.dict('os.environ', {'INSIGHT_MODEL_PUBLISH': '1', 'DEEPSEEK_API_KEY': 'test'}), \
+             patch('app.ai.ai_narrate', AsyncMock()) as model:
             first = await insights.request_insight('56', self.token, 'en')
-            self.assertEqual(first['source'], 'template')
-            model.assert_not_awaited()
+            await insights.refresh_insights()
             await flush_lease_writer()
-            self.assertEqual(dict(await all_lease_kv(self.db,'insight-demand'))[self.token + ':en']['factHash'],
-                             first['factHash'])
-            model.return_value = {'text': first['text'], 'at': self.now}
-            with patch.object(insights, 'CHAINS', ('56',)):
-                await insights.refresh_insights()
-                await insights.refresh_insights()
-            self.assertEqual(model.await_count, 1)
-            result = await insights.request_insight('56', self.token, 'en')
-            self.assertEqual(result['source'], 'model')
-            self.snapshot['asset']['change24h'] = 127.5
-            revised = await insights.request_insight('56', self.token, 'en')
-            self.assertEqual(revised['source'], 'template')
-            self.assertNotEqual(revised['factHash'], first['factHash'])
-
-    async def test_model_key_alone_does_not_publish_before_manual_review_gate(self):
-        facts = build_fact_packet(self.snapshot, '56', self.token)
-        await self.db.put('insight', self.token + ':zh', {
-            'text': '\n'.join(template_lines(facts, 'zh')),
-            'inputHash': fact_hash(facts),
-            'promptVersion': insights.PROMPT_VERSION, 'source': 'model',
-        })
-        with patch.dict('os.environ', {'DEEPSEEK_API_KEY': 'test',
-                                    'INSIGHT_MODEL_PUBLISH': ''}), \
-             patch.object(insights, 'ai_enabled', return_value=True), \
-             patch.object(insights, 'ai_narrate', AsyncMock()) as model:
-            result = await insights.request_insight('56', self.token, 'zh')
-            with patch.object(insights, 'CHAINS', ('56',)):
-                await insights.refresh_insights()
-        self.assertEqual(result['source'], 'template')
-        self.assertNotIn(self.token + ':zh', dict(await all_lease_kv(self.db,'insight-demand')))
+        self.assertFalse(insights._model_publication_enabled())
+        self.assertEqual(first['source'], 'template')
+        self.assertEqual(dict(await all_lease_kv(self.db, 'insight-demand')), {})
         model.assert_not_awaited()
 
-    async def test_rejected_model_output_keeps_template(self):
-        with patch.dict('os.environ', {'INSIGHT_MODEL_PUBLISH': '1'}), \
-             patch.object(insights, 'ai_enabled', return_value=True), \
-             patch.object(insights, 'ai_narrate', AsyncMock(return_value={
-                 'text': 'Pair: fabricated 999%\nMarket: 999%\nRisk: clear\nData: now',
-                 'at': self.now,
-             })):
-            await insights.request_insight('56', self.token, 'en')
-            await flush_lease_writer()
-            with patch.object(insights, 'CHAINS', ('56',)):
-                await insights.refresh_insights()
-            result = await insights.request_insight('56', self.token, 'en')
+    async def test_old_model_cache_is_never_served(self):
+        facts = build_fact_packet(self.snapshot, '56', self.token)
+        await self.db.put('insight', self.token + ':zh', {
+            'text': 'Model-written cached claim', 'inputHash': fact_hash(facts),
+            'promptVersion': insights.PROMPT_VERSION, 'source': 'model'})
+        with patch.dict('os.environ', {'INSIGHT_MODEL_PUBLISH': '1'}):
+            result = await insights.request_insight('56', self.token, 'zh')
         self.assertEqual(result['source'], 'template')
-        job = await self.db.get('insight-job', self.token + ':en')
-        self.assertEqual(job['status'], 'invalid_output')
+        self.assertEqual(result['lines'], template_lines(facts, 'zh'))
+        self.assertNotIn('Model-written', result['text'])
+
+    async def test_fact_change_immediately_updates_template_and_hash(self):
+        first = await insights.request_insight('56', self.token, 'en')
+        self.snapshot['relations'][0]['poolMarket']['volume24h'] = 1_000_000
+        revised = await insights.request_insight('56', self.token, 'en')
+        self.assertEqual(revised['source'], 'template')
+        self.assertNotEqual(revised['factHash'], first['factHash'])
+        self.assertNotEqual(revised['text'], first['text'])

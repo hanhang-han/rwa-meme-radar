@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 
 from ..stock_identity import assess_pool_relation, manifest_status, token_identity
 from .factory_discovery import (
-    BSC_FACTORIES, FACTORY_SELECTOR, GET_PAIR_SELECTOR, GET_POOL_SELECTOR,
+    BSC_FACTORIES, FACTORIES_BY_CHAIN, FACTORY_SELECTOR, GET_PAIR_SELECTOR, GET_POOL_SELECTOR,
     QUOTE_SYMBOLS, _abi_text, _address_word, _word_address,
 )
 
@@ -50,13 +50,18 @@ class RetryableVerification(RuntimeError):
 
 def candidate_id(row: dict) -> str:
     """Keep a provider side change separate from the original pool claim."""
-    return ":".join((row["pool"], *sorted((row["token0"], row["token1"]))))
+    legacy = ":".join((row["pool"], *sorted((row["token0"], row["token1"]))))
+    chain = str(row.get('chainId') or CHAIN)
+    # Preserve already queued BNB IDs during rollout; other chains always
+    # have a prefix, so identical addresses never merge across chains.
+    return legacy if chain == CHAIN else chain + ':' + legacy
 
 
 async def queue_indexed_gap(system, row: dict, *, seen_at: int) -> bool:
     """Durably enqueue a valid official-side index observation once."""
+    chain_id = str(row.get('chainId') or CHAIN)
     official = [side for side in (row["token0"], row["token1"])
-                if token_identity(CHAIN, side)["eligibleForPair"]]
+                if token_identity(chain_id, side)["eligibleForPair"]]
     if len(official) != 1 or official[0] != row["stockSide"]:
         return False
     ident = candidate_id(row)
@@ -66,13 +71,15 @@ async def queue_indexed_gap(system, row: dict, *, seen_at: int) -> bool:
                          "indexedLiquidityUsd": row.get("liquidityUsd")})
         return False
     await system.patch_fact(KIND, ident, {
-        "id": ident, "chainId": CHAIN, "pool": row["pool"],
+        "id": ident, "chainId": chain_id, "pool": row["pool"],
         "token0": row["token0"], "token1": row["token1"],
-        "stockSide": official[0], "indexProvider": "DexScreener",
+        "stockSide": official[0], "indexProvider": row.get('indexProvider') or "DexScreener",
         "indexDexId": row.get("dexId"),
         "indexedLiquidityUsd": row.get("liquidityUsd"),
         "firstIndexedAt": seen_at, "lastIndexedAt": seen_at,
-        "status": "pending", "attempts": 0, "nextRetryAt": 0,
+        "status": "pending" if chain_id in FACTORIES_BY_CHAIN else 'needs-review',
+        "reason": None if chain_id in FACTORIES_BY_CHAIN else 'pinned-factory-unavailable',
+        "attempts": 0, "nextRetryAt": 0,
     })
     return True
 
@@ -110,7 +117,8 @@ async def _metadata(rpc: Rpc, token: str, block: str) -> dict[str, str]:
 
 async def verify_indexed_pool(rpc: Rpc, row: dict) -> dict:
     """Require code, exact sides, pinned factory, and canonical factory getter."""
-    if str(row.get("chainId")) != CHAIN:
+    cid = str(row.get('chainId'))
+    if cid not in FACTORIES_BY_CHAIN:
         raise QuarantinedPool("wrong-index-chain")
     pool, stock_side = row["pool"], row["stockSide"]
     expected = (row["token0"], row["token1"])
@@ -121,7 +129,7 @@ async def verify_indexed_pool(rpc: Rpc, row: dict) -> dict:
     if manifest_status()["status"] != "ready":
         raise CatalogueNotReady("official-manifest-unavailable")
     official = [(side, identity) for side in expected
-                if (identity := token_identity(CHAIN, side))["eligibleForPair"]]
+                if (identity := token_identity(cid, side))["eligibleForPair"]]
     if len(official) != 1 or official[0][0] != stock_side:
         raise QuarantinedPool("no-single-official-stock-side")
     chain_id = await rpc("eth_chainId", [])
@@ -129,7 +137,7 @@ async def verify_indexed_pool(rpc: Rpc, row: dict) -> dict:
         chain_number = int(chain_id, 16) if isinstance(chain_id, str) and chain_id.startswith("0x") else int(chain_id)
     except (ValueError, TypeError) as exc:
         raise QuarantinedPool("invalid-rpc-chain-id") from exc
-    if chain_number != 56:
+    if chain_number != int(cid):
         raise QuarantinedPool("rpc-chain-mismatch")
     # Pin all reads to one confirmed canonical block. Its predecessor is the
     # durable replay floor before the pool reaches the WebSocket filter.
@@ -164,7 +172,7 @@ async def verify_indexed_pool(rpc: Rpc, row: dict) -> dict:
         raise QuarantinedPool("pool-interface-invalid") from exc
     if {token0, token1} != set(expected) or int(token0, 16) >= int(token1, 16):
         raise QuarantinedPool("pool-sides-mismatch")
-    factory = next((factory for factory in BSC_FACTORIES if factory.address == factory_address), None)
+    factory = next((factory for factory in FACTORIES_BY_CHAIN[cid] if factory.address == factory_address), None)
     if factory is None:
         raise QuarantinedPool("unsupported-factory")
     factory_code = await rpc("eth_getCode", [factory.address, block])
@@ -201,14 +209,15 @@ async def verify_indexed_pool(rpc: Rpc, row: dict) -> dict:
 
 
 async def _catalogue_stock(chain, stock_side: str) -> dict | None:
-    identity = token_identity(CHAIN, stock_side)
+    cid = str(chain.scope)
+    identity = token_identity(cid, stock_side)
     stocks = await chain.all("stock")
     options = [stock for stock in stocks
-               if token_identity(CHAIN, stock.get("tokenContractAddress"))["underlyingId"] == identity["underlyingId"]]
+               if token_identity(cid, stock.get("tokenContractAddress"))["underlyingId"] == identity["underlyingId"]]
     return next((stock for stock in options
                  if str(stock.get("tokenContractAddress") or "").lower() == stock_side),
                 next((stock for stock in options
-                      if token_identity(CHAIN, stock.get("tokenContractAddress"))["tokenKind"] == "native"),
+                      if token_identity(cid, stock.get("tokenContractAddress"))["tokenKind"] == "native"),
                      options[0] if options else None))
 
 
@@ -228,6 +237,9 @@ def _independent_market_evidence(asset: dict | None) -> bool:
 
 async def register_verified_pool(chain, indexed: dict, proof: dict, *, now_ms: int) -> str:
     """Feed only verified pool/asset/relation facts into existing collectors."""
+    cid = str(chain.scope)
+    if cid != str(indexed.get('chainId')) or cid not in FACTORIES_BY_CHAIN:
+        raise QuarantinedPool('wrong-store-chain')
     pool = proof["pool"]
     previous_pool = await chain.get("pool", pool)
     if previous_pool:
@@ -247,7 +259,7 @@ async def register_verified_pool(chain, indexed: dict, proof: dict, *, now_ms: i
     # stock/Meme relation. Known quote contracts never become Meme relations.
     independent = _independent_market_evidence(asset)
     quote_named = str(proof["metadata"].get("symbol") or "").upper() in QUOTE_SYMBOLS
-    if counter in KNOWN_QUOTE_TOKENS:
+    if cid == CHAIN and counter in KNOWN_QUOTE_TOKENS:
         classification = "stock-quote"
     elif quote_named:
         classification = "stock-unclassified"
@@ -256,7 +268,7 @@ async def register_verified_pool(chain, indexed: dict, proof: dict, *, now_ms: i
     else:
         classification = "stock-unclassified"
     stock_address = str(stock["tokenContractAddress"]).lower()
-    relation_id = f"{CHAIN}:{pool}:{counter}:{stock_address}"
+    relation_id = f"{cid}:{pool}:{counter}:{stock_address}"
     previous = await chain.get("relation", relation_id) or {}
     if previous.get("confirmationStatus") == "orphaned":
         raise QuarantinedPool("orphaned-relation-requires-factory-event")
@@ -276,7 +288,7 @@ async def register_verified_pool(chain, indexed: dict, proof: dict, *, now_ms: i
     if classification != "stock-meme":
         if classification == "stock-unclassified" and not asset:
             await chain.patch_fact("asset", counter, {
-                "token": counter, "chain": CHAIN, "chainId": CHAIN,
+                "token": counter, "chain": cid, "chainId": cid,
                 "kind": "candidate", "firstSeen": now_ms,
                 "symbol": proof["metadata"].get("symbol") or counter[:8],
                 "name": proof["metadata"].get("name") or proof["metadata"].get("symbol") or counter,
@@ -286,21 +298,22 @@ async def register_verified_pool(chain, indexed: dict, proof: dict, *, now_ms: i
         return classification
     if not asset:
         await chain.patch_fact("asset", counter, {
-            "token": counter, "chain": CHAIN, "chainId": CHAIN,
+            "token": counter, "chain": cid, "chainId": cid,
             "kind": "candidate", "firstSeen": now_ms,
             "symbol": proof["metadata"].get("symbol") or counter[:8],
             "name": proof["metadata"].get("name") or proof["metadata"].get("symbol") or counter,
             "discoveryEventPending": False, "historicalDiscovery": True,
         })
     relation = {**previous,
-        "id": relation_id, "chainId": CHAIN, "pool": pool,
+        "id": relation_id, "chainId": cid, "pool": pool,
         "token": counter, "stock": stock_address,
         "stockSide": proof["stockSide"],
-        "ticker": token_identity(CHAIN, stock_address).get("ticker") or stock.get("stockCode"),
+        "ticker": token_identity(cid, stock_address).get("ticker") or stock.get("stockCode"),
         "token0": proof["token0"], "token1": proof["token1"],
         "wrapper": stock_address != proof["stockSide"],
-        "protocol": proof["protocol"], "factory": proof["factory"],
-        "firstSeen": previous.get("firstSeen") or now_ms,
+        "protocol": proof["protocol"], "factory": proof["factory"], "factoryVerified": True,
+        "poolType": "uniswap_v3" if proof.get("fee") is not None else "uniswap_v2",
+        "feeTier": proof.get("fee"), "firstSeen": previous.get("firstSeen") or now_ms,
         "checkedAt": now_ms, "status": "verified", "error": None,
         "historicalDiscovery": True, "creationAnnouncementPending": False,
     }
@@ -318,7 +331,7 @@ async def register_verified_pool(chain, indexed: dict, proof: dict, *, now_ms: i
 
 class PoolGapRepair:
     def __init__(self, chain, system, rpc: Rpc, *, clock=None):
-        if str(chain.scope) != CHAIN or str(system.scope) != "system":
+        if str(chain.scope) not in FACTORIES_BY_CHAIN or str(system.scope) != "system":
             raise ValueError("wrong-store-scope")
         self.chain, self.system, self.rpc = chain, system, rpc
         self.clock = clock or (lambda: int(time.time() * 1000))
@@ -329,6 +342,7 @@ class PoolGapRepair:
         now = self.clock()
         pending = [row for row in await self.system.all(KIND)
                    if row.get("status") in ("pending", "retry", "awaiting-classification")
+                   and str(row.get('chainId')) == str(self.chain.scope)
                    and (row.get("nextRetryAt") or 0) <= now]
         pending.sort(key=lambda row: (row.get("status") == "awaiting-classification",
                                       -(row.get("indexedLiquidityUsd") or 0), row["id"]))

@@ -40,10 +40,44 @@ export const price = (v, currency = 'USD') => {
 export const num = (v) =>
   finite(v) ? Number(v).toLocaleString('en-US', { maximumFractionDigits: 0 }) : missing();
 
+// Chart axes, price labels and OHLC show every leading zero, with four
+// significant digits. This changes display only, never the quote unit/value.
+export const priceNumber = v => {
+  if (!finite(v)) return missing();
+  const n = Number(v);
+  if (n !== 0 && Math.abs(n) < .001) {
+    return n.toLocaleString('en-US', {
+      useGrouping: false,
+      minimumSignificantDigits: 4,
+      maximumSignificantDigits: 4,
+    });
+  }
+  return price(n, 'USD').replace(/^\$/, '');
+};
+
 export const money = (v, currency) => {
   if (!finite(v)) return missing();
   if (currency === 'USD') return usd(v);
   return `${Number(v).toLocaleString('en-US', { maximumSignificantDigits: 8 })} ${currency || tr('币种未知', 'Currency unknown')}`;
+};
+
+// Live cells keep cents on large prices and readable leading zeros on small
+// prices. They do not truncate four-figure stock prices to whole dollars.
+export const livePrice = (v, currency = 'USD') => {
+  if (!finite(v)) return missing();
+  const n = Number(v), abs = Math.abs(n);
+  const value = abs >= 1 ? n.toLocaleString('en-US', {
+    minimumFractionDigits: 2, maximumFractionDigits: abs >= 100 ? 2 : 4,
+  }) : n.toLocaleString('en-US', {
+    useGrouping: false, minimumSignificantDigits: 4, maximumSignificantDigits: 6,
+  });
+  return currency === 'USD' ? `$${value}` : `${value} ${currency || tr('币种未知', 'Currency unknown')}`;
+};
+
+export const livePercent = v => {
+  if (!finite(v)) return missing();
+  const n = Number(v);
+  return Math.abs(n) > 10000 ? `${n < 0 ? '<' : '>'}10,000%` : `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 };
 
 export const pct = (v) => {
@@ -79,11 +113,11 @@ export const chainName = (a) => CHAIN_NAMES[a?.chainId ?? a?.chain ?? '196'] ?? 
 export const chain = (a) => String(a?.chainId ?? a?.chain ?? '196');
 
 export const explorer = (a, type = 'address', cid = '196') =>
-  cid === '4663'
+  String(cid) === '5042' ? null : String(cid) === '4663'
     ? `https://robinhoodchain.blockscout.com/${type === 'tx' ? 'tx' : 'address'}/${encodeURIComponent(a)}`
-    : cid === '56'
+    : String(cid) === '56'
       ? `https://www.oklink.com/bsc/${type}/${encodeURIComponent(a)}`
-      : `https://www.oklink.com/xlayer/${type}/${encodeURIComponent(a)}`;
+      : String(cid) === '196' ? `https://www.oklink.com/xlayer/${type}/${encodeURIComponent(a)}` : null;
 
 // Router paths (usable with RouterLink :to and router.push). For plain
 // <a href> anchors use hashLink below.

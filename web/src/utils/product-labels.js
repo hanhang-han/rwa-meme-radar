@@ -12,6 +12,18 @@ export function relationLevel(relation) {
   return null;
 }
 
+// A verified pool identity remains evidence even after its valuation expires.
+// This badge state does not upgrade the relationship into current A eligibility.
+export function relationBadgeType(relation) {
+  const recorded = relation?.status === 'verified'
+    && /^0x[0-9a-f]{40}$/i.test(String(relation?.pool ?? ''))
+    && /^0x[0-9a-f]{40}$/i.test(String(relation?.stock ?? ''));
+  if (recorded && relation?.evidenceStatus === 'issuer-deployment-unverified') return 'recorded-stock-unverified';
+  if (recorded && (relation?.evidenceStatus === 'liquidity-stale' || relation?.liquidityStatus === 'stale')) return 'recorded-pending';
+  if (recorded && relation?.evidenceStatus === 'liquidity-unknown') return 'recorded-no-valuation';
+  return relationLevel(relation) ?? (recorded ? 'recorded' : 'unknown');
+}
+
 export function relationStockIdentityStatus(relation) {
   const identities = [relation?.sideIdentity, relation?.stockIdentity];
   if (identities.some(identity => identity?.verificationStatus === 'legacy')) return 'legacy';

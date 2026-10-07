@@ -1,5 +1,6 @@
 import { createRouter, createWebHashHistory } from 'vue-router';
 import { chainScope, savedChainScope, saveChainScope } from '../utils/chain-scope';
+import { createNavigationScroll } from '../utils/navigation-scroll.js';
 
 const routes = [
   { path: '/live', name: 'live', component: () => import('../views/LiveView.vue') },
@@ -19,11 +20,14 @@ const routes = [
   { path: '/:pathMatch(.*)*', redirect: '/live' },
 ];
 
+const navigationScroll = createNavigationScroll();
 const router = createRouter({
   history: createWebHashHistory(),
   routes,
-  scrollBehavior: (to, from, saved) => saved ?? (to.path===from.path ? false : {top:0}),
+  scrollBehavior: navigationScroll.scrollBehavior,
 });
+
+router.beforeEach(navigationScroll.capture);
 
 router.beforeEach(async (to, from) => {
   if(to.meta.operator){

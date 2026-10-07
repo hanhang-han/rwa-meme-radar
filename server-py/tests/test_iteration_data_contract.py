@@ -190,7 +190,7 @@ class OverviewBudgetTests(unittest.TestCase):
                   {'chainId': '56', 'token': 'unknown'}]
         result = newly_discovered_assets(assets, NOW)
         self.assertEqual(result['value'], 2)
-        self.assertEqual(result['byChain'], {'56': 1, '196': 1, '4663': 0})
+        self.assertEqual(result['byChain'], {'56': 1, '196': 1, '4663': 0, '5042': 0})
         self.assertEqual(result['from'], NOW-86_400_000)
 
     def test_rankings_use_full_universe_and_do_not_mix_stale_currency_or_chains(self):

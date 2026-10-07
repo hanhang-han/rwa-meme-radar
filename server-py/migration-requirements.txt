@@ -1,0 +1,3 @@
+# Only for migration tooling; does not change the application's runtime pins.
+psycopg[binary]==3.2.10
+sqlglot==27.28.1

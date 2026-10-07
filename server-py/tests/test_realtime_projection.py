@@ -20,21 +20,25 @@ from app.realtime_schema import enqueue_event
 class ProjectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
         self.path = self.temp.name + '/research.sqlite'
         self.saved_stores = storage._stores
+        self.addCleanup(setattr, storage, '_stores', self.saved_stores)
         storage._stores = {}
+        # All scopes in this fixture share one guard, without retaining an
+        # asyncio lock that a previous test bound to its now-closed loop.
+        self.write_lock = storage.WriterLock()
+        self.addAsyncCleanup(storage.close_all)
+        self.addAsyncCleanup(projection.stop_projection_queries)
         for chain in ('196', '56', '4663', 'system'):
-            storage._stores[chain] = await ResearchStore(self.path, chain).connect()
+            scoped = ResearchStore(self.path, chain, write_lock=self.write_lock)
+            storage._stores[chain] = scoped
+            await scoped.connect()
         self.s = storage._stores['196']
         self.sources = patch.object(projection, 'SHARED_FILES', ())
         self.sources.start()
+        self.addCleanup(self.sources.stop)
         projection._file_signatures.clear()
-
-    async def asyncTearDown(self):
-        self.sources.stop()
-        await storage.close_all()
-        storage._stores = self.saved_stores
-        self.temp.cleanup()
 
     async def put_asset(self, **changes):
         now = int(time.time()*1000)
@@ -58,6 +62,20 @@ class ProjectionTests(unittest.IsolatedAsyncioTestCase):
             external.commit()
         self.assertEqual((await self.s.get('asset', 'external'))['price'], 2)
         self.assertEqual((await (await self.s.db.execute('SELECT COUNT(*) FROM change_outbox')).fetchone())[0], 1)
+
+    async def test_publication_reports_bounded_stage_timings_and_idle_keeps_committed_cursor(self):
+        await self.put_asset()
+        result = await self.tick()
+        self.assertTrue(result['changed'])
+        self.assertEqual(set(result['stagesMs']), {'bridgeMs', 'snapshotReadMs', 'factReadMs',
+                         'reloadMs', 'payloadMs', 'compactMs', 'deltaMs', 'pageViewsMs',
+                         'encodeMs', 'writerWaitMs', 'commitMs'})
+        self.assertTrue(all(value >= 0 for value in result['stagesMs'].values()))
+        idle = await self.tick(expiry_ms=60_000)
+        self.assertFalse(idle['changed'])
+        self.assertEqual(idle['inputCursor'], result['inputCursor'])
+        self.assertEqual(idle['revision'], result['revision'])
+        self.assertEqual(projection._building_timings.get(), None)
 
     async def test_read_helpers_do_not_pin_a_busy_snapshot_between_jobs(self):
         await self.s.put('asset', 'a', {'price': 1})
@@ -134,6 +152,53 @@ class ProjectionTests(unittest.IsolatedAsyncioTestCase):
             stored = reader.execute('SELECT body FROM dashboard_projection').fetchone()[0]
             self.assertIsInstance(stored, bytes)
             self.assertEqual(json.loads(projection._decode_snapshot(stored)), snapshot)
+
+    async def test_outbox_maintenance_keeps_unconsumed_rows_and_safety_window(self):
+        with closing(sqlite3.connect(self.path)) as writer:
+            writer.executemany('INSERT INTO change_outbox VALUES (?,?,?,?,?)',
+                [(i, 'candle', '196:t', 'update', 1) for i in range(1, 1251)])
+            writer.commit()
+        self.assertEqual((await projection.prune_consumed_outbox())['updated'], 0)
+        # The consumed watermark, not the newest outbox id, authorizes pruning.
+        await self.s.db.execute('INSERT INTO dashboard_projection VALUES (?,?,?,?,?,?)',
+                                ('full', 1, 0, 1200, '{}', 1))
+        await self.s.db.commit()
+        self.assertEqual((await projection.prune_consumed_outbox())['updated'], 64)
+        rows = await self.s.fetchall('SELECT id FROM change_outbox ORDER BY id')
+        self.assertEqual([row[0] for row in rows], list(range(65, 1251)))
+        while (await projection.prune_consumed_outbox())['updated']:
+            pass
+        self.assertEqual([row[0] for row in await self.s.fetchall('SELECT id FROM change_outbox ORDER BY id')],
+                         list(range(201, 1251)))
+        # The remaining rows include all 1000 consumed overlap ids, plus the
+        # 50 changes that have not yet appeared in a committed publication.
+        await self.s.db.execute("UPDATE dashboard_projection SET input_cursor=1000 WHERE name='full'")
+        await self.s.db.commit()
+        self.assertEqual((await projection.prune_consumed_outbox())['updated'], 0)
+
+    async def test_outbox_cleanup_failure_rolls_back_without_blocking_publication(self):
+        await self.put_asset(price=1)
+        with closing(sqlite3.connect(self.path)) as writer:
+            writer.executemany('INSERT INTO change_outbox(kind,entity,operation,at) VALUES (?,?,?,?)',
+                [('candle', '196:t', 'update', 1)] * 1200)
+            # Even failure partway through DELETE must restore the full batch.
+            writer.executescript('''CREATE TRIGGER reject_outbox_delete BEFORE DELETE ON change_outbox
+                WHEN OLD.id=2 BEGIN SELECT RAISE(ABORT,'simulated cleanup failure'); END;''')
+            writer.commit()
+        full = await self.tick()
+        self.assertTrue(full['changed'])
+        count = (await self.s.fetchone('SELECT COUNT(*) FROM change_outbox'))[0]
+        with self.assertRaisesRegex(sqlite3.IntegrityError, 'simulated cleanup failure'):
+            await projection.prune_consumed_outbox()
+        self.assertEqual((await self.s.fetchone('SELECT COUNT(*) FROM change_outbox'))[0], count)
+        # A tape-only publication also advances successfully while the
+        # independently failing cleanup trigger remains installed.
+        await self.s.db.execute("INSERT INTO change_outbox(kind,entity,operation,at) VALUES ('candle','196:t','update',1)")
+        await self.s.db.commit()
+        tape = await self.tick()
+        self.assertFalse(tape['changed'])
+        self.assertGreater(tape['inputCursor'], full['inputCursor'])
+        self.assertEqual((await projection.read_projection())['unified']['assets'][0]['price'], 1)
 
     async def test_page_delta_uses_actual_previous_http_dto_across_format_upgrade(self):
         await self.put_asset()

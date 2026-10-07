@@ -19,7 +19,7 @@ export async function collectDashboard(){
   try {
     // Rotate first service for fairness; one shared budget bounds all chains.
     const chains=['196','56','4663'];const offset=cycle++%3;
-    for(const chain of chains)restoreOkxCatalogue(chain);
+    for(const chain of chains)await restoreOkxCatalogue(chain);
     const failures:string[]=[];
     for(const chain of [...chains.slice(offset),...chains.slice(0,offset)]){
       const catalogueDue=source(chain).status==='partial'||!!source(chain).error||!source(chain).updatedAt||Date.now()-source(chain).updatedAt!>6*3600000;
@@ -49,9 +49,9 @@ export function sumKnown(rows:any[],field:string){const values=rows.map(r=>r[fie
 // liquidity pool; they are never stock-impersonating memes, so they stay in
 // pool structures (pair detail) but leave the meme/relationship rankings.
 const BASE_QUOTE_SYMBOLS = new Set(["WBNB","BTCB","WBTC","WETH","USDT","USDC","USD1","xBTC","xUSD"]);
-export function dashboardState(){
-  for(const chain of Object.keys(networks))restoreOkxCatalogue(chain);
-  const snapshots=Object.keys(networks).map(chain=>({chain,data:inNetwork(chain,source(chain),xLayerState)}));
+export async function dashboardState(){
+  for(const chain of Object.keys(networks))await restoreOkxCatalogue(chain);
+  const snapshots=await Promise.all(Object.keys(networks).map(async chain=>({chain,data:await inNetwork(chain,source(chain),xLayerState)})));
   const base=unifiedFromXLayer(snapshots.find(s=>s.chain==='196')!.data,okxState,robinhoodState,binanceState);
   const attach=(row:any,chain:string)=>({...row,chainId:chain,chainName:networks[chain].name,provider:'OKX',sourceId:`okx:${chain}`,assetId:identity(chain,row.token),fieldTimes:row.fieldTimes??{}});
   const assets=snapshots.flatMap(s=>s.data.assets.filter(a=>a.kind==='candidate'&&!BASE_QUOTE_SYMBOLS.has(String(a.symbol??"").toUpperCase())).map(a=>enrichAsset(attach(a,s.chain))));
@@ -95,16 +95,16 @@ export function dashboardState(){
     actionableAssets:new Set(valued.filter(r=>(r.liquidityUsd??0)>=1000).map(r=>identity(r.chainId,r.token))).size,
     pairedLiquidityUsd:sumKnown(valued,'liquidityUsd').value,liquidityCoverage:{valued:valued.filter(r=>r.liquidityUsd!=null).length,total:pools.length},
     newRelations24h:relations.filter(r=>r.firstSeen>=Date.now()-86400000).length};
-  return {...base,version:2,sources:[...base.sources,...enrichmentSources()],assets,relations,signals,stockTokens,metrics,capabilities,collection:collectionStatus(),
+  return {...base,version:2,sources:[...base.sources,...enrichmentSources()],assets,relations,signals,stockTokens,metrics,capabilities,collection:await collectionStatus(),
     quality:dataQuality(assets,stockTokens,relations),groups:groupCandidates(assets,relations),sectors:snapshots.flatMap(s=>s.data.sectors.map(b=>({...b,chainId:s.chain}))),
     distribution:snapshots.map(s=>{const list=assets.filter(a=>a.chainId===s.chain&&a.kind==='candidate');return {chainId:s.chain,name:networks[s.chain].name,assets:list.length,volume:sumKnown(list.filter(a=>current(a.fieldTimes?.volume24h)),'volume24h'),liquidity:sumKnown(valued.filter(r=>r.chainId===s.chain),'liquidityUsd')};})};
 }
-export function dashboardDetail(chain:string,address:string){
+export async function dashboardDetail(chain:string,address:string){
   if(!networks[chain])return null;
-  return inNetwork(chain,source(chain),()=>{
-    const result=xLayerDetail(address);if(!result)return null;
+  return inNetwork(chain,source(chain),async()=>{
+    const result=await xLayerDetail(address);if(!result)return null;
     return {...result,asset:enrichAsset({...result.asset,chainId:chain,chainName:networks[chain].name,provider:'OKX'}),stock:result.stock?enrichStock({...result.stock,chainId:chain,stockIdentity:stockIdentity(result.stock)}):result.stock,
       relations:result.relations.map(r=>enrichRelation({...r,chainId:chain})),stocks:result.stocks?.map((s:any)=>({...s,stock:s.stock?enrichStock({...s.stock,chainId:chain,stockIdentity:stockIdentity(s.stock)}):s.stock}))};
   });
 }
-export function dashboardEvents(chain:string,before?:{t:number;id:string},limit=50){return inNetwork(chain,source(chain),()=>networkEvents(before,limit));}
+export async function dashboardEvents(chain:string,before?:{t:number;id:string},limit=50){return inNetwork(chain,source(chain),()=>networkEvents(before,limit));}

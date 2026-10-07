@@ -2,8 +2,8 @@
 
 Public contract: https://docs.gopluslabs.io/reference/response-details
 GoPlus percentages are fractions (1 = 100%). Empty fields are unknown.
-The API's top ten include pools and custodians; never publish an adjusted
-concentration or overwrite holder counts from this response.
+The API's top ten include pools and custodians; only publish the documented provider top-ten sum after
+pool and burn exclusions or overwrite holder counts from this response.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from ..config import bounded_env_int
 from ..db import store
 
 API = "https://api.gopluslabs.io/api/v1"
-CHAINS = ("196", "56", "4663")
+CHAINS = ("196", "56", "4663", "5042")
 ADDRESS = re.compile(r"0x[0-9a-f]{40}\Z", re.I)
 BURNS = {"0x" + "0" * 40, "0x" + "0" * 36 + "dead"}
 DAY = 86_400_000
@@ -54,11 +54,12 @@ def _address(value):
     return str(value).lower() if ADDRESS.fullmatch(str(value or "")) else None
 
 
-def _holders(row):
+def _holders(row, known_pools=None):
     holders = row.get("holders")
     if not isinstance(holders, list) or not holders or len(holders) > 10:
         return {"top10RawPercent": None, "sampleHolderCount": 0}
     values, seen = [], set()
+    records = []
     for holder in holders:
         if not isinstance(holder, dict):
             return {"top10RawPercent": None, "sampleHolderCount": 0}
@@ -67,12 +68,23 @@ def _holders(row):
             return {"top10RawPercent": None, "sampleHolderCount": 0}
         seen.add(address)
         values.append(pct)
+        records.append({"address": address, "percent": pct, "isContract": _boolean(holder.get("is_contract"))})
     total = sum(values)
     count = _number(row.get("holder_count"))
     complete = len(values) == 10 or (count is not None and 0 < count <= len(values) and count.is_integer())
-    return {"top10RawPercent": min(100, total) if complete and total <= 100.000001 else None,
+    pools = set(known_pools or ())
+    dex = row.get("dex")
+    dex_addresses = {_address(item.get("pair")) for item in dex or [] if isinstance(item, dict)} if isinstance(dex, list) else set()
+    pools |= {address for address in dex_addresses if address}
+    exclusions_applied = bool(pools) and complete and total <= 100.000001
+    excluded = pools | BURNS
+    adjusted = sum(item['percent'] for item in records if item['address'] not in excluded) if exclusions_applied else None
+    return {"top10AdjustedPercent": adjusted, "excludedKnownAddresses": exclusions_applied,
+            "excludedAddresses": [item['address'] for item in records if item['address'] in excluded],
+            "contractAddressCount": sum(item['isContract'] is True for item in records if item['address'] not in excluded),
+            "top10RawPercent": min(100, total) if complete and total <= 100.000001 else None,
             "sampleHolderCount": len(values), "samplePercent": total if total <= 100.000001 else None,
-            "exclusionsApplied": False, "scope": "provider-top10-including-pools"}
+            "exclusionsApplied": exclusions_applied, "scope": "provider-top10-excluding-pools-burn" if exclusions_applied else "provider-top10-including-pools"}
 
 
 def _liquidity_lock(row, at):
@@ -128,7 +140,7 @@ def _liquidity_lock(row, at):
             "nextUnlockAt": min(ends) if ends else None}
 
 
-def normalize_goplus(chain, token, row, at):
+def normalize_goplus(chain, token, row, at, *, known_pools=None):
     """Return only security fields, never quote, identity, supply or holders."""
     chain, token = str(chain), _address(token)
     if not token or not isinstance(row, dict) or not row:
@@ -136,7 +148,7 @@ def normalize_goplus(chain, token, row, at):
     scan = {"provider": "GoPlus", "chainId": chain, "token": token,
             "checkedAt": at, "receivedAt": at, "timeKind": "observed",
             "sourceUrl": f"{API}/token_security/{chain}?contract_addresses={token}"}
-    for field, raw in (("honeypot", "is_honeypot"), ("mintable", "is_mintable"),
+    for field, raw in (("honeypot", "is_honeypot"), ("cannotSellAll", "cannot_sell_all"), ("mintable", "is_mintable"),
                        ("pausable", "transfer_pausable"), ("blacklist", "is_blacklisted"),
                        ("proxy", "is_proxy"), ("openSource", "is_open_source"),
                        ("ownerChangeBalance", "owner_change_balance"),
@@ -145,13 +157,17 @@ def normalize_goplus(chain, token, row, at):
         scan[field] = _boolean(row.get(raw))
     scan.update(buyTaxPct=_percent(row.get("buy_tax")), sellTaxPct=_percent(row.get("sell_tax")),
                 ownerAddress=_address(row.get("owner_address")),
-                creatorAddress=_address(row.get("creator_address")))
+                creatorAddress=_address(row.get("creator_address")),
+                creatorHoldingPercent=_percent(row.get("creator_percent")))
     fields = ("honeypot", "mintable", "pausable", "blacklist", "buyTaxPct", "sellTaxPct")
     scan["status"] = "complete" if all(scan[field] is not None for field in fields) else "partial"
     observation = {"provider": "GoPlus", "checkedAt": at, "timeKind": "observed",
                    "chainId": chain, "token": token,
-                   "holders": _holders(row), "liquidityLock": _liquidity_lock(row, at)}
-    return {"tokenScan": scan, "securityObservation": observation}
+                   "holders": _holders(row, known_pools), "liquidityLock": _liquidity_lock(row, at)}
+    result = {"tokenScan": scan, "securityObservation": observation}
+    if observation['holders'].get('excludedKnownAddresses') is True:
+        result['holderDistribution'] = {**observation['holders'], 'provider': 'GoPlus', 'checkedAt': at}
+    return result
 
 
 async def _request(client, path, params=None):
@@ -164,14 +180,22 @@ async def _request(client, path, params=None):
 
 
 async def _due_assets(s, now, ttl, limit):
-    rows = await s.fetchall("""SELECT a.id FROM facts a
+    from ..demand_leases import all_leases
+    from .live_quotes import core_assets
+    active = {a['token'] for a in await core_assets(s.scope, s, now)} if s.scope in ('196', '56', '4663', '5042') else set()
+    active |= {row.get('token') for row in await all_leases(s, 'watch') if row.get('expiresAt', 0) > now}
+    # Identity can remain valid while its valuation is stale; active risks
+    # must not disappear from this priority set when pool pricing is delayed.
+    active |= {r.get('token') for r in await s.all('relation') if r.get('status') == 'verified'}
+    rows = await s.fetchall("""SELECT a.id,COALESCE(json_extract(j.body,'$.lastAttemptAt'),0) FROM facts a
         LEFT JOIN facts j ON j.kind=? AND j.id=a.id
         WHERE a.kind=? AND json_extract(a.body,'$.kind')='candidate'
           AND COALESCE(json_extract(j.body,'$.nextAttemptAt'),0)<=?
           AND COALESCE(json_extract(a.body,'$.tokenScan.checkedAt'),0)<=?
-        ORDER BY COALESCE(json_extract(j.body,'$.lastAttemptAt'),0),a.id LIMIT ?""",
-        (s.key("risk-attempt"), s.key("asset"), now, now - ttl, limit))
-    return [str(row[0]).lower() for row in rows if _address(row[0])]
+        ORDER BY COALESCE(json_extract(j.body,'$.lastAttemptAt'),0),a.id""",
+        (s.key("risk-attempt"), s.key("asset"), now, now - ttl))
+    rows.sort(key=lambda row: (row[0] not in active, row[1], row[0]))
+    return [str(row[0]).lower() for row in rows[:limit] if _address(row[0])]
 
 
 async def refresh_risk_enrichment():
@@ -222,10 +246,10 @@ async def _refresh():
             await asyncio.sleep(REQUEST_GAP_SECONDS)
         queues = []
         for chain in CHAINS:
-            s = await store(chain)
             if chain not in support.get("chains", []):
                 result["unsupported"] += 1
                 continue
+            s = await store(chain)
             queues.append((s, await _due_assets(s, now, ttl, limit)))
         # Interleave chains so one chain cannot consume a fresh daily budget.
         selected = [(s, tokens[index]) for index in range(limit)
@@ -242,7 +266,8 @@ async def _refresh():
                 row = body.get(token) if isinstance(body, dict) else None
                 if not isinstance(row, dict) or not row:
                     raise ValueError("token-security-unavailable")
-                patch = normalize_goplus(s.scope, token, row, int(time.time() * 1000))
+                known_pools = {p.get('pool') for p in await s.all('pool') if token in (p.get('token0'), p.get('token1'))}
+                patch = normalize_goplus(s.scope, token, row, int(time.time() * 1000), known_pools=known_pools)
                 await s.patch_fact("asset", token, patch)
                 await s.put("risk-attempt", token, {"lastAttemptAt": attempted,
                                                    "nextAttemptAt": attempted + ttl, "status": "accepted"})
@@ -259,5 +284,6 @@ async def _refresh():
                 await asyncio.sleep(REQUEST_GAP_SECONDS)
     await system.put("collector", "goplus", {**result, "lastAttemptAt": now,
         "dailyUsed": budget["used"], "dailyLimit": daily, "ttlMs": ttl,
-        "supportedChains": support.get("chains", [])})
+        "supportedChains": support.get("chains", []), "activePriority": True,
+        "maxSixHourlyAssets": daily // 4, "budgetPolicy": "existing-daily-cap"})
     return result

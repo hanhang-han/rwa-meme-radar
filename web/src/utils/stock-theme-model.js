@@ -15,11 +15,30 @@ export function stockTicker(stock) {
   return normalizeTicker(stock?.stockIdentity?.code ?? stock?.stockCode ?? stock?.ticker);
 }
 
-const COMPANY_NAMES_ZH = {AAPL:'苹果',AMD:'超威半导体',AMZN:'亚马逊',BABA:'阿里巴巴',COIN:'Coinbase',GME:'游戏驿站',GOOGL:'谷歌',HOOD:'Robinhood',INTC:'英特尔',META:'Meta',MSFT:'微软',NVDA:'英伟达',NFLX:'奈飞',QQQ:'纳斯达克100指数ETF',SPY:'标普500指数ETF',TSLA:'特斯拉',TSM:'台积电',MU:'美光科技',PLTR:'帕兰提尔','700':'腾讯控股','1810':'小米集团','9992':'泡泡玛特'};
+const COMPANY_NAMES_ZH = {AAPL:'苹果',AMD:'超威半导体',AMZN:'亚马逊',BABA:'阿里巴巴',COIN:'Coinbase',GME:'游戏驿站',GOOGL:'谷歌',HOOD:'Robinhood',INTC:'英特尔',META:'Meta',MSFT:'微软',NVDA:'英伟达',NFLX:'奈飞',QQQ:'纳斯达克100指数ETF',SPY:'标普500指数ETF',TSLA:'特斯拉',TSM:'台积电',MU:'美光科技',PLTR:'帕兰提尔','1':'长江和记实业','700':'腾讯控股','1024':'快手','1038':'长江基建','1088':'中国神华','1093':'石药集团','1810':'小米集团','9992':'泡泡玛特'};
+const HK_COMPANY_NAMES_EN = {'1':'CK Hutchison','700':'Tencent','1024':'Kuaishou','1038':'CK Infrastructure','1088':'China Shenhua','1093':'CSPC Pharmaceutical','1810':'Xiaomi','9992':'Pop Mart'};
 export function stockThemeName(stock, ticker, language='zh') {
   const identity=stock?.stockIdentity, code=normalizeTicker(ticker||stockTicker(stock));
-  return language==='en' ? identity?.nameEn || stock?.tokenName || code
+  return language==='en' ? identity?.nameEn || HK_COMPANY_NAMES_EN[code] || stock?.tokenName || code
     : identity?.nameZh || COMPANY_NAMES_ZH[code] || identity?.nameEn || stock?.tokenName || code;
+}
+
+// Padding is presentation only. Routes and relation lookups keep normalized keys.
+export function stockThemeCodeLabel(stock, ticker, language='zh') {
+  const code=normalizeTicker(ticker||stockTicker(stock));
+  const exchange=String(stock?.stockIdentity?.market??stock?.stockIdentity?.exchange??'').toUpperCase();
+  const isHongKong=Object.hasOwn(HK_COMPANY_NAMES_EN,code)||['HKEX','SEHK','XHKG','HKG','HK'].includes(exchange);
+  return isHongKong && /^\d{1,5}$/.test(code)
+    ? `${language==='en'?'HK':'港股'} · ${code.padStart(5,'0')}` : code;
+}
+
+export function stockAtlasCards(cards = [], limit = 6) {
+  // Keep empty themes in the directory, but give existing relationships room in the atlas.
+  const paired=cards.filter(card=>Number(card.theme?.pairedCount)>0);
+  const named=cards.filter(card=>Number(card.theme?.nameCount)>0);
+  const visible=paired.length?paired:named.length?named:cards;
+  return visible.slice().sort((a,b)=>Number(b.theme?.volume?.known>0)-Number(a.theme?.volume?.known>0)
+    || Number(b.theme?.pairedCount??0)-Number(a.theme?.pairedCount??0)).slice(0,limit);
 }
 
 // These are the same eligibility windows used by the published active-Meme KPI.
@@ -85,6 +104,28 @@ export function buildPoolRows(relations = [], assets = [], { scope = 'all', qual
   });
 }
 
+// Pool identity survives an expired valuation. Keep these records separate
+// from current A/B rows so they cannot enter current volume or share totals.
+export function buildRecordedPoolRows(relations = [], assets = [], { scope = 'all', activeKeys = [] } = {}) {
+  const address = value => /^0x[0-9a-f]{40}$/i.test(String(value ?? ''));
+  const assetIndex = new Map(assets.map(asset => [keyOf(asset), asset]));
+  const excluded = new Set(activeKeys);
+  const records = new Map();
+  for (const relation of relations) {
+    if (relation?.status !== 'verified' || !address(relation.pool) || !address(relation.stock) || !inChainScope(relation, scope)) continue;
+    const chainId = String(relation.chainId ?? relation.chain ?? '');
+    const key = `${chainId}:${String(relation.pool).toLowerCase()}`;
+    const asset = assetIndex.get(keyOf(relation)) ?? null;
+    if (excluded.has(key) || asset?.assetCategory === 'derivative') continue;
+    const previous = records.get(key);
+    if (previous && Number(previous.relation.checkedAt ?? 0) > Number(relation.checkedAt ?? 0)) continue;
+    records.set(key, { key, chainId, token:relation.token, relation, asset,
+      detailAvailable:asset != null && address(asset.token ?? asset.tokenContractAddress),
+    });
+  }
+  return [...records.values()].sort((a,b)=>Number(b.relation.checkedAt??0)-Number(a.relation.checkedAt??0)||a.key.localeCompare(b.key));
+}
+
 export function buildStockTheme({ ticker, stockTokens = [], assets = [], relations = [], events = [], scope = 'all', now = Date.now() }) {
   const selectedTicker = normalizeTicker(ticker);
   const versions = stockTokens.filter(stock => stockTicker(stock) === selectedTicker && inChainScope(stock, scope));
@@ -93,6 +134,7 @@ export function buildStockTheme({ ticker, stockTokens = [], assets = [], relatio
     || stockKeys.has(keyOf({ ...relation, token:relation.stock }));
   const paired = buildPoolRows(relations.filter(matchesTicker), assets, { scope, now })
     .filter(pool => pool.asset?.assetCategory !== 'derivative');
+  const recordedPools = buildRecordedPoolRows(relations.filter(matchesTicker), assets, { scope, activeKeys:paired.map(pool=>pool.key) });
   const rowsByKey = new Map();
   for (const pool of paired) {
     const key = keyOf(pool.relation);
@@ -122,8 +164,9 @@ export function buildStockTheme({ ticker, stockTokens = [], assets = [], relatio
   const groupedEvents = new Map();
   const eventIds = new Set();
   for (const event of events) {
-    if (event.id && eventIds.has(event.id)) continue;
-    if (event.id) eventIds.add(event.id);
+    const deliveryKey=event.id?`${event.chainId??event.relation?.chainId??''}:${event.id}`:null;
+    if (deliveryKey && eventIds.has(deliveryKey)) continue;
+    if (deliveryKey) eventIds.add(deliveryKey);
     const relation = event.relation ?? {};
     const chainId = String(event.chainId ?? relation.chainId ?? '');
     const token = normalizeEventAddress(event.asset ?? relation.token ?? event.token, chainId);
@@ -137,12 +180,13 @@ export function buildStockTheme({ ticker, stockTokens = [], assets = [], relatio
     const at = time(event.t ?? event.at ?? event.verifiedAt ?? event.discoveredAt);
     if (!at || at > now) continue;
     const pool = event.pool ?? relation.pool ?? '';
-    const key = `${row.key}:${kind}:${String(pool).toLowerCase()}`;
+    const stock=String(event.stock??relation.stock??eventTicker??selectedTicker).toLowerCase();
+    const key = `${chainId}:${String(pool).toLowerCase()||row.key}:${stock}:${kind}`;
     const previous = groupedEvents.get(key);
-    if (!previous) groupedEvents.set(key, { key, chainId, token, kind, at, pool, asset:row.asset, count:1 });
+    if (!previous) groupedEvents.set(key, { key, chainId, token, kind, at, pool, stock, ticker:eventTicker||selectedTicker, dex:event.dex??relation.protocol, asset:row.asset, count:1 });
     else { previous.at = Math.max(previous.at, at); previous.count += 1; }
   }
-  return { ticker:selectedTicker, versions, rows, pools:paired, pairedCount:pairs.length,
+  return { ticker:selectedTicker, versions, rows, pools:paired, recordedPools, pairedCount:pairs.length,
     nameCount:rows.length - pairs.length,
     volume:{ value:total, known:known.length, total:pairs.length, complete },
     concentrated:complete && rows.some(row => row.volumeShare > .5),

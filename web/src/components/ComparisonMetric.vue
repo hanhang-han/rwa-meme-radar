@@ -1,5 +1,5 @@
 <template>
-  <span class="comparison-metric">
+  <span class="comparison-metric" :title="metricTitle">
     <strong :class="{ 'kpi-flash': flash }">{{ metric.value == null ? '—' : `${metric.value >= 0 ? '+' : ''}${metric.value.toFixed(2)}${unit === 'pp' ? tr(' 个百分点', ' pp') : '%'}` }}</strong>
     <small>{{ description }}</small>
     <small v-if="metric.value != null">{{ date(metric.at) }}</small>
@@ -53,6 +53,7 @@ const reasons = {
 const description = computed(() => metric.value.value == null
   ? tr(...(reasons[metric.value.reason] ?? ['数据暂不可用', 'Data unavailable']))
   : metric.value.status === 'realtime' ? tr('实时报价 · 同期比较', 'Live quotes · time-aligned') : metric.value.status === 'delayed' ? tr('延迟报价 · 同期比较', 'Delayed quotes · time-aligned') : tr('快照报价 · 非实时', 'Snapshot quotes · not live'));
+const metricTitle = computed(() => `${props.unit==='pp' ? tr('涨跌差，单位百分点；正值表示 Meme 涨幅更高。','Return difference in percentage points; positive means Meme performed better.') : tr('相对价差，单位 %；正值表示高于比较报价。','Relative price difference in %; positive means above the comparison quote.')} · ${description.value}${metric.value.value!=null?' · '+date(metric.value.at):''}`);
 const flash = ref(false); let timer;
 watch(() => metric.value.value, (n, o) => {
   if (n == null || o == null || n === o) return;

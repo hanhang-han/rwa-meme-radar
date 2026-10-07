@@ -27,9 +27,21 @@ def relation(**changes):
 
 
 class StockIdentityTest(unittest.TestCase):
+    def test_unknown_and_malformed_addresses_keep_version_without_recounting_manifest(self):
+        version = manifest_status()['version']
+        with patch('app.stock_identity.manifest_status', side_effect=AssertionError('catalogue-recount')):
+            for address in ('0x' + '9'*40, None, 'malformed'):
+                row = token_identity('196', address, 'NVDA')
+                self.assertEqual(row['manifestVersion'], version)
+                self.assertEqual(row['verificationStatus'], 'unverified')
+                self.assertFalse(row['eligibleForPair'])
+                self.assertIsNone(row['ticker'])
+        with patch('app.stock_identity._manifest', side_effect=OSError('missing')):
+            self.assertIsNone(token_identity('196', NATIVE)['manifestVersion'])
+
     def test_pinned_official_addresses_are_chain_scoped(self):
         self.assertEqual(manifest_status()['status'], 'ready')
-        self.assertEqual(manifest_status()['entries'], 4592)
+        self.assertEqual(manifest_status()['entries'], 4786)
         native = token_identity('196', NATIVE, 'WRONG')
         wrapper = token_identity('196', WRAPPER, 'WRONG')
         self.assertEqual(native['verificationStatus'], 'official')

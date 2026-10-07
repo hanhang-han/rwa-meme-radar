@@ -37,10 +37,12 @@ ADDRESS = re.compile(r'^0x[a-f0-9]{40}$')
 CODE = re.compile(r'^cx_[A-Za-z0-9_-]{32}$')
 USERNAME = re.compile(r'^[A-Za-z][A-Za-z0-9_]{4,31}bot$', re.I)
 TOKEN = re.compile(r'^\d{5,}:[A-Za-z0-9_-]{20,}$')
-CHAINS = {'196', '56', '4663'}
+CHAINS = {'196', '56', '4663', '5042'}
 RISK_LABELS = {'wash_suspect': '成交结构异常', 'thin_spike': '低流动性大幅波动',
                'holder_anomaly': '持币地址数据异常', 'contract_risk': '合约风险',
-               'concentrated': '持仓集中', 'liquidity_unlock': '流动性锁定风险'}
+               'concentrated': '持仓集中', 'liquidity_unlock': '流动性锁定风险',
+               'tax': '买卖税或无法卖出', 'permissions': '合约权限',
+               'concentration': '前十持仓', 'creator': '创建者持仓', 'creatorHolding': '创建者持仓', 'liquidityLock': 'LP 锁定'}
 _lock = threading.Lock()
 _initialized = set()
 _tick_lock = asyncio.Lock()
@@ -68,15 +70,18 @@ def _offset_key():
 
 
 def capabilities():
-    # The existing chain swap writer records provisional swaps only. Closed
-    # candle bars are not transaction finality and must not enable this class.
+    init()
+    with access.connection() as db:
+        feed = _runtime(db, 'confirmed_trade_feed', {})
+    available = (feed.get('validated') is True and 0 <= now_ms()-feed.get('updatedAt', 0) <= MAX_EVENT_AGE_MS)
     return {'newPool': {'available': True}, 'riskChange': {'available': True},
-            'largeTrade': {'available': False, 'reason': 'confirmed-trade-feed-unavailable'}}
+            'largeTrade': {'available': available, 'reason': None if available else 'confirmed-trade-feed-unavailable',
+                           'evidenceAt': feed.get('updatedAt')}}
 
 
 def init():
     user_features.init()
-    path = str(access._path().resolve())
+    path = access._storage_key()
     with _lock:
         if path in _initialized:
             return
@@ -262,7 +267,7 @@ def _template(event):
 
 def _enqueue(db, event, now):
     """Target matching, preference gates, cooldown and dedupe share one tx."""
-    if event['category'] == 'largeTrade' and not capabilities()['largeTrade']['available']:
+    if event['category'] == 'largeTrade' and event.get('tradeConfirmed') is not True:
         return 0
     if not _finite(event.get('at')) or not 0 <= now-event['at'] <= MAX_EVENT_AGE_MS:
         return 0
@@ -301,11 +306,62 @@ def _enqueue(db, event, now):
     return accepted
 
 
-def _risk_flags(asset):
+def _risk_state(asset):
     assessment = asset.get('riskAssessment') or {}
-    checks = assessment.get('checks') or {}
-    return sorted(flag for flag in asset.get('riskFlags') or []
-                  if flag in RISK_LABELS and (checks.get(flag) or {}).get('status') == 'triggered')
+    checks = {**(assessment.get('checks') or {}), **(assessment.get('safety') or {})}
+    return {key: {'status': value.get('status'), 'severity': value.get('severity')}
+            for key, value in checks.items() if key in RISK_LABELS and isinstance(value, dict)}
+
+
+def _risk_flags(asset):
+    return sorted(key for key, value in _risk_state(asset).items() if value['status'] == 'triggered')
+
+
+def confirmed_trade_event(trade, *, chain, token, tickers=(), symbol=None):
+    """Only transaction finality and timestamped USD valuation can alert."""
+    key = _identity(chain, token)
+    at = trade.get('t')
+    quote = trade.get('usdObservation') or {}
+    wallet = str(trade.get('txFrom') or '').lower()
+    tx_hash = str(trade.get('hash') or '').lower()
+    source = trade.get('txFromSource')
+    usd = quote.get('value')
+    if not key or trade.get('finality') != 'confirmed' or not _finite(at):
+        return None
+    if (not ADDRESS.fullmatch(wallet) or source != 'eth_getTransactionByHash'
+            or not re.fullmatch(r'0x[a-f0-9]{64}', tx_hash)
+            or not _finite(usd) or usd <= 0 or quote.get('currency') != 'USD'
+            or not _finite(quote.get('at')) or abs(quote['at']-at) > 30_000
+            or quote.get('method') != 'trade-time-quote' or not quote.get('provider')
+            or not re.fullmatch(r'0x[a-fA-F0-9]{64}', str(trade.get('canonicalBlockHash') or ''))
+            or trade.get('canonicalBlockHash') != trade.get('blockHash') or not trade.get('id')):
+        return None
+    pool = str(trade.get('pool') or '').lower()
+    if not ADDRESS.fullmatch(pool):
+        return None
+    return {'category': 'largeTrade', 'assetKey': key, 'eventKey': 'trade:'+str(chain)+':'+str(trade.get('id')),
+            'tradeConfirmed': True, 'tradeId': trade.get('id'), 'txHash': tx_hash, 'pool': pool, 'wallet': wallet,
+            'txFromSource': source, 'usd': usd, 'usdObservation': quote,
+            'canonicalBlockHash': trade['canonicalBlockHash'], 'at': at, 'tickers': list(tickers), 'symbol': symbol}
+
+
+async def _current_trade(event):
+    from .db import store
+    chain, token = event['assetKey'].split(':', 1)
+    s = await store(chain)
+    rows = await s.fetchall("SELECT body FROM trades WHERE id=? AND substr(asset,1,instr(asset,':')-1)=? LIMIT 20",
+                           (event['tradeId'], s.scope))
+    for row in rows:
+        try:
+            trade = json.loads(row[0])
+            if str(trade.get('token') or '').lower() != token or str(trade.get('chainId')) != chain:
+                continue
+            candidate = confirmed_trade_event(trade, chain=chain, token=token)
+        except (ValueError, TypeError):
+            continue
+        if candidate and candidate['txHash'] == event['txHash'] and candidate['canonicalBlockHash'] == event['canonicalBlockHash'] and candidate['usd'] == event['usd']:
+            return True
+    return False
 
 
 def _confirmed_pool(relation, event):
@@ -333,7 +389,7 @@ def _seed(db, payload, cursor, now):
     for asset in (payload.get('unified') or {}).get('assets') or []:
         key = _identity(asset.get('chainId'), asset.get('token'))
         if key:
-            db.execute('INSERT OR REPLACE INTO telegram_asset_state VALUES (?,?,?)', (key, json.dumps(_risk_flags(asset)), now))
+            db.execute('INSERT OR REPLACE INTO telegram_asset_state VALUES (?,?,?)', (key, json.dumps(_risk_state(asset)), now))
     _save_runtime(db, 'event_cursor', cursor, now)
 
 
@@ -385,8 +441,11 @@ def process_events(rows, payload, high, low):
                     if not key:
                         continue
                     old = db.execute('SELECT flags FROM telegram_asset_state WHERE asset_key=?', (key,)).fetchone()
-                    flags = _risk_flags(asset)
-                    additions = sorted(set(flags)-set(json.loads(old['flags']))) if old else []
+                    flags = _risk_state(asset)
+                    prior = json.loads(old['flags']) if old else {}
+                    if not isinstance(prior, dict): prior = {}
+                    additions = sorted(key for key, value in flags.items()
+                        if value.get('status') == 'triggered' and (prior.get(key) or {}).get('status') == 'clear')
                     db.execute('INSERT OR REPLACE INTO telegram_asset_state VALUES (?,?,?)', (key, json.dumps(flags), now))
                     if additions and key in assets:
                         accepted += _enqueue(db, {'category': 'riskChange', 'assetKey': key,
@@ -395,6 +454,14 @@ def process_events(rows, payload, high, low):
                             'tickers': sorted(tickers.get(key, []))}, now)
                 for key in (body.get('removes') or {}).get('assets') or []:
                     db.execute('DELETE FROM telegram_asset_state WHERE asset_key=?', (str(key),))
+            elif event['event'] == 'trade':
+                key = _identity(body.get('chainId'), body.get('token') or body.get('asset'))
+                if key in assets:
+                    candidate = confirmed_trade_event(body, chain=body.get('chainId'), token=body.get('token') or body.get('asset'),
+                        tickers=sorted(tickers.get(key, [])), symbol=assets[key].get('symbol'))
+                    if candidate and 0 <= now-candidate['at'] <= MAX_EVENT_AGE_MS:
+                        _save_runtime(db, 'confirmed_trade_feed', {'validated': True, 'updatedAt': now}, now)
+                        accepted += _enqueue(db, candidate, now)
             cursor = seq
         # A short page consumed every relevant event through this read's high
         # watermark; unrelated quote/candle/trade ids need not be revisited.
@@ -428,7 +495,7 @@ async def scan_events():
     high = min(high, published)
     if high <= cursor:
         return 0
-    rows = await s.fetchall("SELECT id,event,body,at FROM realtime_events WHERE id>? AND id<=? AND event IN ('relationship','projection.delta') ORDER BY id LIMIT 100", (cursor, high))
+    rows = await s.fetchall("SELECT id,event,body,at FROM realtime_events WHERE id>? AND id<=? AND event IN ('relationship','projection.delta','trade') ORDER BY id LIMIT 100", (cursor, high))
     return await asyncio.to_thread(process_events, [dict(row) for row in rows], payload, high, low)
 
 
@@ -460,6 +527,10 @@ def _claim():
             if not binding or not watched or not enabled or (row['category'] == 'largeTrade' and not capabilities()['largeTrade']['available']):
                 db.execute("UPDATE telegram_outbox SET status='cancelled',finished_at=?,error_code='recipient-disabled' WHERE id=?", (now, row['id']))
                 continue
+            chat_ready_at = _runtime(db, 'chat_send_not_before:'+row['binding_id'], 0)
+            if chat_ready_at > now:
+                db.execute('UPDATE telegram_outbox SET next_attempt_at=? WHERE id=?', (chat_ready_at, row['id']))
+                continue
             previous = db.execute('''SELECT max(COALESCE(finished_at,started_at)) FROM telegram_outbox
                 WHERE user_id=? AND category=? AND asset_key=? AND id<>? AND status IN ('sent','uncertain')''',
                 (row['user_id'], row['category'], row['asset_key'], row['id'])).fetchone()[0]
@@ -474,6 +545,10 @@ def _claim():
                 db.execute('INSERT INTO telegram_daily_budget VALUES (?,?,1) ON CONFLICT(user_id,day) DO UPDATE SET used=used+1', (row['user_id'], day))
             db.execute("UPDATE telegram_outbox SET status='sending',started_at=?,attempts=attempts+1,budget_day=? WHERE id=?", (now, day, row['id']))
             selected = {**dict(row), 'attempts': row['attempts']+1, 'chat_id': binding['chat_id'], 'payload': payload}
+            # Independent dispatch tasks share a persistent global pace, and
+            # one private chat never receives more than one message per second.
+            _save_runtime(db, 'send_not_before', now+40, now)
+            _save_runtime(db, 'chat_send_not_before:'+row['binding_id'], now+1100, now)
             break
         db.commit()
     return selected
@@ -550,11 +625,15 @@ def _finish(row, result=None, failure=None):
         db.commit()
 
 
-async def dispatch(client, maximum=5):
+async def dispatch(client, maximum=30):
     if not configured():
         return {'accepted': 0, 'skipped': 1}
     sent = failed = 0
     for _ in range(maximum):
+        with access.connection() as db:
+            pace = _runtime(db, 'send_not_before', 0)-now_ms()
+        if 0 < pace <= 100:
+            await asyncio.sleep(pace/1000)
         row = await asyncio.to_thread(_claim)
         if not row:
             break
@@ -566,6 +645,14 @@ async def dispatch(client, maximum=5):
                     raise BotFailure('source-unavailable', retryable=True) from None
                 if not current:
                     _cancel(row, 'pool-no-longer-confirmed')
+                    continue
+            elif row['category'] == 'largeTrade':
+                try:
+                    current = await _current_trade(row['payload'])
+                except Exception:
+                    raise BotFailure('source-unavailable', retryable=True) from None
+                if not current:
+                    _cancel(row, 'trade-no-longer-confirmed')
                     continue
             if not _authorize_send(row):
                 _cancel(row, 'recipient-disabled')
@@ -611,7 +698,7 @@ async def tick():
                     if not isinstance(me, dict) or me.get('is_bot') is not True or str(me.get('username') or '').casefold() != config['username'].casefold():
                         raise BotFailure('bot-username-mismatch')
                     _verified_bot = bot_key
-                updates = await _api(client, 'getUpdates', {'offset': offset, 'limit': 100, 'timeout': 20, 'allowed_updates': ['message']})
+                updates = await _api(client, 'getUpdates', {'offset': offset, 'limit': 100, 'timeout': 1, 'allowed_updates': ['message']})
                 if not isinstance(updates, list):
                     raise BotFailure('invalid-update-response')
                 bound = 0
@@ -631,3 +718,60 @@ async def tick():
                 _save_runtime(db, 'health', {'status': 'unavailable', 'reason': exc.code, 'updatedAt': now_ms()}, now_ms())
                 _save_runtime(db, 'poll_not_before', now_ms()+1000*(exc.retry_after or 30), now_ms())
             return {'accepted': 0, 'failed': 1}
+
+
+def health(user_id=None):
+    """Configuration/queue evidence without recipient IDs or credentials."""
+    init()
+    now = now_ms()
+    with access.connection() as db:
+        where, params = (' WHERE user_id=?', [user_id]) if user_id else ('', [])
+        counts = {row['status']: row['n'] for row in db.execute('SELECT status,count(*) n FROM telegram_outbox'+where+' GROUP BY status', params)}
+        worker = _runtime(db, 'health', {})
+        recent = [dict(row) for row in db.execute('SELECT category,status,created_at,finished_at,error_code FROM telegram_outbox'+where+' ORDER BY created_at DESC LIMIT 10', params)]
+    return {'configured': configured(), 'worker': worker, 'workerAgeMs': max(0, now-worker['updatedAt']) if worker.get('updatedAt') else None,
+            'queue': counts, 'recent': recent, 'capabilities': capabilities(), 'cooldownMinutes': 15, 'dailyLimit': DAILY_LIMIT,
+            'globalMessagesPerSecond': 25, 'privateChatMessagesPerSecond': 1/1.1, 'dryRunSendsMessages': False,
+            'requiredConfiguration': ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_BOT_USERNAME']}
+
+
+async def dry_run(user_id, category, asset_key, trade_id=None):
+    """Resolve real facts and preview; never queue, bind, budget, or send."""
+    from .realtime_projection import read_token_projection, ProjectionUnavailable
+    if category not in {'newPool', 'riskChange', 'largeTrade'} or asset_key not in user_features.list_watches(user_id):
+        raise access.AccessError('invalid-alert-preview')
+    parts = asset_key.split(':', 1)
+    if len(parts) != 2 or not _identity(*parts):
+        raise access.AccessError('invalid-alert-preview')
+    try:
+        snapshot = await read_token_projection(*parts)
+    except ProjectionUnavailable:
+        return {'eligible': False, 'reason': 'snapshot-not-ready', 'sent': False, 'queued': False}
+    asset = snapshot.get('asset') or {}
+    relations = snapshot.get('relations') or []
+    now = now_ms()
+    base = {'assetKey': asset_key, 'category': category, 'symbol': asset.get('symbol'), 'at': now}
+    if category == 'newPool':
+        candidates = [r for r in relations if r.get('confirmationStatus') == 'confirmed' and r.get('factoryEventId')
+                      and r.get('status') == 'verified' and (r.get('stockIdentity') or {}).get('verificationStatus') == 'official']
+        if not candidates:
+            return {'eligible': False, 'reason': 'confirmed-pool-unavailable', 'sent': False, 'queued': False}
+        relation = max(candidates, key=lambda r: r.get('poolCreatedAt') or 0)
+        base.update(pool=relation['pool'], ticker=relation.get('ticker'), at=relation.get('poolCreatedAt') or now)
+    elif category == 'riskChange':
+        flags = _risk_flags(asset)
+        if not flags:
+            return {'eligible': False, 'reason': 'no-triggered-risk', 'sent': False, 'queued': False}
+        base.update(flags=flags)
+    else:
+        from .db import store
+        s = await store(parts[0])
+        rows = await s.fetchall('SELECT body FROM trades WHERE id=? AND asset=? LIMIT 1', (str(trade_id), s.key(parts[1])))
+        candidate = confirmed_trade_event(json.loads(rows[0][0]), chain=parts[0], token=parts[1], symbol=asset.get('symbol')) if rows else None
+        if candidate is None:
+            return {'eligible': False, 'reason': 'confirmed-usd-trade-unavailable', 'sent': False, 'queued': False}
+        base = candidate
+    recent = 0 <= now-base['at'] <= MAX_EVENT_AGE_MS
+    return {'eligible': recent, 'reason': None if recent else 'event-outside-15-minute-window', 'text': _template(base),
+            'sent': False, 'queued': False, 'previewOnly': True, 'transitionChecked': False,
+            'explanation': 'A preview uses current facts; dispatch additionally checks a new event, watch scope, preferences and budget.'}

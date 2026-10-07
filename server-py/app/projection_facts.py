@@ -7,8 +7,8 @@ import json
 
 KINDS = ('asset', 'relation', 'stock', 'comparison', 'market-quote',
          'chain-stream', 'market-stream', 'market-stream-status',
-         'basket', 'basket-last', 'basket-view')
-KEYS = tuple(f'{chain}:{kind}' for chain in ('196', '56', '4663') for kind in KINDS) + ('system:shared-source',)
+         'basket', 'basket-last', 'basket-view', 'stock-sparkline')
+KEYS = tuple(f'{chain}:{kind}' for chain in ('196', '56', '4663', '5042') for kind in KINDS) + ('system:shared-source', 'system:product-theme')
 
 
 class ProjectionFacts:
@@ -17,7 +17,7 @@ class ProjectionFacts:
 
     @classmethod
     async def capture(cls, connection, previous=None, changes=()):
-        if previous is None:
+        if previous is None or any(key not in previous.rows for key in KEYS):
             records = await connection.execute_fetchall(
                 'SELECT kind,id,body FROM facts WHERE kind IN (' + ','.join('?' for _ in KEYS) + ')', KEYS)
             rows = {kind: {} for kind in KEYS}
@@ -43,6 +43,24 @@ class ProjectionFacts:
                         (kind, *batch))
                     for record in records:
                         rows[kind][record['id']] = json.loads(record['body'])
+        # Checkpoints intentionally do not enter the market-change outbox.
+        # Refresh only the price-less assets' quote rows in bounded PK batches
+        # within this same snapshot. Replacing these small maps also captures
+        # updates/deletes without dirtying every projection for job telemetry.
+        for chain in ('196', '56', '4663', '5042'):
+            kind = f'{chain}:collector-job'
+            rows[kind] = {}
+            identities = sorted({'quote:' + str(row.get('token')).lower()
+                                 for row in rows[f'{chain}:asset'].values()
+                                 if row.get('kind') in ('candidate', 'stock')
+                                 and row.get('price') is None and row.get('token')})
+            for start in range(0, len(identities), 400):
+                batch = identities[start:start+400]
+                records = await connection.execute_fetchall(
+                    'SELECT id,body FROM facts WHERE kind=? AND id IN (' + ','.join('?' for _ in batch) + ')',
+                    (kind, *batch))
+                for record in records:
+                    rows[kind][record['id']] = json.loads(record['body'])
         return cls(rows)
 
     def all(self, chain, kind):
@@ -50,6 +68,11 @@ class ProjectionFacts:
         # only; enrich_asset explicitly copies every nested map it modifies.
         rows = self.rows[f'{chain}:{kind}']
         return [dict(rows[identity]) for identity in sorted(rows)]
+
+    def get(self, chain, kind, identity):
+        """Read a checkpoint from the same immutable view as its asset."""
+        row = self.rows.get(f'{chain}:{kind}', {}).get(identity)
+        return dict(row) if row is not None else None
 
     def all_kv(self, chain, kind):
         rows = self.rows[f'{chain}:{kind}']

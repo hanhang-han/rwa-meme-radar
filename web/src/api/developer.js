@@ -43,3 +43,25 @@ export const listDeveloperKeys = () => developerRequest('keys');
 export const createDeveloperKey = (name, csrfToken) => developerRequest('keys', { method: 'POST', body: { name }, csrfToken });
 export const revokeDeveloperKey = (id, csrfToken) => developerRequest(`keys/${encodeURIComponent(id)}`, { method: 'DELETE', csrfToken });
 export const getDeveloperUsage = () => developerRequest('usage');
+
+// Product queries use POST so public wallet addresses never appear in a URL.
+// Saving is a separate authenticated request with explicit consent and CSRF.
+export async function productRequest(path, { method = 'GET', body, csrfToken, timeoutMs = 20000 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers = { Accept: 'application/json' };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+    const response = await fetch(`${API_BASE}v2/product/${path.replace(/^\//, '')}`, {
+      method, headers, credentials: 'include', signal: controller.signal,
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) throw new DeveloperApiError(response.status, typeof payload?.detail === 'string' ? payload.detail : undefined);
+    return payload;
+  } catch (error) {
+    if (controller.signal.aborted) throw new DeveloperApiError(0, 'request-timeout');
+    throw error;
+  } finally { clearTimeout(timer); }
+}

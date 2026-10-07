@@ -4,6 +4,7 @@ stocks are read from the existing stock facts, pools come from OKX
 top-liquidity, identities are resolved through token0/token1 and the
 asset()/underlying() wrapper interface."""
 import asyncio
+import math
 import re
 import time
 from contextvars import ContextVar
@@ -16,8 +17,9 @@ from ..db import store
 from ..demand_leases import all_leases
 from ..okx_client import okx_get, request_lane, QuotaExceeded
 from ..registry import w3
+from ..resource_budget import run_background_io
 from ..stream_hub import broadcast
-from ..stock_identity import assess_pool_relation, match_name
+from ..stock_identity import assess_pool_relation, match_name, token_identity
 from .assets import now_ms, save_asset
 from .queue import checkpoint, combine, due, jobs, result
 
@@ -118,7 +120,7 @@ async def rpc_call(to: str, data: str, block="latest"):
         return chain_web3().eth.call({"to": Web3.to_checksum_address(to), "data": data}, block_identifier=block)
 
     try:
-        return await asyncio.wait_for(asyncio.to_thread(call), 15)
+        return await asyncio.wait_for(run_background_io(call), 15)
     except ContractLogicError as e:
         raise ContractReverted(str(e)[:120], address=to, selector=data[:10]) from e
     except Exception as e:
@@ -471,7 +473,7 @@ async def scan_pools(s, address: str, stocks: list[dict], block_hex: str):
 async def _check_rpc_identity():
     cid = CHAIN.get()
     if cid not in _RPC_IDENTITIES:
-        actual = await asyncio.wait_for(asyncio.to_thread(lambda: chain_web3().eth.chain_id), 15)
+        actual = await asyncio.wait_for(run_background_io(lambda: chain_web3().eth.chain_id), 15)
         if str(actual) != cid:
             raise ValueError("RPC chain identity mismatch")
         _RPC_IDENTITIES.add(cid)
@@ -482,7 +484,7 @@ async def _block_hex() -> str:
     def get():
         return chain_web3().eth.block_number
 
-    num = await asyncio.wait_for(asyncio.to_thread(get), 15)
+    num = await asyncio.wait_for(run_background_io(get), 15)
     return hex(num)
 
 
@@ -492,7 +494,7 @@ async def _pool_quote(s, rel, block_number, block_at):
     current = await s.get("relation", rel["id"])
     pool = await s.get("pool", rel["pool"])
     if _pool_block_reason(pool, current or rel) or (current and current.get("status") != "verified"):
-        return
+        return 'pool-invalidated'
     d0, d1 = await asyncio.gather(cached_decimals(rel["token0"]), cached_decimals(rel["token1"]))
     if d0 is None or d1 is None:
         raise ValueError("token-decimals-unavailable")
@@ -513,8 +515,6 @@ async def _pool_quote(s, rel, block_number, block_at):
         "timeKind": "market", "method": "v2-reserves" if reserves else "v3-slot0",
         "decimals0": d0, "decimals1": d1,
     })
-    if not reserves or not all(reserves):
-        return
     now = now_ms()
     meme_is0 = rel["token0"].lower() == rel["token"].lower()
     meme_asset = await s.get("asset", rel["token"]) or {}
@@ -522,13 +522,19 @@ async def _pool_quote(s, rel, block_number, block_at):
     side_asset = await s.get("asset", side_address) or {}
     meme_at = (meme_asset.get("fieldTimes") or {}).get("price") or 0
     side_at = (side_asset.get("fieldTimes") or {}).get("price") or 0
-    meme_price = meme_asset.get("price") if 0 <= now - meme_at <= 900_000 else None
-    side_price = side_asset.get("price") if 0 <= now - side_at <= 900_000 else None
+    def usd_price(asset, at):
+        value = asset.get('price')
+        currency = asset.get('priceCurrency') or ((asset.get('fieldObservations') or {}).get('price') or {}).get('currency')
+        return value if (currency == 'USD' and isinstance(value, (int, float))
+            and not isinstance(value, bool) and math.isfinite(value) and value > 0
+            and isinstance(at, (int, float)) and 0 < at <= now and now-at <= 900_000) else None
+    meme_price = usd_price(meme_asset, meme_at)
+    side_price = usd_price(side_asset, side_at)
     valuation_method = "reserves_valuation"
     if not side_price and side_address != str(rel["stock"]).lower():
         underlying = await s.get("asset", rel["stock"]) or {}
         underlying_at = (underlying.get("fieldTimes") or {}).get("price") or 0
-        underlying_price = underlying.get("price") if 0 <= now - underlying_at <= 900_000 else None
+        underlying_price = usd_price(underlying, underlying_at)
         if underlying_price:
             try:
                 side_decimals = d1 if meme_is0 else d0
@@ -543,14 +549,41 @@ async def _pool_quote(s, rel, block_number, block_at):
                                 "at": block_at, "block": block_number, "method": "convertToAssets"})
             except Exception:
                 pass
-    if meme_price:
+    if not reserves:
+        # V3 balances measure pool TVL, not executable depth. Anchor to a
+        # fresh independent USD quote and price the other side at this pool's
+        # block-pinned marginal exchange rate, as for V2 reserve valuation.
+        if not meme_price and not side_price:
+            return 'usd-price-unavailable'
+        derived = False
+        if not side_price:
+            side_price, side_at = meme_price*ratio, meme_at
+            derived = True
+        elif not meme_price:
+            meme_price, meme_at = side_price/ratio, side_at
+            derived = True
+        calldata = '0x70a08231' + rel['pool'][2:].rjust(64, '0')
+        balances = await asyncio.gather(*(rpc_call(token, calldata, block_number)
+                                         for token in (rel['token0'], rel['token1'])))
+        amounts = [uint_words(raw, 1) for raw in balances]
+        if any(not amount for amount in amounts):
+            raise ValueError('v3-balances-unavailable')
+        units0, units1 = amounts[0][0]/10**d0, amounts[1][0]/10**d1
+        price0, price1 = (meme_price, side_price) if meme_is0 else (side_price, meme_price)
+        value, price_at = units0*price0 + units1*price1, min(meme_at, side_at)
+        valuation_method = 'v3_balances_tvl_spot_usd' if derived else 'v3_balances_tvl_usd'
+    elif not all(reserves):
+        return 'empty-pool-reserves'
+    elif meme_price:
         units = (reserves[0] if meme_is0 else reserves[1]) / 10 ** (d0 if meme_is0 else d1)
         value, price_at = units * meme_price * 2, meme_at
     elif side_price:
         units = (reserves[1] if meme_is0 else reserves[0]) / 10 ** (d1 if meme_is0 else d0)
         value, price_at = units * side_price * 2, side_at
     else:
-        return
+        return 'usd-price-unavailable'
+    if not math.isfinite(value) or not 0 <= value < 1e10:
+        return 'invalid-usd-valuation'
     # Identity verification and valuation run independently; patch only the
     # valuation fields so a concurrent verification cannot be rolled back.
     valuation = {"liquidityUsd": value, "reservesAt": block_at,
@@ -560,8 +593,9 @@ async def _pool_quote(s, rel, block_number, block_at):
     current = await s.get("relation", rel["id"])
     if (_pool_block_reason(await s.get("pool", rel["pool"]), current or rel)
             or (current and current.get("status") != "verified")):
-        return
+        return 'pool-invalidated'
     await s.patch_fact("relation", rel["id"], valuation)
+    return 'valued'
 
 
 async def refresh_liquidity():
@@ -578,22 +612,35 @@ async def refresh_liquidity():
                     and rel.get("verificationStatus") != "reorged"
                     and rel.get("confirmationStatus") != "orphaned"
                     and due(job, now, interval)):
-                work.append((job.get("lastAttemptAt") or 0, cid, rel))
+                side = rel.get('stockSide') or rel.get('stock')
+                if not token_identity(cid, side)['eligibleForPair']:
+                    totals['skipped'] += 1
+                    continue
+                hot = rel.get('token') in watched or rel.get('stock') in watched or rel.get('level') == 'A'
+                work.append((job.get("lastAttemptAt") or 0, cid, rel, hot))
     work.sort(key=lambda item: (item[0], item[1], item[2]["pool"]))
     blocks = {}
-    for _, cid, rel in work[:12]:
+    # Reserve cold slots so successful markets cannot permanently starve
+    # unseen pools, while watched/current pools get a shorter refresh cycle.
+    hot = [item for item in work if item[3]]
+    cold = [item for item in work if not item[3]]
+    selected = hot[:8] + cold[:4]
+    selected += [item for item in work if item not in selected][:12-len(selected)]
+    for _, cid, rel, _ in selected:
         handle = CHAIN.set(cid)
         s = await store(cid)
         totals["requested"] += 1
         try:
             if cid not in blocks:
                 await _check_rpc_identity()
-                blocks[cid] = await asyncio.wait_for(asyncio.to_thread(lambda: chain_web3().eth.get_block("latest")), 15)
+                blocks[cid] = await asyncio.wait_for(run_background_io(lambda: chain_web3().eth.get_block("latest")), 15)
             block = blocks[cid]
-            await _pool_quote(s, rel, int(block["number"]), int(block["timestamp"]) * 1000)
-            await checkpoint(s, "pool-quote", rel["pool"], success=True)
-            totals["accepted"] += 1
-            totals["updated"] += 1
+            outcome = await _pool_quote(s, rel, int(block["number"]), int(block["timestamp"]) * 1000)
+            valued = outcome == 'valued'
+            await checkpoint(s, "pool-quote", rel["pool"], success=valued,
+                             reason=None if valued else outcome or 'valuation-unavailable')
+            totals['accepted' if valued else 'failed'] += 1
+            totals['updated'] += int(valued)
         except Exception as error:
             await checkpoint(s, "pool-quote", rel["pool"], success=False, reason=type(error).__name__)
             totals["failed"] += 1

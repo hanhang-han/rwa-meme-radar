@@ -11,7 +11,7 @@ from .db import store
 from .realtime_projection import read_projection
 
 STREAK_FILE = "data/ai-streaks.json"
-CHAIN_NAMES = {'196': 'X Layer', '56': 'BNB Smart Chain', '4663': 'Robinhood Chain'}
+CHAIN_NAMES = {'196': 'X Layer', '56': 'BNB Chain', '4663': 'Robinhood Chain'}
 PROMPT_VERSION = 3
 
 def _load_streaks() -> dict:
@@ -87,6 +87,16 @@ def _money(value):
     return f'${number:.2f}'
 
 
+def _current_value(asset, field):
+    availability = asset.get('fieldAvailability') or {}
+    if field in availability:
+        observation = availability[field]
+        return _num(observation.get('value')) if observation.get('status') == 'current' else None
+    if field == 'totalLiquidityUsd' and asset.get('totalLiquidityStatus') != 'current':
+        return None
+    return _num(asset.get(field))
+
+
 def briefing_items(unified, snapshot_id):
     """Select facts with exact identity and risk evidence from one snapshot.
 
@@ -102,9 +112,9 @@ def briefing_items(unified, snapshot_id):
             continue
         if not ((asset.get('dataQuality') or {}).get('eligible') or {}).get('marketRanking'):
             continue
-        volume = _num(asset.get('volume24h'))
-        liquidity = _num(asset.get('totalLiquidityUsd'))
-        change = _num(asset.get('change24h'))
+        volume = _current_value(asset, 'volume24h')
+        liquidity = _current_value(asset, 'totalLiquidityUsd')
+        change = _current_value(asset, 'change24h')
         risk_flags = set(asset.get('riskFlags') or [])
         if volume is None:
             continue
@@ -170,8 +180,8 @@ def render_briefing(items, lang):
             line = (f'{name}: 24h change {change:+.1f}%, liquidity {liquidity}; thin-market spike.'
                     if lang == 'en' else f'{name}：24h 涨跌 {change:+.1f}%，流动性 {liquidity}；低深度波动。')
         elif liquidity is not None:
-            line = (f'{name}: 24h volume {volume}, observed liquidity {liquidity}.'
-                    if lang == 'en' else f'{name}：24h 成交 {volume}，已观测流动性 {liquidity}。')
+            line = (f'{name}: 24h volume {volume}, total liquidity {liquidity}.'
+                    if lang == 'en' else f'{name}：24h 成交 {volume}，总流动性 {liquidity}。')
         else:
             line = (f'{name}: 24h volume {volume}; total liquidity is unavailable.'
                     if lang == 'en' else f'{name}：24h 成交 {volume}；总流动性暂无可核对数据。')
@@ -199,7 +209,7 @@ async def briefing_base() -> dict:
 
     movers_candidates = [
         a for a in u["assets"]
-        if (str(a.get("chainId") or "196"), str(a.get("token") or "").lower()) in verified_tokens and a.get("change24h") is not None
+        if (str(a.get("chainId") or "196"), str(a.get("token") or "").lower()) in verified_tokens and _current_value(a, "change24h") is not None
     ]
     try:
         movers_candidates.sort(key=lambda a: -abs(float(a["change24h"])))
@@ -211,7 +221,7 @@ async def briefing_base() -> dict:
         {
             "symbol": a.get("symbol"), "chain": CHAIN_NAMES.get(str(a.get('chainId')), 'Unknown'),
             "change24hPercent": a.get("change24h"), "volume24hUsd": a.get("volume24h"),
-            "liquidityUsd": a.get("liquidity"),
+            "liquidityUsd": _current_value(a, "totalLiquidityUsd"),
             "streakDays": streak_of(hist, _asset_id(a), mover_ids),
             "priceAnomalySuspected": float(a.get("change24h") or 0) <= -50,
             "note": "跌幅远超正股市场正常范围，价格数据待核查" if float(a.get("change24h") or 0) <= -50 else None,

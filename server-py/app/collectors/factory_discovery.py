@@ -13,6 +13,7 @@ adding it to the product's candidate/relationship views. No transactions are
 sent and no address from an unverified discovery feed is subscribed.
 """
 
+import asyncio
 import json
 import re
 import time
@@ -20,6 +21,8 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 import aiosqlite
+
+from ..storage_runtime import async_connect
 import httpx
 from web3 import Web3
 
@@ -42,6 +45,10 @@ POOL_CREATED = Web3.to_hex(Web3.keccak(text="PoolCreated(address,address,uint24,
 HEX_32 = re.compile(r"^0x[0-9a-fA-F]{64}$")
 HEX_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 DEFAULT_BATCH_BLOCKS = 80  # X Layer public RPC currently rejects >100.
+# RPC range limits do not bound SQLite work. Commit complete blocks in small
+# event batches; a single unusually large block still remains atomic.
+COMMIT_EVENT_TARGET = 64
+CONFIRM_EVENT_LIMIT = 128
 QUOTE_SYMBOLS = frozenset({
     "USDT", "USDC", "USDG", "DAI", "WOKB", "OKB", "WETH", "ETH", "WBTC",
     "BTC", "XBTC", "WBNB", "BTCB", "USD1", "XUSD",
@@ -212,6 +219,11 @@ class FactoryDiscovery:
     async def _init(self):
         if self.initialized:
             return
+        if getattr(self.store.db, 'backend', 'sqlite') == 'postgres':
+            from ..storage_schema import verify_tables
+            await verify_tables(self.store.db, ('factory_discovery_events', 'factory_discovery_cursors'))
+            self.initialized = True
+            return
         async with self.store._guard_write():
             await self.store.db.executescript("""
                 CREATE TABLE IF NOT EXISTS factory_discovery_events (
@@ -247,6 +259,8 @@ class FactoryDiscovery:
                     await self.store.db.execute(f"ALTER TABLE factory_discovery_events ADD COLUMN {name} {definition}")
             await self.store.db.execute("""CREATE INDEX IF NOT EXISTS factory_discovery_pending
                 ON factory_discovery_events(chain,status,processing_status,next_attempt_at,block)""")
+            await self.store.db.execute("""CREATE INDEX IF NOT EXISTS factory_discovery_confirmation
+                ON factory_discovery_events(chain,block) WHERE status='provisional'""")
             await self.store.db.commit()
         self.initialized = True
 
@@ -371,63 +385,112 @@ class FactoryDiscovery:
         return found, before
 
     async def _commit_range(self, found, end_header, start, head, cursor, batch_blocks):
-        anchors = (cursor["anchors"] + [{"block": end_header["block"], "hash": end_header["hash"]}])[-128:]
-        now = int(time.time() * 1000)
+        # A cursor may advance only past complete blocks. Split a fetched RPC
+        # range at event-bearing block boundaries, never through one block.
+        # If a later transaction fails, retry starts immediately after the
+        # last durable batch; committed evidence and its cursor stay aligned.
+        groups = []
+        for item in sorted(found, key=lambda row: (row["creationBlock"], row["creationLogIndex"], row["id"])):
+            block = item["creationBlock"]
+            if not start <= block <= end_header["block"]:
+                raise ValueError("factory-log-outside-range")
+            if not groups or groups[-1][0] != block:
+                groups.append((block, []))
+            groups[-1][1].append(item)
+        batches, pending = [], []
+        for _, items in groups:
+            if pending and len(pending) + len(items) > COMMIT_EVENT_TARGET:
+                batches.append(pending)
+                pending = []
+            pending.extend(items)
+        if pending or not batches:
+            batches.append(pending)
+        prepared = [[(dict(item), json.dumps(item, separators=(",", ":")))
+                     for item in batch] for batch in batches]
         created = []
         # The shared X Layer connection serves unrelated reads. Each awaited
         # statement on it can sit behind those reads while holding the one
         # process-wide writer lock. A short dedicated connection keeps this
         # evidence + watermark transaction atomic without that queue.
-        async with aiosqlite.connect(self.store.path, timeout=2) as db:
-            # _guard_write() rolls back store.db on failure. This transaction
-            # lives on db, so hold the same writer lock and roll back db only.
-            async with self.store._write_lock:
-                try:
+        async with async_connect(self.store.path, timeout=2) as db:
+            for index, batch in enumerate(prepared):
+                boundary = end_header if index == len(prepared) - 1 else {
+                    "block": batch[-1][0]["creationBlock"],
+                    "hash": batch[-1][0]["creationBlockHash"],
+                }
+                anchor = {"block": boundary["block"], "hash": boundary["hash"]}
+                anchors = (cursor["anchors"] + [anchor])[-128:]
+                now = int(time.time() * 1000)
+                values = [(item["id"], self.chain, item["factory"], item["pool"], item["creationBlock"],
+                           item["creationBlockHash"], item["creationTx"], item["creationLogIndex"],
+                           item["poolCreatedAt"], item["discoveredAt"], item["confirmationStatus"], body)
+                          for item, body in batch]
+                # Rollback must affect this dedicated connection, never a
+                # caller's read transaction on store.db.
+                async with self.store._guard_write(db):
                     await db.execute("BEGIN IMMEDIATE")
-                    for item in found:
+                    actual = await db.execute_fetchall(
+                        "SELECT block,hash FROM factory_discovery_cursors WHERE chain=?", (self.chain,))
+                    if not actual or tuple(actual[0]) != (cursor["block"], cursor["hash"]):
+                        raise RuntimeError("factory-cursor-changed")
+                    previous = {}
+                    # Keep bind counts bounded even when one complete block
+                    # contains more events than the normal batch target.
+                    for offset in range(0, len(batch), COMMIT_EVENT_TARGET):
+                        ids = [item["id"] for item, _ in batch[offset:offset + COMMIT_EVENT_TARGET]]
                         rows = await db.execute_fetchall(
-                            "SELECT status,discovered_at FROM factory_discovery_events WHERE id=?", (item["id"],))
-                        old = rows[0] if rows else None
-                        if old:
-                            item["discoveredAt"] = old[1]
-                        if old is None or old[0] == "orphaned":
-                            created.append(dict(item))
-                        await db.execute("""INSERT INTO factory_discovery_events
+                            "SELECT id,status,discovered_at FROM factory_discovery_events WHERE id IN (" +
+                            ",".join("?" for _ in ids) + ")", ids)
+                        previous.update({row[0]: (row[1], row[2]) for row in rows})
+                    await db.executemany("""INSERT INTO factory_discovery_events
                             (id,chain,factory,pool,block,block_hash,tx_hash,log_index,created_at,discovered_at,status,body)
                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                            ON CONFLICT(id) DO UPDATE SET status=excluded.status,body=excluded.body,
+                            ON CONFLICT(id) DO UPDATE SET status=excluded.status,
+                                body=json_set(excluded.body,'$.discoveredAt',factory_discovery_events.discovered_at),
                                 processing_status=CASE WHEN factory_discovery_events.status='orphaned'
                                     THEN 'pending' ELSE factory_discovery_events.processing_status END,
                                 relation_id=CASE WHEN factory_discovery_events.status='orphaned'
                                     THEN NULL ELSE factory_discovery_events.relation_id END,
                                 retracted_at=CASE WHEN factory_discovery_events.status='orphaned'
-                                    THEN NULL ELSE factory_discovery_events.retracted_at END""",
-                            (item["id"], self.chain, item["factory"], item["pool"], item["creationBlock"],
-                             item["creationBlockHash"], item["creationTx"], item["creationLogIndex"],
-                             item["poolCreatedAt"], item["discoveredAt"], item["confirmationStatus"],
-                             json.dumps(item, separators=(",", ":"))))
-                    cutoff = head["block"] - self.confirmations
-                    # Previous provisional rows become final only after their
-                    # anchored block remains canonical through the latest head.
-                    await db.execute("""UPDATE factory_discovery_events
-                        SET status='confirmed',body=json_set(body,'$.confirmationStatus','confirmed')
-                        WHERE chain=? AND status='provisional' AND block<=?""", (self.chain, cutoff))
+                                    THEN NULL ELSE factory_discovery_events.retracted_at END
+                            WHERE factory_discovery_events.status='orphaned'
+                                OR (factory_discovery_events.status='provisional' AND excluded.status='confirmed')""",
+                            values)
                     await db.execute("""UPDATE factory_discovery_cursors
                         SET block=?,hash=?,anchors=?,batch_blocks=?,updated_at=? WHERE chain=?""",
-                        (end_header["block"], end_header["hash"], json.dumps(anchors), batch_blocks, now, self.chain))
+                        (boundary["block"], boundary["hash"], json.dumps(anchors), batch_blocks, now, self.chain))
                     await db.commit()
-                except BaseException:
-                    await db.rollback()
-                    raise
+                for item, _ in batch:
+                    old = previous.get(item["id"])
+                    if old is None or old[0] == "orphaned":
+                        if old:
+                            item["discoveredAt"] = old[1]
+                        created.append(item)
+                cursor = {**cursor, "block": boundary["block"], "hash": boundary["hash"], "anchors": anchors}
+                # Explicitly give live writers a chance between independently
+                # durable batches; RPC range size must not dictate lock time.
+                await asyncio.sleep(0)
         return created
 
     async def _confirm_existing(self, head):
         cutoff = head["block"] - self.confirmations
-        async with self.store._guard_write():
-            await self.store.db.execute("""UPDATE factory_discovery_events
-                SET status='confirmed',body=json_set(body,'$.confirmationStatus','confirmed')
-                WHERE chain=? AND status='provisional' AND block<=?""", (self.chain, cutoff))
-            await self.store.db.commit()
+        # Confirmation is recoverable housekeeping, not part of the fetched
+        # evidence watermark. Bound it and avoid taking any writer lock when
+        # there are no due rows. The partial index skips years of final rows.
+        async with async_connect(self.store.path, timeout=2) as db:
+            rows = await db.execute_fetchall("""SELECT id FROM factory_discovery_events
+                INDEXED BY factory_discovery_confirmation
+                WHERE chain=? AND status='provisional' AND block<=?
+                ORDER BY block LIMIT ?""", (self.chain, cutoff, CONFIRM_EVENT_LIMIT))
+            if not rows:
+                return 0
+            async with self.store._guard_write(db):
+                await db.executemany("""UPDATE factory_discovery_events
+                    SET status='confirmed',body=json_set(body,'$.confirmationStatus','confirmed')
+                    WHERE id=? AND chain=? AND status='provisional' AND block<=?""",
+                    [(row[0], self.chain, cutoff) for row in rows])
+                await db.commit()
+            return len(rows)
 
     async def run_once(self, *, max_ranges=3):
         if not self.enabled:
@@ -464,10 +527,9 @@ class FactoryDiscovery:
             new_events.extend(await self._commit_range(found, end_header, start, head, cursor, next_batch))
             cursor = await self._cursor()
             scanned += 1
-        # When caught up, provisional events can be confirmed without
-        # fetching the same creation logs or inventing a new cursor.
-        if scanned == 0:
-            await self._confirm_existing(head)
+        # Previous provisional events can be confirmed without re-fetching
+        # their creation logs or holding a range transaction open longer.
+        await self._confirm_existing(head)
         return {"status": "ok", "head": head["block"], "cursor": cursor["block"],
                 "coverageFrom": cursor["coverageFrom"], "scannedRanges": scanned,
                 "caughtUp": cursor["block"] >= head["block"], "newEvents": new_events,
@@ -607,7 +669,8 @@ class FactoryDiscovery:
                     "ticker": stock_identity.get("ticker") or stock.get("stockCode"),
                     "pool": item["pool"], "token0": item["token0"], "token1": item["token1"],
                     "wrapper": stock_address != stock_side,
-                    "protocol": pool_patch["protocol"], "firstSeen": (previous or {}).get("firstSeen") or item["discoveredAt"],
+                    "protocol": pool_patch["protocol"], "factory": item["factory"], "factoryVerified": True,
+                    "poolType": item["dex"], "feeTier": item.get("fee"), "firstSeen": (previous or {}).get("firstSeen") or item["discoveredAt"],
                     "checkedAt": checked_at, "block": item["creationBlock"],
                     "status": "verified", "error": None,
                     "poolCreatedAt": item["poolCreatedAt"], "discoveredAt": item["discoveredAt"],

@@ -5,19 +5,21 @@ import asyncio
 from decimal import Decimal
 from typing import Any
 
+from .storage_runtime import async_connect
 from .db import store
 from .data_quality import evaluate_asset, quality_summary
 from .market_quotes import enrich_asset, enrich_relation
+from .product_metrics import qualified_asset, asset_product_metrics
 
 BASE_QUOTE_SYMBOLS = {
     "USDT", "USDC", "USDG", "DAI", "WOKB", "OKB", "WETH", "ETH", "WBTC", "BTC", "XBTC",
     "WBNB", "BTCB", "WTBC", "USD1", "XUSD",
 }
-CHAIN_NAMES = {"196": "X Layer", "56": "BNB Smart Chain", "4663": "Robinhood Chain"}
+CHAIN_NAMES = {"196": "X Layer", "56": "BNB Chain", "4663": "Robinhood Chain", "5042": "Arc"}
 
 
 def fresh(at, age_ms=900_000) -> bool:
-    return bool(at) and time.time() * 1000 - at < age_ms
+    return bool(at) and 0 <= time.time() * 1000 - at < age_ms
 
 
 def _sane_usd(value):
@@ -72,6 +74,33 @@ def _assessed_relations(relations: list[dict], now: float) -> list[dict]:
     return [{**row, **assess_pool_relation(row, int(now))} for row in relations]
 
 
+def pool_coverage_by_ticker(relations):
+    """Recorded pools and qualification reasons share a deduplicated denominator."""
+    pools = {}
+    for row in relations:
+        ticker = str((row.get('stockIdentity') or {}).get('ticker') or row.get('ticker') or '').upper()
+        pool = str(row.get('pool') or '').lower()
+        if not ticker or not pool or row.get('status') != 'verified':
+            continue
+        key = (ticker, str(row.get('chainId')), pool)
+        old = pools.get(key)
+        if old is None or (row.get('liquidityAt') or 0) > (old.get('liquidityAt') or 0):
+            pools[key] = row
+    out = {}
+    for (ticker, _, _), row in pools.items():
+        coverage = out.setdefault(ticker, {'recorded': 0, 'qualified': 0, 'unknown': 0,
+            'stale': 0, 'identityPending': 0, 'belowMinimum': 0, 'other': 0})
+        coverage['recorded'] += 1
+        reason = row.get('evidenceStatus')
+        field = 'qualified' if row.get('level') == 'A' else {
+            'liquidity-unknown': 'unknown', 'liquidity-stale': 'stale',
+            'issuer-deployment-unverified': 'identityPending',
+            'legacy-wrapper-ineligible': 'identityPending',
+            'below-minimum-liquidity': 'belowMinimum'}.get(reason, 'other')
+        coverage[field] += 1
+    return out
+
+
 def _pool_totals(pools: list[dict], now: float) -> dict:
     """One cutoff and one deduplicated pool set for KPI and chain rows."""
     valued = [r for r in pools if _sane_usd(r.get('liquidityUsd'))
@@ -107,22 +136,8 @@ def _active_meme_count(assets: list[dict], now: float, chain_id: str | None = No
     The pair-backed actionable count is a separate operational metric. A
     single-pool quote cannot qualify an asset for this total-liquidity KPI.
     """
-    identities = set()
-    for row in assets:
-        chain = str(row.get('chainId') or '')
-        token = str(row.get('token') or '').lower()
-        total = row.get('totalLiquidityUsd')
-        total_at = row.get('totalLiquidityAt')
-        price_at = (row.get('fieldTimes') or {}).get('price')
-        if (row.get('kind') != 'candidate' or not token or (chain_id and chain != chain_id)
-                or not _sane_usd(total) or total < 1_000
-                or row.get('totalLiquidityStatus') != 'current'
-                or not isinstance(total_at, (int, float)) or not 0 <= now - total_at <= 1_800_000
-                or row.get('price') is None or not isinstance(price_at, (int, float))
-                or not 0 <= now - price_at <= 900_000):
-            continue
-        identities.add((chain, token))
-    return len(identities)
+    return len({(str(row.get('chainId')), str(row.get('token') or '').lower())
+        for row in assets if (not chain_id or str(row.get('chainId')) == chain_id) and qualified_asset(row, now)})
 
 
 def newly_discovered_assets(assets, now):
@@ -135,7 +150,7 @@ def newly_discovered_assets(assets, now):
             key = (str(row.get('chainId') or '196'), token)
             first[key] = min(at, first.get(key, at))
     by_chain = {cid: sum(1 for (chain, _), at in first.items() if chain == cid and now-86_400_000 <= at <= now)
-                for cid in ('196', '56', '4663')}
+                for cid in ('196', '56', '4663', '5042')}
     return {'value': sum(by_chain.values()), 'byChain': by_chain, 'window': '24h',
             'from': now-86_400_000, 'to': now, 'scope': 'first-indexed-assets',
             'knownFirstSeen': len(first), 'timeField': 'firstSeen'}
@@ -193,6 +208,15 @@ def _source_statuses(stock_tokens: list[dict], assets: list[dict]) -> list[dict]
     for provider, info in (stock_quotes._read_snapshot(stock_quotes.EODHD_FILE).get("providers") or {}).items():
         if provider != "EODHD":
             out.append({**info, "provider": provider, "id": provider.lower()+":enrichment", "chainId": "multi", "chainName": "Multiple networks", "kind": "supplemental-quotes"})
+    indexed = [a.get('aggregateMarket') or {} for a in assets if (a.get('aggregateMarket') or {}).get('provider') == 'DexScreener']
+    if indexed:
+        latest = max((row.get('liquidityAt') or 0 for row in indexed), default=0)
+        current = sum(fresh(row.get('liquidityAt'), 1_800_000) for row in indexed)
+        out.append({'id': 'dexscreener:worker-batch', 'provider': 'DexScreener', 'chainId': 'multi',
+            'chainName': 'Multiple networks', 'kind': 'indexed-token-liquidity',
+            'status': 'partial' if current else 'stale', 'updatedAt': latest or None,
+            'coverage': {'known': len(indexed), 'fresh': current, 'total': len(assets),
+                         'scope': 'provider-indexed-pools', 'complete': False}})
     return out
 
 
@@ -215,6 +239,32 @@ def _capabilities(sources: list[dict]) -> list[dict]:
     ]
 
 
+def _theme_metric_inputs(assets, relations):
+    """Index one snapshot once, then pass only a theme's exact dependencies.
+
+    The metric builder only reads assets referenced by that ticker's pool
+    rows. Keep every such row, including invalid/duplicate observations, so
+    its provenance, latest-observation and derivative rules remain unchanged.
+    These indexes are local to this payload; no cross-revision cache survives.
+    """
+    asset_map = {(str(row.get('chainId')), str(row.get('token') or '').lower()): row
+                 for row in assets}
+    by_ticker, name_counts = {}, {}
+    for row in relations:
+        ticker = str((row.get('stockIdentity') or {}).get('ticker') or row.get('ticker') or '').upper()
+        by_ticker.setdefault(ticker, []).append(row)
+    for row in assets:
+        if row.get('relationLevel') == 'B':
+            ticker = str((row.get('match') or {}).get('ticker') or '').upper()
+            name_counts[ticker] = name_counts.get(ticker, 0) + 1
+    def selected(ticker):
+        rows = by_ticker.get(str(ticker).upper(), [])
+        keys = dict.fromkeys((str(row.get('chainId')), str(row.get('token') or '').lower())
+                             for row in rows)
+        return [asset_map[key] for key in keys if key in asset_map], rows
+    return selected, name_counts
+
+
 class DashboardData:
     """Reads the persisted facts and renders the unified payload."""
 
@@ -231,13 +281,20 @@ class DashboardData:
         self.market_quotes: list[dict] = []
         self.stream_states: list[dict] = []
         self.quote_jobs: dict[tuple[str, str], dict] = {}
+        self.stock_sparklines = {}
+        self.product_themes = {}
 
     async def reload(self, facts=None) -> None:
         async def all_rows(scoped, kind):
             return facts.all(scoped.scope, kind) if facts is not None else await scoped.all(kind)
 
         async def keyed_rows(scoped, kind):
-            return facts.all_kv(scoped.scope, kind) if facts is not None else await scoped.all_kv(kind)
+            if facts is not None:
+                try:
+                    return facts.all_kv(scoped.scope, kind)
+                except KeyError:
+                    return []  # An older fact schema has no optional history.
+            return await scoped.all_kv(kind)
 
         loaded_assets = []
         loaded_relations = []
@@ -247,8 +304,9 @@ class DashboardData:
         loaded_market_quotes = []
         loaded_stream_states = []
         loaded_quote_jobs = {}
+        loaded_stock_sparklines = {}
         updated = 0
-        for chain_id in ("196", "56", "4663"):
+        for chain_id in ("196", "56", "4663", "5042"):
             s = await store(chain_id)
             assets = await all_rows(s, "asset")
             # Only price-less assets need their durable quote checkpoint.
@@ -256,11 +314,14 @@ class DashboardData:
             for asset in assets:
                 token = str(asset.get('token') or '').lower()
                 if asset.get('kind') in ('candidate', 'stock') and asset.get('price') is None and token:
-                    job = await s.get('collector-job', 'quote:' + token)
+                    job = (facts.get(chain_id, 'collector-job', 'quote:' + token)
+                           if facts is not None else await s.get('collector-job', 'quote:' + token))
                     if job:
                         loaded_quote_jobs[(chain_id, token)] = job
             relations = await all_rows(s, "relation")
             stocks = catalogue_rows(await all_rows(s, "stock"), chain_id)
+            for token, sparkline in await keyed_rows(s, "stock-sparkline"):
+                loaded_stock_sparklines[(chain_id, token)] = sparkline
             loaded_market_quotes.extend({**q, "chainId": chain_id} for q in await all_rows(s, "market-quote"))
             for kind in ("chain-stream", "market-stream", "market-stream-status"):
                 for identity, q in await keyed_rows(s, kind):
@@ -313,7 +374,7 @@ class DashboardData:
         loaded_baskets = {}
         loaded_basket_last = {}
         loaded_basket_views = {}
-        for chain_id in ("196", "56", "4663"):
+        for chain_id in ("196", "56", "4663", "5042"):
             scoped = await store(chain_id)
             for name, body in await keyed_rows(scoped, "basket"):
                 loaded_baskets[(chain_id, name)] = {**body, "chainId": chain_id}
@@ -328,6 +389,9 @@ class DashboardData:
         self.market_quotes = loaded_market_quotes
         self.stream_states = loaded_stream_states
         self.quote_jobs = loaded_quote_jobs
+        self.stock_sparklines = loaded_stock_sparklines
+        system = await store("system")
+        self.product_themes = dict(await keyed_rows(system, "product-theme"))
         self.updated_at = updated or None
 
     # -- unified payload pieces -------------------------------------------------
@@ -370,6 +434,8 @@ class DashboardData:
                                           'current' if pool_totals['coverage']['complete'] else 'partial')
             row['pairLiquidityCoverage'] = pool_totals['coverage']
             row["dataQuality"] = evaluate_asset(row, approved, now)
+            row["dataQuality"]["eligible"]["qualified"] = qualified_asset(row, now)
+            row["productMetrics"] = asset_product_metrics(row, asset_relations, now=now)
             out.append(row)
         return out
 
@@ -507,6 +573,15 @@ class DashboardData:
                 for field in ("price", "volume24h", "change24h", "fieldTimes", "fieldSources", "quoteAt", "provider", "priceProvenance", "fieldScopes", "fieldTimeKinds", "fieldStatus", "fieldObservations"):
                     if fact.get(field) is not None:
                         row[field] = fact[field]
+            spark = self.stock_sparklines.get((str(st.get('chainId')), str(st.get('tokenContractAddress') or '').lower())) or {}
+            if spark:
+                row['sparkline'] = spark.get('points') or []
+                row['sparklineCoverage'] = spark.get('coverage')
+            ticker = row['issuerIdentity'].get('ticker') or row.get('stockCode')
+            metrics = self.product_themes.get(str(ticker or '').upper()) or {}
+            if metrics:
+                row['volumeRatio7d'] = metrics.get('volumeRatio7d') if fresh(metrics.get('at')) else None
+                row['volumeRatio7dEvidence'] = metrics.get('volumeRatio7dEvidence')
             directory.append(row)
         rows = stock_quotes.apply_stock_overlays(directory, self.market_quotes) if self.market_quotes else stock_quotes.apply_stock_overlays(directory)
         now = time.time() * 1000
@@ -534,7 +609,7 @@ class DashboardData:
         assets = self.visible_assets(enriched=enriched, now=now, relations=relations)
         official_pools = _official_pools(relations)
         totals_by_chain = {cid: _pool_totals([r for r in official_pools if str(r.get('chainId')) == cid], now)
-                           for cid in ('196', '56', '4663')}
+                           for cid in ('196', '56', '4663', '5042')}
         sources = _source_statuses(stock_tokens, assets)
         sources.extend({**row, "id": row.get("id") or f"{row.get('provider', 'chain')}:stream:{row['chainId']}",
                         "kind": row.get("kind") or "chain-stream",
@@ -557,7 +632,7 @@ class DashboardData:
         new_assets = newly_discovered_assets(assets, now)
         metrics['newAssets24h'] = new_assets['value']
         metrics_by_chain = {}
-        for cid in ('196', '56', '4663'):
+        for cid in ('196', '56', '4663', '5042'):
             chain_pools = [r for r in official_pools if str(r.get('chainId')) == cid]
             metrics_by_chain[cid] = self.metrics(now=now, pools=chain_pools)
             metrics_by_chain[cid]['activeMemeCount'] = _active_meme_count(assets, now, cid)
@@ -602,6 +677,43 @@ class DashboardData:
         from .theme_map import build_theme_map, build_important_changes
         theme_map = build_theme_map(assets, relations, int(now), stock_tokens)
         important_changes = build_important_changes(self.signals, relations, assets, int(now))
+        from .product_metrics import build_product_theme_metrics
+        def theme_cards(chain=None):
+            scoped_assets = [a for a in assets if chain is None or str(a.get('chainId')) == chain]
+            scoped_relations = [r for r in relations if chain is None or str(r.get('chainId')) == chain]
+            stocks = [row for row in stock_tokens if chain is None or str(row.get('chainId')) == chain]
+            metric_inputs, name_counts = _theme_metric_inputs(scoped_assets, scoped_relations)
+            pool_coverage = pool_coverage_by_ticker(scoped_relations)
+            by_ticker = {}
+            for stock in stocks:
+                ticker = str((stock.get('issuerIdentity') or {}).get('ticker') or stock.get('stockCode') or '').upper()
+                if ticker:
+                    by_ticker.setdefault(ticker, []).append(stock)
+            cards = []
+            for ticker, members in by_ticker.items():
+                members.sort(key=lambda row: (not fresh((row.get('fieldTimes') or {}).get('price')), -(row.get('volume24h') or 0)))
+                primary = members[0]
+                metric_assets, metric_relations = metric_inputs(ticker)
+                metric = build_product_theme_metrics(ticker, metric_assets, metric_relations, now=now)
+                name_count = name_counts.get(ticker, 0)
+                historical = self.product_themes.get(ticker) or {}
+                ratio = historical.get('volumeRatio7d') if fresh(historical.get('at')) and chain is None else None
+                cards.append({'ticker': ticker, 'stockCode': ticker, 'name': primary.get('stockName') or primary.get('name') or ticker,
+                    'stockToken': primary.get('tokenContractAddress'), 'stockTokenChain': str(primary.get('chainId')),
+                    'price': primary.get('price'), 'change24h': primary.get('change24h'), 'provider': primary.get('provider'),
+                    'quoteAt': primary.get('quoteAt') or (primary.get('fieldTimes') or {}).get('price'),
+                    'sparkline': primary.get('sparkline') or [], 'sparklineCoverage': primary.get('sparklineCoverage'),
+                    'volumeRatio7d': ratio, 'volumeRatio7dEvidence': historical.get('volumeRatio7dEvidence'),
+                    'stockTokens': [{'chainId': row.get('chainId'), 'tokenContractAddress': row.get('tokenContractAddress'),
+                                     'tokenSymbol': row.get('tokenSymbol'), 'price': row.get('price'), 'quoteAt': row.get('quoteAt')} for row in members],
+                    'theme': {'pairedCount': metric['memeCount'], 'nameCount': name_count,
+                              'poolCoverage': pool_coverage.get(ticker, {'recorded': 0}),
+                              'volume': {'value': metric['volume24hUsd'], 'known': metric['coverage']['volumeKnown'], 'total': metric['coverage']['poolCount']}},
+                    'themeMetrics': metric})
+            return sorted(cards, key=lambda row: (-(row['theme']['volume']['value'] or 0), -row['theme']['pairedCount'], row['ticker']))
+        stock_themes = theme_cards()
+        stock_themes_by_chain = {chain: theme_cards(chain) for chain in ('196', '56', '4663', '5042')}
+
         return {
             "now": now,
             "unified": {
@@ -609,6 +721,8 @@ class DashboardData:
                 "sources": sources,
                 "assets": payload_assets,
                 "stockTokens": payload_stocks,
+                "stockThemes": stock_themes,
+                "stockThemesByChain": stock_themes_by_chain,
                 "relations": payload_relations,
                 "signals": signals,
                 "themeMap": theme_map,
@@ -640,7 +754,7 @@ class DashboardData:
                             "asOf": now,
                         },
                     }
-                    for cid in ("196", "56", "4663")
+                    for cid in ("196", "56", "4663", "5042")
                 ],
                 "capabilities": _capabilities(sources),
                 "collection": {"updatedAt": self.updated_at},
@@ -672,7 +786,7 @@ async def _reload_shared_snapshot() -> None:
         file_identity = None
     identity = (scoped.path, scoped.db, file_identity, id(DATA))
     previous = _shared_fact_cache
-    async with aiosqlite.connect(scoped.path, timeout=15) as reader:
+    async with async_connect(scoped.path, readonly=True, timeout=15) as reader:
         reader.row_factory = aiosqlite.Row
         await reader.execute('PRAGMA query_only=ON')
         await reader.execute('BEGIN')

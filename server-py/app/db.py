@@ -1,6 +1,8 @@
-"""aiosqlite port of the Node research-store: the same tables (facts, samples,
-trades, events, candles) and the same scope-prefixed keys, so the existing
-research.sqlite is read in place with no migration."""
+"""Scoped research history with an explicitly enabled PostgreSQL runtime.
+
+SQLite remains the default until the complete import and cutover are verified.
+Both backends preserve the existing fact/trade/candle transaction protocol.
+"""
 import asyncio
 import hashlib
 import json
@@ -15,6 +17,8 @@ from typing import Callable
 from .realtime_schema import REALTIME_SCHEMA, trigger_schema
 
 import aiosqlite
+
+from .storage_runtime import async_connect, is_postgres_path
 
 DB_PATH = os.environ.get("RESEARCH_DB", "data/research.sqlite")
 WAL_JOURNAL_SIZE_LIMIT_BYTES = 256 * 1024 * 1024
@@ -255,6 +259,9 @@ class ResearchStore:
         return f"{self.scope}:{value}"
 
     async def connect(self) -> "ResearchStore":
+        if is_postgres_path(self.path):
+            await self._connect_once(self.busy_timeout_ms)
+            return self
         directory = os.path.dirname(self.path)
         if directory:
             os.makedirs(directory, exist_ok=True)
@@ -276,11 +283,15 @@ class ResearchStore:
 
     async def _connect_once(self, startup_timeout_ms: int) -> None:
         # Keep the handle reachable even if opening is cancelled or fails.
-        connection = aiosqlite.connect(self.path, timeout=startup_timeout_ms/1000)
+        connection = async_connect(self.path, timeout=startup_timeout_ms/1000)
         self.db = connection
         try:
             await connection
             connection.row_factory = aiosqlite.Row
+            if getattr(connection, 'backend', 'sqlite') == 'postgres':
+                from .storage_schema import verify_research_schema
+                await verify_research_schema(connection, realtime_outbox=getattr(self, 'realtime_outbox', True))
+                return
             # DDL is a writer too. It must participate in the exact same
             # process lock as collector transactions; otherwise a concurrent
             # connect can wait on a transaction whose task is waiting for DDL.
@@ -333,10 +344,10 @@ class ResearchStore:
         if self._checkpoint_db is None:
             async with self._checkpoint_init_lock:
                 if self._checkpoint_db is None:
-                    connection = await aiosqlite.connect(self.path)
+                    connection = await async_connect(self.path)
                     try:
-                        await connection.execute(
-                            f'PRAGMA busy_timeout={CHECKPOINT_BUSY_TIMEOUT_MS}')
+                        if getattr(connection, 'backend', 'sqlite') != 'postgres':
+                            await connection.execute(f'PRAGMA busy_timeout={CHECKPOINT_BUSY_TIMEOUT_MS}')
                     except BaseException:
                         await connection.close()
                         raise
@@ -348,6 +359,20 @@ class ResearchStore:
             "SELECT body FROM facts WHERE kind=? AND id=?", (self.key(kind), id)
         )
         return json.loads(row[0]) if row else None
+
+    async def get_many(self, kind: str, ids) -> dict[str, dict]:
+        """Read selected facts with bounded primary-key batches, not N queries."""
+        keys = list(dict.fromkeys(ids))
+        result = {}
+        for offset in range(0, len(keys), 256):
+            batch = keys[offset:offset + 256]
+            placeholders = ','.join('?' for _ in batch)
+            rows = await self.fetchall(
+                f'SELECT id,body FROM facts WHERE kind=? AND id IN ({placeholders})',
+                (self.key(kind), *batch),
+            )
+            result.update((str(row[0]), json.loads(row[1])) for row in rows)
+        return result
 
     async def fetchone(self, query, parameters=()):
         # Execute and drain in one aiosqlite thread job: no other coroutine
@@ -817,7 +842,7 @@ class ResearchStore:
                 async with self._guard_write():
                     observations, coverage = await read_source(self.db)
             else:
-                async with aiosqlite.connect(self.path, timeout=self.busy_timeout_ms / 1000) as reader:
+                async with async_connect(self.path, readonly=True, timeout=self.busy_timeout_ms / 1000) as reader:
                     await reader.execute("PRAGMA query_only=ON")
                     await reader.execute("BEGIN")
                     try:
@@ -915,16 +940,24 @@ class ResearchStore:
             await self.db.commit()
 
     async def activity(self, asset: str, since_ms: int) -> dict:
-        observations = await self.fetchall(
-            "SELECT body FROM trades WHERE asset=? AND t>=?", (self.key(asset), since_ms)
-        )
-        rows = [json.loads(r[0]) for r in observations]
+        # Aggregate on SQLite's worker thread. Only one result row crosses to
+        # Python, instead of retaining a day's JSON and a second parsed graph.
+        # DISTINCT covers the complete window, not a sum of hourly uniques.
+        row = await self.fetchone("""
+            SELECT COUNT(*),
+                   COALESCE(SUM(json_extract(body,'$.type')='buy'),0),
+                   COALESCE(SUM(json_extract(body,'$.type')='sell'),0),
+                   SUM(CASE WHEN json_type(body,'$.volume') IN ('integer','real')
+                            THEN json_extract(body,'$.volume') END),
+                   COUNT(DISTINCT CASE
+                     WHEN json_extract(body,'$.user') IS NOT NULL
+                      AND json_extract(body,'$.user') NOT IN ('',0)
+                     THEN json_extract(body,'$.user') END)
+            FROM trades WHERE asset=? AND t>=?
+            """, (self.key(asset), since_ms))
         return {
-            "buys": sum(1 for r in rows if r.get("type") == "buy"),
-            "sells": sum(1 for r in rows if r.get("type") == "sell"),
-            "volume": sum(r["volume"] for r in rows if r.get("volume") is not None) or None,
-            "count": len(rows),
-            "traders": len({r.get("user") for r in rows if r.get("user")}),
+            "buys": row[1], "sells": row[2], "volume": row[3] or None,
+            "count": row[0], "traders": row[4],
         }
 
     async def put_candles(self, asset: str, bar: str, rows: list) -> None:

@@ -1,7 +1,7 @@
 """One durable event journal and one tailer per API process.
 
 Collectors can append in their fact transaction with enqueue_event. Legacy
-publishers remain supported, but all readers now share the same SQLite cursor.
+publishers remain supported, but all readers now share the same committed cursor.
 """
 import asyncio
 import json
@@ -11,6 +11,7 @@ import time
 from collections import deque
 
 from .realtime_schema import REALTIME_SCHEMA
+from .storage_runtime import is_postgres_path, sync_connect
 
 _clients: set = set()
 _latest_price: dict = {}
@@ -32,11 +33,14 @@ def _ledger():
     if _db is None:
         from .db import DB_PATH
         path = os.environ.get('STREAM_LEDGER_PATH') or DB_PATH
-        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        _db = sqlite3.connect(path, timeout=15)
-        _db.execute('PRAGMA journal_mode=WAL')
-        _db.executescript(REALTIME_SCHEMA)
-        _db.commit()
+        if not is_postgres_path(path):
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        postgres = is_postgres_path(path)
+        _db = sync_connect(path, timeout=15, readonly=postgres)
+        if not postgres:
+            _db.execute('PRAGMA journal_mode=WAL')
+            _db.executescript(REALTIME_SCHEMA)
+            _db.commit()
     return _db
 
 
@@ -78,10 +82,14 @@ def _append_legacy_batch(batch):
     # This function runs on a thread when called from an event loop. External
     # SQLite writers may hold WAL's write lock; never wait for it on the loop.
     path = _journal_path()
-    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    connection = sqlite3.connect(path, timeout=15)
+    if not is_postgres_path(path):
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    connection = sync_connect(path, timeout=15)
     try:
-        connection.executescript(REALTIME_SCHEMA)
+        if not is_postgres_path(path):
+            connection.executescript(REALTIME_SCHEMA)
+            connection.commit()
+        connection.execute('BEGIN IMMEDIATE')
         result = []
         for event, body, now, key in batch:
             if key is not None:
@@ -151,8 +159,8 @@ def clients():
     return _clients
 
 
-def hello(q):
-    q.put_nowait((None, _frame('hello', {'schema': 1, 'at': int(time.time()*1000), 'cursor': cursor()})))
+def hello(q, sequence=None):
+    q.put_nowait((None, _frame('hello', {'schema': 1, 'at': int(time.time()*1000), 'cursor': cursor() if sequence is None else sequence})))
 
 
 def replay_page(last_id, upper=None, limit=500):
@@ -205,7 +213,7 @@ def _invalidate_reads(event):
 
 
 def _prune_journal(sequence):
-    connection = sqlite3.connect(_journal_path(), timeout=15)
+    connection = sync_connect(_journal_path(), timeout=15)
     try:
         # Select only expired ids through covering indexes before reserving a
         # writer. The former OR predicate scanned every retained JSON body
@@ -237,13 +245,38 @@ async def _prune(sequence):
         print('[stream] prune retry next interval:', type(exc).__name__, flush=True)
 
 
+def _tail_rows(after):
+    return _ledger().execute(
+        'SELECT id,event,body FROM realtime_events WHERE id>? ORDER BY id LIMIT 500', (after,)
+    ).fetchall()
+
+
+async def async_cursor():
+    if is_postgres_path(_journal_path()):
+        return await asyncio.to_thread(cursor)
+    return cursor()
+
+
+async def async_replay_page(last_id, upper=None, limit=500):
+    if is_postgres_path(_journal_path()):
+        return await asyncio.to_thread(replay_page, last_id, upper, limit)
+    return replay_page(last_id, upper, limit)
+
+
+async def async_replay_batch(last_id, include_latest=True):
+    if is_postgres_path(_journal_path()):
+        return await asyncio.to_thread(replay_batch, last_id, include_latest)
+    return replay_batch(last_id, include_latest)
+
+
 async def _tail():
     global _last_cursor, _last_pruned, _pruner
     while True:
         try:
-            rows = _ledger().execute(
-                'SELECT id,event,body FROM realtime_events WHERE id>? ORDER BY id LIMIT 500', (_last_cursor,)
-            ).fetchall()
+            if is_postgres_path(_journal_path()):
+                rows = await asyncio.to_thread(_tail_rows, _last_cursor)
+            else:
+                rows = _tail_rows(_last_cursor)
             for seq, event, body in rows:
                 _invalidate_reads(event)
                 _fanout(seq, _serialized_frame(event, body, seq))
@@ -262,7 +295,7 @@ async def _tail():
 async def start_hub():
     global _tailer, _last_cursor
     if _tailer is None or _tailer.done():
-        _last_cursor = cursor()
+        _last_cursor = await async_cursor()
         _tailer = asyncio.create_task(_tail(), name='realtime-event-tailer')
 
 

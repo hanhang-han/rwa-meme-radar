@@ -179,7 +179,7 @@ class BriefingTests(unittest.IsolatedAsyncioTestCase):
         items = briefing.briefing_items(unified, 'fixed-revision')
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]['asset']['address'], first)
-        self.assertEqual(items[0]['asset']['chain'], 'BNB Smart Chain')
+        self.assertEqual(items[0]['asset']['chain'], 'BNB Chain')
         self.assertEqual(items[0]['snapshotId'], 'fixed-revision')
         self.assertEqual(items[0]['fields']['volumeLiquidityRatio'], 61)
         self.assertIn('61 倍', briefing.render_briefing(items, 'zh'))

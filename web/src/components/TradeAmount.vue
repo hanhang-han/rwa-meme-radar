@@ -1,7 +1,6 @@
 <template>
-  <span class="trade-amount" :title="amount.usd ? tr('美元成交额', 'USD trade amount') : tr('缺少成交时点的美元换算依据', 'No verified USD conversion at trade time')">
+  <span class="trade-amount" :title="amount.value==null ? tr('成交金额暂无数据；不表示零','Trade amount unavailable; does not mean zero') : (amount.usd ? tr('美元成交额', 'USD trade amount') : tr('暂无法折算为美元；显示原币金额', 'USD conversion unavailable; showing the original currency'))+': '+amount.value+' '+amount.unit">
     <span>{{ amount.value == null ? '—' : amount.usd ? usd(amount.value) : money(amount.value, amount.unit) }}</span>
-    <small v-if="!amount.usd">{{ tr('美元金额未计价', 'USD value not priced') }}</small>
   </span>
 </template>
 
@@ -33,7 +32,6 @@ const amount=computed(()=>describeTradeAmount(props.trade));
 </script>
 
 <style scoped>
-.trade-amount {display:inline-flex;flex-direction:column;gap:1px;min-width:0;line-height:1.3;font-variant-numeric:tabular-nums;}
+.trade-amount {display:inline-flex;min-width:0;line-height:1.3;font-variant-numeric:tabular-nums;}
 .trade-amount>span {overflow-wrap:anywhere;}
-.trade-amount small {font-size:10px;font-weight:400;color:var(--muted);white-space:normal;}
 </style>

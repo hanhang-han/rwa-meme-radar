@@ -101,7 +101,7 @@ class BasketHistoryTest(unittest.IsolatedAsyncioTestCase):
         from app.db import ResearchStore
         self.temp = tempfile.TemporaryDirectory()
         self.stores = {c: await ResearchStore(self.temp.name + '/research.sqlite', c).connect()
-                       for c in ('196', '56', '4663')}
+                       for c in ('196', '56', '4663', '5042', 'system')}
 
     async def asyncTearDown(self):
         for scoped in self.stores.values():

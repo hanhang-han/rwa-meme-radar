@@ -14,26 +14,27 @@ from app.projection_facts import ProjectionFacts
 class SharedFactCacheTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.path = self.tmp.name + '/facts.sqlite'
         self.saved_stores = storage._stores
+        self.addCleanup(setattr, storage, '_stores', self.saved_stores)
         storage._stores = {}
+        self.write_lock = storage.WriterLock()
+        self.addAsyncCleanup(storage.close_all)
         for chain in ('196', '56', '4663', 'system'):
-            storage._stores[chain] = await ResearchStore(self.path, chain).connect()
+            scoped = ResearchStore(self.path, chain, write_lock=self.write_lock)
+            storage._stores[chain] = scoped
+            await scoped.connect()
         self.s = storage._stores['196']
         self.saved_state = {key: getattr(state, key) for key in
                             ('DATA', '_loaded_at', '_reload_task', '_shared_fact_cache', '_invalidate_generation')}
+        for key, value in self.saved_state.items():
+            self.addCleanup(setattr, state, key, value)
         state.DATA = state.DashboardData()
         state._loaded_at = 0
         state._reload_task = None
         state._shared_fact_cache = None
         state._invalidate_generation = 0
-
-    async def asyncTearDown(self):
-        await storage.close_all()
-        storage._stores = self.saved_stores
-        for key, value in self.saved_state.items():
-            setattr(state, key, value)
-        self.tmp.cleanup()
 
     @staticmethod
     def asset(token, price):
@@ -93,6 +94,51 @@ class SharedFactCacheTests(unittest.IsolatedAsyncioTestCase):
             external.commit()
         await state.reload_data()
         self.assertNotIn(('56', '芯片'), state.DATA.basket_views)
+
+    async def test_quote_checkpoints_use_fact_view_without_per_asset_database_reads(self):
+        for index in range(30):
+            token = 'unquoted-' + str(index)
+            await self.put(token, None)
+            await self.s.put('collector-job', 'quote:' + token, {'failureCount': 5})
+        with patch.object(ResearchStore, 'get', side_effect=AssertionError('per-asset-checkpoint-read')):
+            await state.reload_data()
+        self.assertEqual(len(state.DATA.quote_jobs), 30)
+        old_cache = state._shared_fact_cache[2]
+        await self.s.put('collector-job', 'quote:unquoted-0', {'failureCount': 1})
+        with patch.object(ResearchStore, 'get', side_effect=AssertionError('per-asset-checkpoint-read')):
+            await state.reload_data()
+        self.assertEqual(state.DATA.quote_jobs[('196', 'unquoted-0')]['failureCount'], 1)
+        self.assertEqual(old_cache.rows['196:collector-job']['quote:unquoted-0']['failureCount'], 5)
+        with closing(sqlite3.connect(self.path)) as external:
+            external.execute('DELETE FROM facts WHERE kind=? AND id=?',
+                             ('196:collector-job', 'quote:unquoted-0'))
+            external.commit()
+        await state.reload_data()
+        self.assertNotIn(('196', 'unquoted-0'), state.DATA.quote_jobs)
+
+    async def test_asset_and_quote_checkpoint_stay_in_same_snapshot_then_advance_together(self):
+        await self.put('unquoted', None)
+        await self.s.put('collector-job', 'quote:unquoted', {'failureCount': 5})
+        capture = ProjectionFacts.capture
+        async def change_after_capture(connection, previous, changes):
+            facts = await capture(connection, previous, changes)
+            with closing(sqlite3.connect(self.path)) as external:
+                external.execute('UPDATE facts SET body=? WHERE kind=? AND id=?',
+                                 (json.dumps(self.asset('unquoted', 2)), '196:asset', 'unquoted'))
+                external.execute('UPDATE facts SET body=? WHERE kind=? AND id=?',
+                                 ('{"failureCount":0}', '196:collector-job', 'quote:unquoted'))
+                external.commit()
+            return facts
+        with patch.object(ProjectionFacts, 'capture', side_effect=change_after_capture):
+            await state.reload_data()
+        original = state._shared_fact_cache[2]
+        self.assertIsNone(self.prices()['unquoted'])
+        self.assertEqual(state.DATA.quote_jobs[('196', 'unquoted')]['failureCount'], 5)
+        await state.reload_data()
+        self.assertEqual(self.prices()['unquoted'], 2)
+        self.assertNotIn(('196', 'unquoted'), state.DATA.quote_jobs)
+        self.assertNotIn('quote:unquoted', state._shared_fact_cache[2].rows['196:collector-job'])
+        self.assertEqual(original.rows['196:collector-job']['quote:unquoted']['failureCount'], 5)
 
     async def test_repeated_missing_price_is_disclosed_without_deleting_candidate(self):
         token = '0x' + 'a' * 40
@@ -193,12 +239,13 @@ class SharedFactCacheTests(unittest.IsolatedAsyncioTestCase):
         await self.put('old', 1)
         await state.reload_data()
         await self.s.close()
-        self.s = storage._stores['196'] = await ResearchStore(self.path, '196').connect()
+        self.s = storage._stores['196'] = await ResearchStore(self.path, '196', write_lock=self.write_lock).connect()
         with patch.object(ProjectionFacts, 'capture', wraps=ProjectionFacts.capture) as capture:
             await state.reload_data()
         self.assertIsNone(capture.await_args.args[1])
         await self.s.close()
-        self.s = storage._stores['196'] = await ResearchStore(self.tmp.name + '/replacement.sqlite', '196').connect()
+        self.s = storage._stores['196'] = await ResearchStore(self.tmp.name + '/replacement.sqlite', '196',
+                                                           write_lock=self.write_lock).connect()
         await self.put('replacement', 2)
         await state.reload_data()
         self.assertEqual(self.prices(), {'replacement': 2})

@@ -5,9 +5,9 @@
       <span v-if="error" role="status">{{ tr('更新失败 · 显示历史数据', 'Update failed · showing history') }} <button @click="load">{{ tr('重试', 'Retry') }}</button></span>
     </div>
     <div class="spread-cards">
-      <article><small>{{ tr('股票代币溢价', 'Stock-token premium') }}</small><ComparisonMetric :value="current?.premium" /><p>{{ tr('每枚代币相对其对应股票价值的溢价。', 'Token premium over its underlying stock value.') }}</p></article>
-      <article v-if="pool"><small>{{ tr('配对池价差', 'Pair-pool spread') }}</small><ComparisonMetric :value="pair?.spread" /><p>{{ tr('池内报价与独立市场报价之差。', 'Difference between pool and independent market quotes.') }}</p></article>
-      <article v-if="pool"><small>{{ tr('Meme 相对涨幅', 'Meme relative performance') }} · {{ windowLabel }}</small><ComparisonMetric :value="pair?.relative?.[windowSize]" unit="pp" /><p>{{ tr('Meme 涨幅减去股票涨幅，不预示未来走势。', 'Meme return minus stock return; not a forecast.') }}</p></article>
+      <article :title="tr('代币市场价相对每枚代币对应股票价值的差值百分比。','Percentage difference between the token market quote and the stock value represented by one token.')"><small>{{ tr('股票代币溢价', 'Stock-token premium') }} · %</small><ComparisonMetric :value="current?.premium" /><p>{{ tr('每枚代币相对其对应股票价值的溢价。', 'Token premium over its underlying stock value.') }}</p></article>
+      <article v-if="pool" :title="tr('所选配对池的边际兑换报价相对独立市场报价的差值百分比。','Percentage difference between the selected pool marginal exchange quote and independent market quotes.')"><small>{{ tr('配对池价差', 'Pair-pool spread') }} · %</small><ComparisonMetric :value="pair?.spread" /><p>{{ tr('池内报价与独立市场报价之差。', 'Difference between pool and independent market quotes.') }}</p></article>
+      <article v-if="pool" :title="tr('所选窗口内 Meme 涨跌百分比减去股票涨跌百分比，单位为百分点。','Meme return minus stock return in the selected window, measured in percentage points.')"><small>{{ tr('Meme 相对涨幅', 'Meme relative performance') }} · {{ windowLabel }}</small><ComparisonMetric :value="pair?.relative?.[windowSize]" unit="pp" /><p>{{ tr('Meme 涨幅减去股票涨幅，不预示未来走势。', 'Meme return minus stock return; not a forecast.') }}</p></article>
     </div>
     <div class="spread-controls">
       <label>{{ tr('比较窗口', 'Comparison window') }} <select v-model="windowSize"><option value="1h">{{ tr('1 小时', '1 hour') }}</option><option value="24h">{{ tr('24 小时', '24 hours') }}</option></select></label>
@@ -24,7 +24,7 @@
     <div class="spread-controls"><label>{{ tr('走势图', 'Chart') }} <select v-model="chart"><option value="spread">{{ pool ? tr('配对池价差历史', 'Pair spread history') : tr('股票代币溢价历史', 'Stock-token premium history') }}</option><option v-if="pool" value="relative">{{ tr('股票与 Meme 走势对比', 'Stock and meme comparison') }}</option></select></label></div>
     <p v-if="chart === 'relative'" class="hint">{{ tr('起点归一为 100，比较同期涨跌。数据口径变化时重新计起。', 'Both start at 100 to compare performance. A change in source, adjustment or units resets the baseline.') }}</p>
     <p v-if="chart === 'relative' && relative.some(p => !p.adjustmentVersion)" class="hint">{{ tr('部分报价缺少拆股等调整信息，未纳入走势。', 'Quotes without corporate-action adjustments are excluded from the chart.') }}</p>
-    <ComparisonChart :rows="chartRows" :series="series" :label="chart === 'relative' ? tr('股票与 Meme 走势对比', 'Stock and meme comparison') : tr('价差历史', 'Spread history')" />
+    <ComparisonChart :rows="chartRows" :series="series" :label="(chart === 'relative' ? tr('股票与 Meme 走势对比', 'Stock and meme comparison') : pool ? tr('配对池价差历史','Pair-pool spread history') : tr('股票代币溢价历史','Stock-token premium history'))+' · '+windowLabel" :unit="chart === 'relative' ? tr('指数 · 起点 100','Index · starts at 100') : '%'" />
     <details class="spread-evidence"><summary>{{ tr('价差提醒记录', 'Spread alert history') }} · {{ alerts.length }}</summary>
       <p class="hint">{{ tr('仅实时对齐报价触发：溢价 2%、池价差 3%，持续 30 秒且至少 3 次新报价；恢复阈值为触发阈值的 60%。池价差还需新鲜流动性至少 1 万美元。', 'Live aligned quotes only: 2% premium or 3% pool spread for 30 seconds and at least 3 new observations. Recovery uses 60% of the trigger threshold. Pool spreads also need fresh liquidity of at least $10,000.') }}</p>
       <p v-if="!alerts.length">{{ tr('暂无价差提醒。', 'No spread alerts yet.') }}</p>
@@ -66,9 +66,9 @@ const chartRows = computed(() => {
   return chart.value === 'relative' ? chartSamples(normalizedHistory(windowHistory(relative.value, duration, now.value)), ['stock', 'meme']) : chartSamples(windowHistory(history.value, duration, now.value), ['value']);
 });
 const series = computed(() => chart.value === 'relative' ? [
-  { key: 'stock', color: '#648cf4', label: tr('股票参考价', 'Stock reference') },
-  { key: 'meme', color: '#20ba98', label: 'Meme' },
-] : [{ key: 'value', color: '#648cf4', label: tr('价差（%）', 'Spread (%)') }]);
+  { key: 'stock', color: 'var(--accent)', label: tr('股票参考价', 'Stock reference') },
+  { key: 'meme', color: 'var(--up)', label: 'Meme' },
+] : [{ key: 'value', color: 'var(--accent)', label: tr('价差（%）', 'Spread (%)') }]);
 function mergeRows(old, rows) {
   return [...new Map([...old, ...rows].map(p => [p.at, p])).values()].sort((a, b) => a.at-b.at).filter(p => p.at >= Date.now()-86400000).slice(-12000);
 }
@@ -104,7 +104,7 @@ onUnmounted(() => { generation++; clearInterval(timer);window.removeEventListene
 <style scoped>
 .spread-panel { margin-block: 16px; }
 .spread-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
-.spread-cards article { padding: 16px; border: 1px solid var(--line, #293246); border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }
+.spread-cards article { padding: 16px; border: 1px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }
 .spread-cards article > small { font-size: 13px; }
 .spread-cards p, .spread-evidence, .spread-controls { font-size: 12px; color: var(--muted, #8795a7); }
 .spread-cards p { margin: 0; line-height: 1.6; }

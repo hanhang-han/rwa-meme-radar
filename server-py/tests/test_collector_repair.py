@@ -15,7 +15,7 @@ class CollectorRepairTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from app.db import ResearchStore
         self.temp = tempfile.TemporaryDirectory()
-        self.stores = {c: await ResearchStore(self.temp.name + '/research.sqlite', c).connect() for c in ('196', '56', '4663')}
+        self.stores = {c: await ResearchStore(self.temp.name + '/research.sqlite', c).connect() for c in ('196', '56', '4663', '5042')}
         self.token = '0x' + '1' * 40
 
     async def asyncTearDown(self):
@@ -134,8 +134,9 @@ class CollectorRepairTest(unittest.IsolatedAsyncioTestCase):
             if rel['pool'] != pools[-1]:
                 raise ValueError('unsupported')
             accepted.append(rel['pool'])
+            return 'valued'
         web3 = SimpleNamespace(eth=SimpleNamespace(chain_id=196, get_block=lambda _: {'number': 1, 'timestamp': 1000}))
-        with patch.object(m, 'store', self.store), patch.object(m, '_pool_quote', quote), patch.object(m, 'chain_web3', return_value=web3):
+        with patch.object(m, 'store', self.store), patch.object(m, '_pool_quote', quote), patch.object(m, 'chain_web3', return_value=web3), patch.object(m, 'token_identity', return_value={'eligibleForPair': True}):
             first = await m.refresh_liquidity()
             second = await m.refresh_liquidity()
         self.assertEqual(first['failed'], 12)
@@ -150,7 +151,7 @@ class CollectorRepairTest(unittest.IsolatedAsyncioTestCase):
         rel = {'id': 'r', 'pool': pool, 'token': self.token, 'stock': underlying, 'stockSide': wrapper,
                'token0': self.token, 'token1': wrapper, 'wrapper': True, 'status': 'verified'}
         await s.put('relation', 'r', rel)
-        await s.put('asset', underlying, {'price': 100, 'fieldTimes': {'price': now}})
+        await s.put('asset', underlying, {'price': 100, 'priceCurrency': 'USD', 'fieldTimes': {'price': now}})
         conversion = [False]
         async def rpc(address, selector, block='latest'):
             if selector == '0x0902f1ac':
@@ -166,6 +167,43 @@ class CollectorRepairTest(unittest.IsolatedAsyncioTestCase):
         final = await s.get('relation', 'r')
         self.assertEqual(final['liquidityUsd'], 4000)
         self.assertEqual(final['liquidityMethod'], 'erc4626_reserves_valuation')
+
+    async def test_v3_usd_tvl_uses_balances_ratio_and_actual_quote_clock(self):
+        from app.collectors import main_round as m
+        s = self.stores['196']
+        stock, pool = '0x'+'2'*40, '0x'+'4'*40
+        now = 2_000_000
+        rel = {'id':'v3','pool':pool,'token':self.token,'stock':stock,
+            'token0':self.token,'token1':stock,'status':'verified'}
+        await s.put('relation', 'v3', rel)
+        await s.put('asset', self.token, {'price':2,'priceCurrency':'USD','fieldTimes':{'price':now-1000}})
+        async def rpc(address, selector, block='latest'):
+            self.assertEqual(block, 123)
+            if selector == '0x0902f1ac':
+                raise RuntimeError('execution reverted')
+            value = 2**96 if selector == '0x3850c7bd' else (100 if address == self.token else 20)*10**18
+            return value.to_bytes(32,'big')
+        with patch.object(m,'rpc_call',rpc), patch.object(m,'cached_decimals',AsyncMock(return_value=18)), patch.object(m,'now_ms',return_value=now):
+            self.assertEqual(await m._pool_quote(s,rel,123,now),'valued')
+            final=await s.get('relation','v3')
+            self.assertEqual(final['liquidityUsd'],240)
+            self.assertEqual(final['liquidityAt'],now-1000)
+            self.assertEqual(final['liquidityMethod'],'v3_balances_tvl_spot_usd')
+            await s.patch_fact('asset',self.token,{'priceCurrency':'HKD'})
+            self.assertEqual(await m._pool_quote(s,rel,123,now),'usd-price-unavailable')
+            self.assertEqual((await s.get('relation','v3'))['liquidityAt'],now-1000)
+
+    async def test_missing_valuation_never_advances_success_checkpoint(self):
+        from app.collectors import main_round as m
+        s=self.stores['196']
+        await s.put('relation','missing',{'id':'missing','pool':'p','token':self.token,'stock':self.token,'status':'verified'})
+        web3=SimpleNamespace(eth=SimpleNamespace(chain_id=196,get_block=lambda _: {'number':1,'timestamp':1000}))
+        with patch.object(m,'store',self.store), patch.object(m,'_pool_quote',AsyncMock(return_value='usd-price-unavailable')), patch.object(m,'chain_web3',return_value=web3), patch.object(m,'token_identity',return_value={'eligibleForPair':True}):
+            result=await m.refresh_liquidity()
+        job=await s.get('collector-job','pool-quote:p')
+        self.assertEqual(result['accepted'],0)
+        self.assertFalse(job.get('lastSuccessAt'))
+        self.assertEqual(job['reason'],'usd-price-unavailable')
 
     def trade_page(self, start, count=100):
         return [{'chainIndex': '196', 'tokenContractAddress': self.token, 'id': str(t), 'time': t,

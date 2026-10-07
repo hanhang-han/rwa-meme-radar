@@ -4,8 +4,10 @@ import os
 import tempfile
 import threading
 import unittest
+from contextlib import asynccontextmanager
+from unittest.mock import patch
 
-from app.db import ResearchStore
+from app.db import ResearchStore, WriterLock
 from app.collectors.factory_discovery import (
     FACTORIES, FACTORY_SELECTOR, GET_PAIR_SELECTOR, V2_FACTORY,
     V2_PROOF_POOL, V3_FACTORY, V3_PROOF_POOL, FactoryDiscovery,
@@ -307,6 +309,170 @@ class DurableFactoryTests(unittest.IsolatedAsyncioTestCase):
             [item], {"block": 12, "hash": self.rpc.hashes[12]},
             10, {"block": 14}, cursor, 3)), 1)
         self.assertEqual((await watcher._cursor())["block"], 12)
+
+    async def test_partial_range_failure_keeps_only_complete_durable_blocks(self):
+        self.rpc.logs = [self.rpc.log(FACTORIES[1], block, "0x" + f"{1000 + block * 2 + index:040x}",
+                                      tx=block * 2 + index, index=index)
+                         for block in (10, 11, 12) for index in (0, 1)]
+        watcher = self.collector()
+        await watcher._init()
+        await self.store.db.execute("""CREATE TRIGGER fail_later_batch
+            BEFORE UPDATE ON factory_discovery_cursors WHEN NEW.block>=11
+            BEGIN SELECT RAISE(ABORT, 'later-batch-failed'); END""")
+        await self.store.db.commit()
+        with patch('app.collectors.factory_discovery.COMMIT_EVENT_TARGET', 2):
+            with self.assertRaisesRegex(Exception, 'later-batch-failed'):
+                await watcher.run_once(max_ranges=1)
+        # The failed block is entirely absent, and the watermark never skips
+        # it. A restart reuses only the committed prefix and fills every gap.
+        self.assertEqual((await watcher._cursor())["block"], 10)
+        self.assertEqual([row[0] for row in await self.store.fetchall(
+            "SELECT block FROM factory_discovery_events ORDER BY log_index")], [10, 10])
+        await self.store.db.execute("DROP TRIGGER fail_later_batch")
+        await self.store.db.commit()
+        restarted = self.collector()
+        with patch('app.collectors.factory_discovery.COMMIT_EVENT_TARGET', 2):
+            await restarted.run_once(max_ranges=3)
+        self.assertEqual((await restarted._cursor())["block"], 14)
+        self.assertEqual([row[0] for row in await self.store.fetchall(
+            "SELECT block FROM factory_discovery_events ORDER BY block,log_index")],
+            [10, 10, 11, 11, 12, 12])
+
+    async def test_live_writer_runs_between_complete_factory_batches(self):
+        watcher = self.collector()
+        await watcher._init()
+        cursor = await watcher._bootstrap({"block": 14})
+        items, end = await watcher._fetch_range(10, 14, {"block": 14}, cursor)
+        # Prepare two whole event blocks, even with a one-event target.
+        for block in (10, 12):
+            for index in (0, 1):
+                raw = self.rpc.log(FACTORIES[1], block, "0x" + f"{block * 2 + index:040x}",
+                                   tx=block * 2 + index, index=index)
+                items.append(decode_factory_log(FACTORIES[1], raw, {
+                    "block": block, "hash": self.rpc.hashes[block],
+                    "timestamp": 1_790_000_000 + block * 2}, 14, 2, 1234))
+        factory_started = asyncio.Event()
+
+        class ObservedLock(WriterLock):
+            async def acquire(lock):
+                result = await super().acquire()
+                if asyncio.current_task().get_name() == 'factory-batches':
+                    factory_started.set()
+                return result
+
+        original_lock = self.store._write_lock
+        self.store._write_lock = ObservedLock()
+
+        async def live_write():
+            await factory_started.wait()
+            async with self.store._guard_write():
+                current = await watcher._cursor()
+                rows = await self.store.fetchall("SELECT block FROM factory_discovery_events")
+                await self.store.db.execute("INSERT INTO events VALUES (?,?,?,?)",
+                                            ('live-batch-probe', self.store.key(TOKEN0), 1234, '{}'))
+                await self.store.db.commit()
+                return current['block'], [row[0] for row in rows]
+
+        try:
+            contender = asyncio.create_task(live_write())
+            with patch('app.collectors.factory_discovery.COMMIT_EVENT_TARGET', 1):
+                factory = asyncio.create_task(watcher._commit_range(
+                    items, end, 10, {'block': 14}, cursor, 3), name='factory-batches')
+                await asyncio.wait_for(factory, 3)
+                mid_cursor, mid_rows = await asyncio.wait_for(contender, 3)
+            self.assertEqual((mid_cursor, mid_rows), (10, [10, 10]))
+            self.assertEqual((await watcher._cursor())['block'], 14)
+        finally:
+            self.store._write_lock = original_lock
+
+    async def test_stale_factory_writer_cannot_move_cursor_backwards(self):
+        watcher = self.collector()
+        await watcher._init()
+        stale = await watcher._bootstrap({"block": 14})
+        await watcher._commit_range([], {"block": 14, "hash": self.rpc.hashes[14]},
+                                    10, {"block": 14}, stale, 3)
+        with self.assertRaisesRegex(RuntimeError, 'factory-cursor-changed'):
+            await watcher._commit_range([], {"block": 12, "hash": self.rpc.hashes[12]},
+                                        10, {"block": 14}, stale, 3)
+        self.assertEqual((await watcher._cursor())['block'], 14)
+
+    async def test_confirmation_is_bounded_and_skips_lock_when_empty(self):
+        self.rpc.logs = [self.rpc.log(FACTORIES[1], 14, "0x" + f"{1000 + index:040x}",
+                                      tx=1000 + index, index=index) for index in range(7)]
+        watcher = self.collector()
+        await watcher.run_once(max_ranges=3)
+        # 1m/5m collection must get the writer between housekeeping ticks.
+        with patch('app.collectors.factory_discovery.CONFIRM_EVENT_LIMIT', 3):
+            self.assertEqual(await watcher._confirm_existing({'block': 16}), 3)
+            self.assertEqual((await self.store.fetchone("SELECT COUNT(*) FROM factory_discovery_events WHERE status='provisional'"))[0], 4)
+            self.assertEqual(await watcher._confirm_existing({'block': 16}), 3)
+            self.assertEqual(await watcher._confirm_existing({'block': 16}), 1)
+        # Holding the process writer lock cannot block an empty confirmation
+        # scan: it remains a read and never enqueues a pointless transaction.
+        async with self.store._write_lock:
+            self.assertEqual(await asyncio.wait_for(watcher._confirm_existing({'block': 16}), 1), 0)
+        plan = await self.store.fetchall("""EXPLAIN QUERY PLAN SELECT id FROM factory_discovery_events
+            INDEXED BY factory_discovery_confirmation WHERE chain='196' AND status='provisional'
+            AND block<=16 ORDER BY block LIMIT 128""")
+        self.assertTrue(any('factory_discovery_confirmation' in row[3] for row in plan))
+
+    async def test_cancelled_range_rolls_back_before_retry(self):
+        import aiosqlite
+
+        watcher = self.collector()
+        await watcher._init()
+        cursor = await watcher._bootstrap({'block': 14})
+        self.rpc.logs = [self.rpc.log(FACTORIES[1], 12, POOL_V2)]
+        items, end = await watcher._fetch_range(10, 12, {'block': 14}, cursor)
+        at_commit = asyncio.Event()
+        original_connect = aiosqlite.connect
+
+        class PausedCommit:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            async def commit(self):
+                # Both INSERT and cursor UPDATE have run, but neither is
+                # durable. Cancellation must roll back both on this handle.
+                at_commit.set()
+                await asyncio.Future()
+
+        @asynccontextmanager
+        async def paused_connection(*args, **kwargs):
+            async with original_connect(*args, **kwargs) as connection:
+                yield PausedCommit(connection)
+
+        with patch('app.collectors.factory_discovery.aiosqlite.connect', paused_connection):
+            task = asyncio.create_task(watcher._commit_range(
+                items, end, 10, {'block': 14}, cursor, 3))
+            await asyncio.wait_for(at_commit.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual((await watcher._cursor())['block'], 9)
+        self.assertEqual((await self.store.fetchone('SELECT COUNT(*) FROM factory_discovery_events'))[0], 0)
+        self.assertEqual(len(await watcher._commit_range(
+            items, end, 10, {'block': 14}, cursor, 3)), 1)
+
+    async def test_replayed_unchanged_event_does_not_write_or_replace_discovery_time(self):
+        self.rpc.logs = [self.rpc.log(FACTORIES[1], 12, POOL_V2)]
+        watcher = self.collector()
+        await watcher.run_once(max_ranges=2)
+        stored = (await watcher.recent())[0]
+        # Simulate the range being re-read from an earlier durable cursor.
+        # Stable evidence must not churn triggers/pages on identical replay.
+        await self.store.db.execute("UPDATE factory_discovery_cursors SET block=9,hash=?,anchors=? WHERE chain='196'",
+                                    (self.rpc.hashes[9], json.dumps([{'block': 9, 'hash': self.rpc.hashes[9]}])))
+        await self.store.db.execute("""CREATE TRIGGER reject_unchanged_event_update
+            BEFORE UPDATE ON factory_discovery_events WHEN OLD.status='confirmed'
+            BEGIN SELECT RAISE(ABORT, 'unexpected-evidence-update'); END""")
+        await self.store.db.commit()
+        replay = await watcher.run_once(max_ranges=2)
+        self.assertEqual(replay['newEvents'], [])
+        self.assertEqual((await watcher.recent())[0]['discoveredAt'], stored['discoveredAt'])
 
     async def test_reorg_orphans_old_log_and_replays_canonical_event(self):
         old = self.rpc.log(FACTORIES[1], 14, POOL_V2, tx=2)

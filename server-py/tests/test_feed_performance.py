@@ -61,9 +61,27 @@ class BoundedTapeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(time_queries)
         plan = ' '.join(str(tuple(r)) for r in self.scope.db.execute('EXPLAIN QUERY PLAN '+time_queries[0][0], time_queries[0][1]))
         self.assertIn('COVERING INDEX trades_time', plan)
+        head_queries = [(q, p) for q, p in self.scope.queries if q.startswith('WITH requested(asset) AS (SELECT ? AS asset')]
+        self.assertTrue(head_queries)
+        for query, params in head_queries:
+            head_plan = [str(tuple(r)) for r in self.scope.db.execute('EXPLAIN QUERY PLAN '+query, params)]
+            self.assertIn('COVERING INDEX trades_time', ' '.join(head_plan))
+            self.assertFalse(any('SCAN trades' in step or 'USE TEMP B-TREE' in step for step in head_plan))
         for query, _ in self.scope.queries:
             if query.startswith('SELECT asset,id,t,body'):
                 self.assertIn('AND t>=?', query)
+
+    async def test_heads_batch_over_two_hundred_markets_without_reading_empty_or_old_tapes(self):
+        storages = [self.scope.key('dex:'+str(n)) for n in range(205)]
+        self.scope.db.executemany('INSERT INTO trades VALUES (?,?,?,?)',
+            ((storage, 'old', n, 'old body is intentionally invalid') for n, storage in enumerate(storages)))
+        for n in range(3):
+            self.scope.db.execute('INSERT INTO trades VALUES (?,?,?,?)',
+                (storages[n], 'new', 10000+n, json.dumps({'id': 'new', 't': 10000+n})))
+        rows = await _bounded_trade_rows(self.scope, [*storages, storages[0], self.scope.key('empty')], 3)
+        self.assertEqual([row['t'] for row in rows], [10002, 10001, 10000])
+        heads = [(query, params) for query, params in self.scope.queries if query.startswith('WITH requested(asset) AS (SELECT ? AS asset')]
+        self.assertEqual([len(params) for _, params in heads], [200, 6])
 
     async def test_equal_time_and_offset_match_full_numeric_order_before_limit(self):
         storages = [self.scope.key('dex:'+str(n)) for n in range(20)]
@@ -103,14 +121,16 @@ class FeedCacheTests(unittest.IsolatedAsyncioTestCase):
         misc._feed_locks.clear()
 
     async def asyncTearDown(self):
+        await misc.stop_feed_reads()
         misc._feed_cache.clear()
         misc._feed_locks.clear()
 
     async def test_concurrent_first_visitors_share_one_read_and_ttl_expires(self):
-        async def load(chain):
+        async def load(chain, **_kwargs):
             await asyncio.sleep(0.01)
             return {'trades': [], 'relationships': [], 'chain': chain}
-        with patch.object(misc, '_load_feed', AsyncMock(side_effect=load)) as read:
+        with patch.object(misc, '_load_feed', AsyncMock(side_effect=load)) as read, \
+             patch.object(misc, 'read_projection_json', AsyncMock(return_value=json.dumps({'assets': [], 'signals': []}))):
             results = await asyncio.gather(*(misc.get_feed('56') for _ in range(15)))
             self.assertEqual(read.await_count, 1)
             self.assertTrue(all(r['chain'] == '56' for r in results))

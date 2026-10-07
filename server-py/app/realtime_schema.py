@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS realtime_schema_version (name TEXT PRIMARY KEY, value
 CREATE TABLE IF NOT EXISTS projection_dirty (
  chain TEXT NOT NULL, token TEXT NOT NULL, generation INTEGER NOT NULL,
  PRIMARY KEY(chain,token));
+CREATE INDEX IF NOT EXISTS projection_dirty_generation ON projection_dirty(generation,chain,token);
 CREATE TABLE IF NOT EXISTS dashboard_projection (
  name TEXT PRIMARY KEY, revision INTEGER NOT NULL, cursor INTEGER NOT NULL,
  input_cursor INTEGER NOT NULL, body TEXT NOT NULL, built_at INTEGER NOT NULL);

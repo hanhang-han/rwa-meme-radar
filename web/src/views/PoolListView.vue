@@ -1,105 +1,47 @@
 <template>
   <section class="pool-list">
-    <div class="pool-toolbar">
-      <label>{{ tr('排序', 'Sort') }} <select :value="sort" @change="setQuery({sort:$event.target.value})">
-        <option value="liquidity">{{ tr('池流动性', 'Pool liquidity') }}</option>
-        <option value="volume24h">{{ tr('池 24h 成交', 'Pool 24h volume') }}</option>
-        <option value="createdAt">{{ tr('创建时间', 'Created') }}</option>
-      </select></label>
-      <label><input type="checkbox" :checked="qualified" @change="setQuery({qualified:$event.target.checked?'1':undefined})"> {{ tr('流动性 ≥ $1K · 15 分钟内', 'Liquidity ≥ $1K · within 15m') }}</label>
-      <span v-if="!loading" class="pool-count">{{ tr('显示', 'Showing') }} {{ num(pageRows.length) }} / {{ tr('共', 'of') }} {{ num(rows.length) }}</span>
-    </div>
-    <p v-if="search" class="pool-note">{{ tr('搜索', 'Search') }}：{{ search }} <button @click="setQuery({q:undefined})">{{ tr('清除', 'Clear') }}</button></p>
-    <div v-if="loading" class="pool-skeleton" role="status" :aria-label="tr('加载交易池', 'Loading pools')"><p class="pool-note">{{ store.error?tr('池子列表暂时无法加载。','The pool list could not be loaded.'):tr('正在加载池子列表…','Loading the pool list…') }} <button type="button" @click="store.poll({view:'market'})">{{ tr('重试','Retry') }}</button></p><div v-for="n in 6" :key="n" class="skeleton-line"></div></div>
-    <div v-else-if="!pageRows.length" class="x-empty">{{ tr('当前条件下暂无交易池。', 'No pools match these filters.') }} <button @click="setQuery({qualified:undefined,q:undefined})">{{ tr('清除筛选', 'Clear filters') }}</button></div>
+    <div class="pool-toolbar"><form class="pool-search" @submit.prevent="setQuery({q:searchText.trim()||undefined})"><label class="sr-only" for="pool-search-input">{{ tr('资产、股票或完整池地址','Asset, stock or full pool address') }}</label><input id="pool-search-input" v-model="searchText" type="search" :placeholder="tr('资产 / 股票 / 完整池地址','Asset / stock / full pool address')"><button type="submit">{{ tr('搜索','Search') }}</button></form><label>{{ tr('流动性筛选','Liquidity filter') }}<select :value="qualified?'1':'0'" @change="setQuery({qualified:$event.target.value==='1'?'1':undefined})"><option value="0">{{ tr('不限，含历史','Any, including history') }}</option><option value="1">{{ tr('≥ $1K · 15 分钟内','≥ $1K · within 15m') }}</option></select></label><label>{{ tr('排序','Sort') }}<select :value="sort" @change="setQuery({sort:$event.target.value})"><option value="liquidity">{{ tr('池流动性','Pool liquidity') }}</option><option value="volume24h">{{ tr('本池 24h 成交','Pool 24h volume') }}</option><option value="createdAt">{{ tr('创建时间','Created') }}</option></select></label><button type="button" class="text-button" @click="setQuery({qualified:undefined,q:undefined,sort:undefined})">{{ tr('重置','Reset') }}</button></div>
+    <div v-if="!loading" class="pool-summary"><span>{{ tr('配对交易池','Stock-paired pools') }} {{ num(totalPools) }} · {{ tr('本页','This page') }} {{ num(pageRows.length) }} {{ tr('个池','pools') }}</span><span :title="date(store.snapshot.snapshotAt??store.snapshot.now)">{{ tr('快照','Snapshot') }} {{ age(store.snapshot.snapshotAt??store.snapshot.now) }}</span></div>
+    <p class="pool-scope-note">{{ tr('此处展示已核实的股票代币配对池，每个池独立统计成交与流动性。','Verified stock-token pair pools; volume and liquidity are counted separately for each pool.') }}</p>
+    <p v-if="!loading && (store.loading || store.error)" class="pool-note" role="status">{{ store.error?tr('更新失败，保留上次结果。','Update failed. Previous results are retained.'):tr('正在更新交易池…','Updating pools…') }} <button v-if="store.error" type="button" class="text-button" @click="store.refresh()">{{ tr('重试','Retry') }}</button></p>
+    <div v-if="loading && store.error" class="pool-empty" role="alert">{{ tr('交易池加载失败。','Could not load pools.') }} <button type="button" class="text-button" @click="store.refresh()">{{ tr('重试','Retry') }}</button></div>
+    <div v-else-if="loading" class="pool-skeleton" role="status"><p class="pool-note">{{ tr('正在加载交易池…','Loading pools…') }}</p><div v-for="n in 6" :key="n" class="skeleton-line"></div></div>
+    <div v-else-if="!pageRows.length" class="pool-empty">{{ tr('没有符合条件的交易池。','No matching pools.') }} <button type="button" class="text-button" @click="setQuery({qualified:undefined,q:undefined})">{{ tr('重置筛选','Reset filters') }}</button></div>
     <template v-else>
-      <div class="pool-desktop scroll">
-        <table class="tbl pool-table">
-          <thead><tr><th>Meme</th><th>{{ tr('股票', 'Stock') }}</th><th>{{ tr('链', 'Chain') }}</th><th>DEX</th><th class="numeric">{{ tr('池流动性', 'Pool liquidity') }}</th><th>{{ tr('创建时间', 'Created') }}</th><th class="numeric">{{ tr('池 24h 成交', 'Pool 24h volume') }}</th><th>{{ tr('池地址', 'Pool') }}</th></tr></thead>
-          <tbody><tr v-for="row in pageRows" :key="row.key">
-            <td><RouterLink :to="assetLink(row)"><strong>{{ row.asset?.symbol || short(row.relation.token) }}</strong></RouterLink><small>{{ row.asset?.name || short(row.relation.token) }}</small></td>
-            <td><RouterLink :to="stockLink(row)">{{ row.relation.ticker || '—' }}</RouterLink></td>
-            <td>{{ chainLabel(row.chainId) }}</td>
-            <td>{{ row.relation.protocol || tr('未能识别', 'Unknown') }}</td>
-            <td class="numeric" :title="liquidityTitle(row)"><LiveNumber :value="row.liquidity" /><small v-if="row.liquidity != null && !row.liquidityCurrent" class="historical">{{ tr('历史值', 'Historical') }}</small></td>
-            <td :title="date(row.createdAt)">{{ row.createdAt ? age(row.createdAt) : tr('暂无数据', 'Unavailable') }}</td>
-            <td class="numeric" :title="volumeTitle(row)"><LiveNumber :value="row.volume24h" /><small v-if="row.volume24h != null && !row.volumeCurrent" class="historical">{{ tr('历史值', 'Historical') }}</small></td>
-            <td><RouterLink :to="assetLink(row, true)">{{ short(row.relation.pool) }}</RouterLink></td>
-          </tr></tbody>
-        </table>
-      </div>
-      <div class="pool-mobile">
-        <article v-for="row in pageRows" :key="row.key" class="pool-card">
-          <div><RouterLink :to="assetLink(row)"><strong>{{ row.asset?.symbol || short(row.relation.token) }}</strong></RouterLink><span>{{ chainLabel(row.chainId) }}</span></div>
-          <p><RouterLink :to="stockLink(row)">{{ row.relation.ticker }}</RouterLink> · {{ row.relation.protocol || tr('未能识别', 'Unknown') }}</p>
-          <dl><div><dt>{{ tr('池流动性', 'Pool liquidity') }}</dt><dd :title="liquidityTitle(row)">{{ usd(row.liquidity) }}<small v-if="row.liquidity != null && !row.liquidityCurrent">{{ tr('历史值', 'Historical') }}</small></dd></div><div><dt>{{ tr('池 24h 成交', 'Pool 24h volume') }}</dt><dd :title="volumeTitle(row)">{{ usd(row.volume24h) }}<small v-if="row.volume24h != null && !row.volumeCurrent">{{ tr('历史值', 'Historical') }}</small></dd></div><div><dt>{{ tr('创建时间', 'Created') }}</dt><dd>{{ row.createdAt ? age(row.createdAt) : tr('暂无数据', 'Unavailable') }}</dd></div></dl>
-          <RouterLink :to="assetLink(row, true)" class="pool-evidence">{{ short(row.relation.pool) }} · {{ tr('关系证据', 'Relationship') }} →</RouterLink>
-        </article>
-      </div>
-      <div class="x-pager"><button :disabled="safePage===0" @click="setQuery({page:safePage-1})">{{ tr('上一页', 'Previous') }}</button><span>{{ safePage+1 }} / {{ pages }}</span><button :disabled="safePage+1>=pages" @click="setQuery({page:safePage+1})">{{ tr('下一页', 'Next') }}</button></div>
+      <div class="pool-table-wrap" tabindex="0" :aria-label="tr('配对交易池表，可横向滚动','Pair-pool table; scroll horizontally')"><table class="tbl pool-table"><thead><tr><th>{{ tr('交易对 / 网络','Pair / chain') }}</th><th class="numeric">{{ tr('本池 24h 成交','Pool 24h volume') }}<small>USD</small></th><th class="numeric">{{ tr('池流动性','Pool liquidity') }}<small>USD</small></th><th>{{ tr('配对股票','Paired stock') }}</th><th>{{ tr('操作','Actions') }}</th></tr></thead><tbody><tr v-for="row in pageRows" :key="row.key" :data-navigation-anchor="`${row.chainId}:${String(row.relation.pool).toLowerCase()}`"><td class="pool-identity"><RouterLink :to="assetLink(row)"><strong>{{ row.asset?.name||row.asset?.symbol||short(row.relation.token) }}</strong></RouterLink><span class="pool-counterpart"> / {{ row.relation.stockSymbol||row.relation.ticker||short(row.relation.stock) }}</span><small>{{ chainLabel(row.chainId) }} · {{ row.relation.protocol||tr('协议未知','Protocol unknown') }}</small><small :title="row.relation.pool">{{ short(row.relation.pool) }}</small></td><td class="numeric pool-volume" :title="volumeTitle(row)"><strong><LiveNumber :value="row.volume24h" currency="USD" :label="tr('本池 24h 成交','Pool 24h volume')" :description="volumeTitle(row)" /></strong><small :class="{'historical':row.volume24h!=null&&!row.volumeCurrent}">{{ volumeMeta(row) }}</small></td><td class="numeric pool-liquidity" :title="liquidityTitle(row)"><LiveNumber :value="row.liquidity" currency="USD" :label="tr('池流动性','Pool liquidity')" :description="liquidityTitle(row)" /><small :class="{'historical':row.liquidity!=null&&!row.liquidityCurrent}">{{ liquidityMeta(row) }}</small></td><td class="pool-stock"><RouterLink :to="stockLink(row)">{{ stockThemeName(null,row.relation.ticker,lang.lang) }}</RouterLink><small>{{ tr('已核实配对','Verified pairing') }}<template v-if="!row.liquidityCurrent"> · {{ tr('历史观测','Historical observation') }}</template></small></td><td class="pool-actions"><RouterLink :to="assetLink(row)">{{ tr('查看行情','View market') }} →</RouterLink><details><summary>{{ tr('地址与依据','Addresses and evidence') }}</summary><div><span>{{ tr('池地址','Pool') }} <code>{{ row.relation.pool }}</code></span><span>{{ tr('创建时间','Created') }} {{ date(row.createdAt) }}</span><RouterLink :to="assetLink(row,true)">{{ tr('配对依据','Pairing evidence') }} →</RouterLink><a v-if="explorer(row.relation.pool,'address',row.chainId)" :href="explorer(row.relation.pool,'address',row.chainId)" target="_blank" rel="noopener">{{ tr('链上记录','On-chain record') }} ↗</a></div></details></td></tr></tbody></table></div>
+      <div class="x-pager"><button type="button" :disabled="safePage===0" @click="setQuery({page:safePage-1})">{{ tr('上一页','Previous') }}</button><span>{{ safePage+1 }} / {{ pages }}</span><button type="button" :disabled="safePage+1>=pages" @click="setQuery({page:safePage+1})">{{ tr('下一页','Next') }}</button></div>
     </template>
-    <p class="pool-note">{{ tr('每个池子单独统计；创建时间未知时显示“暂无数据”。', 'Each pool is counted separately. Unknown creation times are unavailable.') }}</p>
+    <details class="pool-methods"><summary>{{ tr('统计口径与数据来源','Definitions and data sources') }}</summary><p>{{ tr('每个池按链和池地址区分。本池成交只采用明确池范围的 USD 数据，不以资产总成交代替。缺失值显示 —，真实零值显示 0；历史值保留观测时间。','Each pool is identified by chain and pool address. Pool volume uses explicitly scoped USD observations; token-wide volume is never substituted. Missing values are —; real zeroes remain zero. Historical values retain their observation time.') }}</p><p>{{ tr('已核实配对指链上存在该交易对，不代表当前成交、风险检测或发行方身份已全部核实。','Verified pairing means the trading pair exists on-chain; it does not verify current volume, all risk checks or issuer identity.') }}</p><p v-if="!loading">{{ tr('近期美元成交覆盖','Recent USD volume coverage') }} {{ num(store.summary.volume24h?.known??0) }} / {{ num(totalPools) }} · {{ tr('近期流动性覆盖','Recent liquidity coverage') }} {{ num(store.summary.liquidity?.known??0) }} / {{ num(totalPools) }}</p></details>
   </section>
 </template>
-
 <script setup>
-import { computed } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
-import { useDashboardStore } from '../stores/dashboard';
+import { computed, ref, watch } from 'vue';
+import { useRoute,useRouter } from 'vue-router';
+import { useMemeDirectoryStore } from '../stores/meme-directory';
 import { useMinuteClock } from '../composables/useMinuteClock';
-import { tr } from '../i18n';
-import { age, date, num, short, usd } from '../utils/format';
-import { marketCatalogReady } from '../utils/meme-filter-model';
-import { buildPoolRows, normalizeTicker } from '../utils/stock-theme-model';
+import { tr,useI18n } from '../i18n';
+import { age,date,explorer,num,short } from '../utils/format';
+import { isRecentObservation,normalizeTicker,stockThemeName } from '../utils/stock-theme-model';
 import LiveNumber from '../components/LiveNumber.vue';
-
-const props = defineProps({ scope:{ type:String, default:'all' }, qualified:Boolean });
-const route = useRoute(), router = useRouter(), store = useDashboardStore(), now = useMinuteClock();
-const search = computed(() => String(route.query.q ?? ''));
-const sort = computed(() => ['liquidity','volume24h','createdAt'].includes(route.query.sort) ? route.query.sort : 'liquidity');
-const loading = computed(() => !marketCatalogReady(store.snapshot));
-const rows = computed(() => buildPoolRows(store.relations, store.assets, { scope:props.scope, qualified:props.qualified, q:search.value, now:now.value }).sort((a, b) => {
-  const current = row => sort.value === 'liquidity' ? row.liquidityCurrent : sort.value === 'volume24h' ? row.volumeCurrent : true;
-  return Number(current(b)) - Number(current(a)) || Number(b[sort.value] != null) - Number(a[sort.value] != null)
-    || (b[sort.value] ?? 0) - (a[sort.value] ?? 0) || a.key.localeCompare(b.key);
-}));
-const PAGE_SIZE = 30;
-const pages = computed(() => Math.max(1, Math.ceil(rows.value.length / PAGE_SIZE)));
-const safePage = computed(() => Math.min(Math.max(0, Number(route.query.page) || 0), pages.value-1));
-const pageRows = computed(() => rows.value.slice(safePage.value*PAGE_SIZE, (safePage.value+1)*PAGE_SIZE));
-function setQuery(patch) { router.push({ query:{ ...route.query, ...patch, page:patch.page || undefined } }); }
-function assetLink(row, relation = false) { return { path:`/asset/${row.chainId}/${row.relation.token}`, query:{ chain:props.scope, from:'meme', ...(relation ? { tab:'relation', pool:row.relation.pool } : {}) } }; }
-function stockLink(row) { return { path:`/stock/${encodeURIComponent(normalizeTicker(row.relation.ticker))}`, query:{ chain:props.scope } }; }
-function chainLabel(chain) { return { '56':'BNB Chain', '196':'X Layer', '4663':'Robinhood Chain' }[chain] ?? chain; }
-function liquidityTitle(row) { return `${row.relation.liquiditySource ?? row.relation.provider ?? '—'} · ${date(row.relation.liquidityAt)}`; }
-function volumeTitle(row) { return `${row.relation.poolMarket?.provider ?? row.relation.poolMarket?.source ?? '—'} · ${date(row.volumeAt)}`; }
+import { assetNavigationLink, themeNavigationLink } from '../utils/navigation-context';
+const props=defineProps({scope:{type:String,default:'all'},qualified:Boolean});
+const route=useRoute(),router=useRouter(),store=useMemeDirectoryStore(),now=useMinuteClock(),{lang}=useI18n();
+const searchText=ref(String(route.query.q??''));watch(()=>route.query.q,value=>{searchText.value=String(value??'');});
+const sort=computed(()=>['liquidity','volume24h','createdAt'].includes(route.query.sort)?route.query.sort:'liquidity');
+const loading=computed(()=>!store.ready||store.query?.view!=='pool'),totalPools=computed(()=>store.directory.totalPools??0);
+const pages=computed(()=>Math.max(1,Math.ceil((store.directory.groupTotal??0)/15))),safePage=computed(()=>Math.min(Math.max(0,Number(route.query.page)||0),pages.value-1));
+const pageRows=computed(()=>store.groups.flatMap(group=>group.items.map(row=>({...row,liquidityCurrent:row.liquidityCurrent&&isRecentObservation(row.relation.liquidityAt,900000,Math.max(now.value,Date.now())),volumeCurrent:row.volumeCurrent&&isRecentObservation(row.volumeAt,900000,Math.max(now.value,Date.now()))}))));
+watch(()=>store.snapshot,packet=>{if(packet&&store.query?.view==='pool'&&Number(route.query.page)>=pages.value)router.replace({query:{...route.query,page:pages.value>1?pages.value-1:undefined}});});
+function setQuery(patch){router.push({query:{...route.query,...patch,page:patch.page||undefined}});}
+function assetLink(row,relation=false){return assetNavigationLink({chainId:row.chainId,token:row.relation.token},{route,scope:props.scope,tab:relation?'relation':'overview',pool:row.relation.pool});}
+function stockLink(row){return themeNavigationLink(normalizeTicker(row.relation.ticker),{route,scope:props.scope});}
+function chainLabel(chain){return {'56':'BNB Chain','196':'X Layer','4663':'Robinhood Chain','5042':'Arc'}[chain]??chain;}
+function liquidityMeta(row){if(row.liquidity==null)return tr('暂无数据','Unavailable');return [row.relation.liquiditySource??row.relation.provider??tr('来源未知','Source unknown'),!row.liquidityCurrent?tr('历史','Historical'):null,row.relation.liquidityAt?age(row.relation.liquidityAt):tr('时间未知','Time unknown')].filter(Boolean).join(' · ');}
+function volumeMeta(row){if(row.volume24h==null)return tr('暂无数据','Unavailable');return [row.relation.poolMarket?.provider??row.relation.poolMarket?.source??tr('来源未知','Source unknown'),!row.volumeCurrent?tr('历史','Historical'):null,row.volumeAt?age(row.volumeAt):tr('时间未知','Time unknown')].filter(Boolean).join(' · ');}
+function liquidityTitle(row){return `${liquidityMeta(row)} · ${date(row.relation.liquidityAt)} · ${tr('该交易池双边流动性，单位 USD','Two-sided pool liquidity, USD')}`;}
+function volumeTitle(row){return `${volumeMeta(row)} · ${date(row.volumeAt)} · ${tr('仅该池的 24h USD 成交','24h USD volume of this pool only')}`;}
 </script>
-
 <style scoped>
-.pool-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:14px; margin-bottom:16px; }
-.pool-toolbar label { display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); }
-.pool-toolbar select { min-height:34px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:5px 8px; }
-.pool-count { margin-left:auto; color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
-.pool-table td { vertical-align:middle; padding-top:13px; padding-bottom:13px; }
-.pool-table th { font-size:12px; }
-.pool-table td small { display:block; color:var(--muted); font-size:12px; }
-.pool-table td.numeric, .pool-table th.numeric { text-align:right; font-family:ui-monospace,monospace; font-variant-numeric:tabular-nums; }
-.pool-table .historical { color:var(--warning); }
-.pool-table a { color:var(--text); text-decoration:underline; text-underline-offset:3px; }
-.pool-note { color:var(--muted); font-size:12px; margin:10px 0; }
-.pool-mobile { display:none; }
-@media(max-width:760px) {
-  .pool-desktop { display:none; }
-  .pool-mobile { display:grid; gap:10px; }
-  .pool-card { padding:14px; border:1px solid var(--border); border-radius:8px; background:var(--bg); }
-  .pool-card > div { display:flex; justify-content:space-between; align-items:center; gap:12px; }
-  .pool-card > div span, .pool-card p, .pool-card dt { color:var(--muted); font-size:12px; }
-  .pool-card p { margin:4px 0 12px; }
-  .pool-card a { color:var(--text); }
-  .pool-card dl { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  .pool-card dd { font-family:ui-monospace,monospace; margin-top:3px; }
-  .pool-card dd small { display:block; color:var(--warning); font-size:12px; }
-  .pool-evidence { display:block; border-top:1px solid var(--border); padding-top:10px; margin-top:12px; font-size:12px; }
-  .pool-count { width:100%; margin-left:0; }
-}
+.pool-toolbar{display:flex;align-items:end;flex-wrap:wrap;gap:12px}.pool-toolbar>label{display:flex;flex-direction:column;gap:5px;color:var(--muted);font-size:11px}.pool-toolbar select{min-height:35px;padding:6px 9px;border:1px solid var(--border);border-radius:6px;background:var(--panel);color:var(--text);font-size:12px}.pool-search{display:flex;flex:1;min-width:200px;border:1px solid var(--border);border-radius:6px;min-height:35px}.pool-search input{flex:1;width:100%;min-width:0;border:0;background:none;color:var(--text);font-size:12px;padding:8px 10px}.pool-search button{border:0;border-left:1px solid var(--border);background:none;color:var(--accent);padding:6px 10px;font-size:12px;cursor:pointer}.text-button{border:0;background:none;color:var(--accent);font-size:12px;padding:5px 0;cursor:pointer}.pool-toolbar>.text-button{min-height:35px}.pool-summary{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:15px 0 12px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--border)}.pool-scope-note,.pool-note{color:var(--muted);font-size:11px;line-height:1.6;margin:10px 0}.pool-table-wrap{overflow:auto}.pool-table{width:100%;border-collapse:collapse}.pool-table th{padding:14px 10px;text-align:left;font-size:11px;font-weight:500;color:var(--muted);white-space:nowrap}.pool-table td{padding:13px 10px;vertical-align:middle;border-bottom:1px solid var(--border);font-size:13px;font-variant-numeric:tabular-nums}.pool-table th:first-child,.pool-table td:first-child{padding-left:0}.pool-table th:last-child,.pool-table td:last-child{padding-right:0}.pool-table td small,.pool-table th small{display:block;color:var(--muted);font-size:11px;margin-top:4px}.pool-table th small{font-size:10px;font-weight:400}.pool-table .numeric{text-align:right;white-space:nowrap}.pool-table .historical{color:var(--warning)}.pool-identity{width:30%;min-width:190px}.pool-identity a{color:var(--text)}.pool-counterpart{font-size:12px;color:var(--muted)}.pool-stock a,.pool-actions>a{color:var(--accent);font-size:12px}.pool-stock{min-width:125px}.pool-actions{min-width:110px}.pool-actions details{margin-top:5px;font-size:11px;color:var(--muted)}.pool-actions summary{cursor:pointer}.pool-actions details>div{display:grid;gap:6px;margin-top:8px;max-width:230px;font-size:11px}.pool-actions details span{overflow-wrap:anywhere}.pool-actions details code{font:inherit}.pool-actions details a{color:var(--accent)}.pool-methods{margin-top:15px;padding-top:15px;border-top:1px solid var(--border);color:var(--muted);font-size:12px}.pool-methods summary{cursor:pointer}.pool-methods p{line-height:1.6}.pool-empty{padding:24px 0;font-size:13px;color:var(--muted)}.pool-skeleton{padding:15px 0}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible,.pool-table-wrap:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+@media(max-width:760px){.pool-list,.pool-table-wrap{min-width:0;width:100%;max-width:100%;box-sizing:border-box}.pool-toolbar>*{min-width:0}.pool-toolbar{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}.pool-search{grid-column:1/-1}.pool-toolbar select{min-width:0;width:100%}.pool-toolbar>.text-button{grid-column:1/-1;justify-self:start;min-height:20px}.pool-summary{font-size:11px}.pool-table-wrap{overflow:visible}.pool-table,.pool-table tbody{display:block;min-width:0;width:100%;max-width:100%}.pool-table thead{display:none}.pool-table tbody>tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);min-width:0;gap:8px 14px;padding:15px 0;border-bottom:1px solid var(--border)}.pool-table td{padding:0!important;border:0;min-width:0;max-width:100%;overflow-wrap:anywhere}.pool-table td small{white-space:normal;overflow-wrap:anywhere}.pool-identity{width:auto;grid-column:1/-1}.pool-volume{grid-row:2;grid-column:1;text-align:left!important}.pool-liquidity{grid-row:2;grid-column:2}.pool-volume:before{content:'24h USD · ';color:var(--muted);font-size:10px}.pool-liquidity:before{content:'USD · ';color:var(--muted);font-size:10px}.pool-stock{grid-row:3;grid-column:1}.pool-actions{grid-row:3;grid-column:2;text-align:right}.pool-actions details>div{text-align:left}.pool-table td small{font-size:10px}}
 </style>

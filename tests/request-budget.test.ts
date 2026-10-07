@@ -11,6 +11,6 @@ test('stage budgets reserve work for siblings without bypassing network or globa
   await withRequestAllowance(1,async()=>{await okxGet('/api/v6/dex/test',{});await assert.rejects(okxGet('/api/v6/dex/test',{}),/allowance exhausted/);});
   await withRequestAllowance(10,async()=>{await okxGet('/api/v6/dex/test',{});await assert.rejects(okxGet('/api/v6/dex/test',{}),/allowance exhausted/);});
  });
- assert.equal(sent,2);assert.equal(collectionStatus().round,2);
+ assert.equal(sent,2);assert.equal((await collectionStatus()).round,2);
  }finally{globalThis.fetch=saved;for(const k of ['OKX_API_KEY','OKX_SECRET_KEY','OKX_PASSPHRASE','OKX_DAILY_REQUEST_LIMIT','OKX_ROUND_REQUEST_LIMIT'])vars[k]===undefined?delete process.env[k]:process.env[k]=vars[k];}
 });

@@ -39,8 +39,8 @@ export async function candleSeries(chain: string, address: string, bar: string, 
       parsed.push({ t: Number(t), o: Number(o), h: Number(h ?? o), l: Number(l ?? o), c: Number(c), v: num(v), vu: num(vu), confirmed: confirmed === '1' });
     }
     const s = store(chain);
-    s.candles(address, bar, parsed);
-    const rows = s.candleRange(address, bar, Math.min(limit, 300)) as Candle[];
+    await s.candles(address, bar, parsed);
+    const rows = await s.candleRange(address, bar, Math.min(limit, 300)) as Candle[];
     mem.set(key, { rows, at: Date.now() });
     if(mem.size>600){let drop=mem.size-500;for(const k of mem.keys()){mem.delete(k);if(--drop<=0)break;}}
     return rows;

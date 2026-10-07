@@ -118,7 +118,7 @@ class RealtimeTest(unittest.TestCase):
         from app.request_ledger import shared_usage
         with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, OKX_LEDGER_PATH=d+'/shared.sqlite'):
             shared_usage('2099-02-01')
-            js = "import {sharedUsage} from './src/lib/request-ledger.ts';let n=0;for(let i=0;i<40;i++){try{sharedUsage('2099-02-01',30);n++}catch{}}console.log(n)"
+            js = "import {sharedUsage} from './src/lib/request-ledger.ts';let n=0;for(let i=0;i<40;i++){try{await sharedUsage('2099-02-01',30);n++}catch{}}console.log(n)"
             child = subprocess.Popen(['node','--import','tsx','--input-type=module','-e',js],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             own=0
             for _ in range(40):

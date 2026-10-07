@@ -27,7 +27,7 @@ def update(code, ident=1, chat=12345, now=NOW, kind='private', sender=None):
 
 def asset(flags=()):
     return {'chainId': '56', 'token': TOKEN, 'symbol': 'TEST', 'riskFlags': list(flags),
-            'riskAssessment': {'checks': {flag: {'status': 'triggered'} for flag in flags}}}
+            'riskAssessment': {'checks': {'contract_risk': {'status': 'triggered' if 'contract_risk' in flags else 'clear'}, 'concentrated': {'status': 'triggered' if 'concentrated' in flags else 'clear'}, **{flag: {'status': 'triggered'} for flag in flags}}}}
 
 
 def payload(flags=()):
@@ -360,6 +360,73 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.post.await_count, 1)
         self.assertTrue(client.post.call_args.args[0].endswith('/getMe'))
         self.assertEqual(alerts.status(self.user)['worker']['reason'], 'bot-username-mismatch')
+
+    def confirmed_trade(self):
+        block='0x'+'b'*64
+        return {'id':'confirmed-swap','chainId':'56','token':TOKEN,'pool':POOL,'hash':'0x'+'e'*64,
+                'blockHash':block,'canonicalBlockHash':block,'t':self.clock,'finality':'confirmed',
+                'txFrom':'0x'+'d'*40,'txFromSource':'eth_getTransactionByHash',
+                'usdObservation':{'value':25000,'at':self.clock,'method':'trade-time-quote','currency':'USD','provider':'OKX'}}
+
+    async def test_confirmed_large_trade_requires_complete_transaction_usd_evidence(self):
+        self.bind();self.clock+=1000
+        user_features.save_alert_preferences(self.user,{'newPool':True,'riskChange':True,'largeTrade':True,'tradeUsd':10000})
+        alerts.process_events([],payload(),10,1)
+        confirmed=self.confirmed_trade()
+        for index,patch_value in enumerate(({'finality':'provisional'},{'txFrom':None},{'txFromSource':'swap-event-sender'},
+            {'canonicalBlockHash':'0x'+'f'*64},{'usdObservation':{'value':25000,'currency':'USD','at':self.clock-30001,'provider':'OKX','method':'trade-time-quote'}},
+            {'usdObservation':{'value':25000,'currency':'STOCK','at':self.clock,'provider':'OKX','method':'trade-time-quote'}})):
+            bad={**confirmed,**patch_value}
+            self.assertIsNone(alerts.confirmed_trade_event(bad,chain='56',token=TOKEN))
+        self.assertEqual(alerts.process_events([row(11,'trade',confirmed,self.clock)],payload(),11,1),1)
+        self.assertTrue(alerts.capabilities()['largeTrade']['available'])
+        self.assertEqual(self.queue()[0]['category'],'largeTrade')
+        client=SimpleNamespace(post=AsyncMock(return_value=httpx.Response(200,json={'ok':True,'result':{'message_id':10}})))
+        research=SimpleNamespace(scope='56',fetchall=AsyncMock(return_value=[(json.dumps(confirmed),)]))
+        with patch('app.db.store',AsyncMock(return_value=research)):
+            self.assertEqual((await alerts.dispatch(client))['accepted'],1)
+        self.assertIn('25,000.00 USD',client.post.call_args.kwargs['json']['text'])
+        self.assertNotIn(confirmed['txFrom'],client.post.call_args.kwargs['json']['text'])
+
+    async def test_reorg_cancels_large_trade_and_unknown_risk_does_not_trigger(self):
+        self.bind();self.clock+=1000
+        user_features.save_alert_preferences(self.user,{'newPool':True,'riskChange':True,'largeTrade':True,'tradeUsd':10000})
+        alerts.process_events([],payload(),10,1)
+        confirmed=self.confirmed_trade()
+        self.assertEqual(alerts.process_events([row(11,'trade',confirmed,self.clock)],payload(),11,1),1)
+        research=SimpleNamespace(scope='56',fetchall=AsyncMock(return_value=[(json.dumps({**confirmed,'finality':'reverted'}),)]))
+        client=SimpleNamespace(post=AsyncMock())
+        with patch('app.db.store',AsyncMock(return_value=research)):
+            self.assertEqual((await alerts.dispatch(client))['accepted'],0)
+        client.post.assert_not_awaited()
+        self.assertEqual(self.queue()[0]['error_code'],'trade-no-longer-confirmed')
+        unknown=asset();unknown['riskAssessment']['checks']['contract_risk']['status']='unknown'
+        alerts.process_events([row(12,'projection.delta',{'upserts':{'assets':[unknown]}},self.clock)],payload(),12,1)
+        triggered=asset(['contract_risk'])
+        self.assertEqual(alerts.process_events([row(13,'projection.delta',{'upserts':{'assets':[triggered]}},self.clock)],payload(['contract_risk']),13,1),0)
+
+    async def test_preview_uses_real_facts_and_never_queues_or_sends(self):
+        self.bind();self.clock+=1000
+        snapshot={'asset':asset(['contract_risk']),'relations':[]}
+        before=len(self.queue())
+        with patch('app.realtime_projection.read_token_projection',AsyncMock(return_value=snapshot)), patch.object(alerts,'_api',AsyncMock()) as network:
+            result=await self.client.post('/api/developer/telegram/dry-run',headers={'x-csrf-token':self.csrf},json={'category':'riskChange','assetKey':KEY})
+        self.assertEqual(result.status_code,200)
+        self.assertFalse(result.json()['sent']);self.assertFalse(result.json()['queued'])
+        self.assertEqual(before,len(self.queue()));network.assert_not_awaited()
+        health=(await self.client.get('/api/developer/telegram/health')).json()
+        self.assertNotIn('chat_id',json.dumps(health));self.assertFalse(health['dryRunSendsMessages'])
+
+    async def test_private_chat_rate_gate_and_global_rate_both_persist(self):
+        self.bind();self.clock+=1000
+        self.enqueue(self.event('first','riskChange'))
+        self.enqueue(self.event('pool','newPool'))
+        first=alerts._claim();self.assertIsNotNone(first)
+        alerts._finish(first,result={'message_id':1})
+        self.clock+=41
+        self.assertIsNone(alerts._claim())
+        self.clock+=1100
+        self.assertIsNotNone(alerts._claim())
 
 
 if __name__ == '__main__':

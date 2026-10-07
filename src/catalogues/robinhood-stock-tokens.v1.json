@@ -1,0 +1,2535 @@
+{
+  "version": "robinhood-assets-v1-2026-10-03",
+  "provenance": "official-api-pinned-snapshot",
+  "issuer": "Robinhood Assets (Jersey) Limited",
+  "sourceUrl": "https://api.robinhood.com/rhj/assets",
+  "sourceDocs": [
+    "https://api.robinhood.com/rhj/assets"
+  ],
+  "capturedAt": "2026-10-03T06:07:06.808698+00:00",
+  "sourceSha256": "3e378f9cef46a42503496caa35d130a5590072d1be7801d109de64b998e3e78c",
+  "assets": [
+    {
+      "assetId": "0x00000000000000000000000000000000a47bbc4c8a0b4f44a6d1aff3242b3088",
+      "ticker": "AAOI",
+      "tokenSymbol": "AAOI",
+      "nameEn": "Applied Optoelectronics • Robinhood Token",
+      "underlyingIsin": "US03823U1025",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x521cf887e6531c6f667b5bc4d896e5d9bfe8eb2e"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c2425be3658540dd8e2424cbf3c5c649",
+      "ticker": "AAPL",
+      "tokenSymbol": "AAPL",
+      "nameEn": "Apple • Robinhood Token",
+      "underlyingIsin": "US0378331005",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000cbe64873637849e38e848d35826726d4",
+      "ticker": "ABCL",
+      "tokenSymbol": "ABCL",
+      "nameEn": "Abcellera Biologics • Robinhood Token",
+      "underlyingIsin": "CA00288U1066",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x3139d77ace0cbaa5bdfd38bd1f1911a794af0b0e"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d44f85ce72274d6e867a54fa2f4009cb",
+      "ticker": "ADBE",
+      "tokenSymbol": "ADBE",
+      "nameEn": "Adobe • Robinhood Token",
+      "underlyingIsin": "US00724F1012",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x232b8ed6377be97813853b0ac104c4cda8378d1b"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000000747a25837b6475c8da1a66b7d036988",
+      "ticker": "AEHR",
+      "tokenSymbol": "AEHR",
+      "nameEn": "Aehr • Robinhood Token",
+      "underlyingIsin": "US00760J1088",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x5f604fba1162193a4388a5dfa56f556f3e133cc2"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000a705ceeae1b44d8981ab86169e52891e",
+      "ticker": "AEIS",
+      "tokenSymbol": "AEIS",
+      "nameEn": "Advanced Energy • Robinhood Token",
+      "underlyingIsin": "US0079731008",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xfaf9cb261b5fcc1f404bb10cd39c5c6c1974e612"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000069bc82da7c264394bdf6b23c8b0cd399",
+      "ticker": "ALAB",
+      "tokenSymbol": "ALAB",
+      "nameEn": "Astera Labs, Inc. • Robinhood Token",
+      "underlyingIsin": "US04626A1034",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x748c32c3ca24edf31ea597db1f3d330a7a6da3dc"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000a98d1e2ff1ea4e54a538680595585902",
+      "ticker": "AMAT",
+      "tokenSymbol": "AMAT",
+      "nameEn": "Applied Materials • Robinhood Token",
+      "underlyingIsin": "US0382221051",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x36046893810a7e7fce501229d57dc3fc8c8716d0"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000009148f90c74194b4ab333453c9ddaccbf",
+      "ticker": "AMBA",
+      "tokenSymbol": "AMBA",
+      "nameEn": "Ambarella • Robinhood Token",
+      "underlyingIsin": "KYG037AX1015",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x99d9d8663545151603863c5acbd6fc3218899009"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c40c1aabe3514588ae86defffe868021",
+      "ticker": "AMC",
+      "tokenSymbol": "AMC",
+      "nameEn": "AMC Entertainment • Robinhood Token",
+      "underlyingIsin": "US00165C3025",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x05a3d1cd21d0c88145e82600e62e7e496e0f222b"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000086aeaac3c7d9422c90f6fd41aff0eaf7",
+      "ticker": "AMD",
+      "tokenSymbol": "AMD",
+      "nameEn": "AMD • Robinhood Token",
+      "underlyingIsin": "US0079031078",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x86923f96303d656e4aa86d9d42d1e57ad2023fdc"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000efb0e40b668c4b92876632971560e252",
+      "ticker": "AMKR",
+      "tokenSymbol": "AMKR",
+      "nameEn": "Amkor Technology • Robinhood Token",
+      "underlyingIsin": "US0316521006",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xdd356aa38f40a7b7076755ac854b6fbb1f0d305b"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000004f508d5e2a7042299694d85c2f362ad2",
+      "ticker": "AMZN",
+      "tokenSymbol": "AMZN",
+      "nameEn": "Amazon • Robinhood Token",
+      "underlyingIsin": "US0231351067",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x12f190a9f9d7d37a250758b26824b97ce941bf54"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000b423c47a2fed4814a7f1c3c05e1dcb97",
+      "ticker": "ANET",
+      "tokenSymbol": "ANET",
+      "nameEn": "Arista • Robinhood Token",
+      "underlyingIsin": "US0404132054",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x28babd556b60e53663b8615036479a29c2cdd1bf"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000004a960b45163413698f0f69b5454785d",
+      "ticker": "APLD",
+      "tokenSymbol": "APLD",
+      "nameEn": "Applied Digital • Robinhood Token",
+      "underlyingIsin": "US0381692070",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xb8dbf92f9741c9ac1c32115e78581f23509916fd"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000a27266921f864cf2aa69baad4124d11f",
+      "ticker": "APP",
+      "tokenSymbol": "APP",
+      "nameEn": "AppLovin • Robinhood Token",
+      "underlyingIsin": "US03831W1080",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xa249baf1063af884807c1e1400aef7784836917e"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000f6e013126d524981acc9df053b0c19ea",
+      "ticker": "ASML",
+      "tokenSymbol": "ASML",
+      "nameEn": "ASML Holding NV • Robinhood Token",
+      "underlyingIsin": "USN070592100",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x47f93d52cbec7c6d2cfc080e154002370a60daea"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000778bc606b4504ca0babd4e171d5262ee",
+      "ticker": "ASTS",
+      "tokenSymbol": "ASTS",
+      "nameEn": "AST SpaceMobile • Robinhood Token",
+      "underlyingIsin": "US00217D1000",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x1af6446f07eb1d97c546afc8c9544cbdf3ad5137"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c0c36a7e53234128bcb2e369ebc065c2",
+      "ticker": "AUR",
+      "tokenSymbol": "AUR",
+      "nameEn": "Aurora Innovation • Robinhood Token",
+      "underlyingIsin": "US0517741072",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x373c06c4f7bde527d7dae4ba169e42b55e393ced"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000f7eed20de20b4d05851c48313f1701b7",
+      "ticker": "AVAV",
+      "tokenSymbol": "AVAV",
+      "nameEn": "AeroVironment • Robinhood Token",
+      "underlyingIsin": "US0080731088",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf6290b5e7c26502e2da514c31509849718ea76a5"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000001bbb45628de84cb2917abd26680c7ab9",
+      "ticker": "AVGO",
+      "tokenSymbol": "AVGO",
+      "nameEn": "Broadcom • Robinhood Token",
+      "underlyingIsin": "US11135F1012",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x156e175dd063a8ce274c50654ef40e0032b3fbcf"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000cdf9557e169847919e821c0a7bbb4fd3",
+      "ticker": "AXON",
+      "tokenSymbol": "AXON",
+      "nameEn": "Axon • Robinhood Token",
+      "underlyingIsin": "US05464C1018",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xc27dbd474af5181c5a8777903690d8d262d12648"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000005756ed74636b4fb7a1cb3bbdbd18eb64",
+      "ticker": "AXTI",
+      "tokenSymbol": "AXTI",
+      "nameEn": "AXT • Robinhood Token",
+      "underlyingIsin": "US00246W1036",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x141eea040c2250eec0314e336975e81f85f6585e"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000047129a8e0f8f4091841e4004bfa08013",
+      "ticker": "BA",
+      "tokenSymbol": "BA",
+      "nameEn": "Boeing • Robinhood Token",
+      "underlyingIsin": "US0970231058",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x4d21483a44bf67a86b77e3da301411880797d452"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000006ef9da606f504495ad7de6a7a58b87cd",
+      "ticker": "BABA",
+      "tokenSymbol": "BABA",
+      "nameEn": "Alibaba • Robinhood Token",
+      "underlyingIsin": "US01609W1027",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xad25ac6c84d497db898fa1e8387bf6af3532a1c4"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000551774850f194601b6cdefc8c802696d",
+      "ticker": "BB",
+      "tokenSymbol": "BB",
+      "nameEn": "Blackberry • Robinhood Token",
+      "underlyingIsin": "CA09228F1036",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x48e39e56acdba37b09020c0b734a613c9a2f100a"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d73a53e43ed744d4b5d42c5293ba51ad",
+      "ticker": "BE",
+      "tokenSymbol": "BE",
+      "nameEn": "Bloom Energy • Robinhood Token",
+      "underlyingIsin": "US0937121079",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x822cc93ffd030293e9842c30bbd678f530701867"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000006604af6b5c4a4031a29417ec8c2f8c53",
+      "ticker": "BND",
+      "tokenSymbol": "BND",
+      "nameEn": "Vanguard Total Bond Market ETF • Robinhood Token",
+      "underlyingIsin": "US9219378356",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x2f62fc9fabb470c690f141c28340ed832bb27020"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000006b598b911bbf43ee8ca6be4dd7267f6d",
+      "ticker": "BULL",
+      "tokenSymbol": "BULL",
+      "nameEn": "Webull • Robinhood Token",
+      "underlyingIsin": "KYG9572D1034",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xcef9027c7d6985b85f0ba431125073529a947a68"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000002e030d9bc86c45e2b9e02418dd312548",
+      "ticker": "CBRS",
+      "tokenSymbol": "CBRS",
+      "nameEn": "Cerebras Systems • Robinhood Token",
+      "underlyingIsin": "US15675D1037",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x5c90450bbb4273d7b2f17cf6917aeb237a569679"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000001cf204e4aa464340bf2e68461ff6d8d3",
+      "ticker": "CCL",
+      "tokenSymbol": "CCL",
+      "nameEn": "Carnival Corporation • Robinhood Token",
+      "underlyingIsin": "BMG2004J1036",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x9651342cea770ae9a2969ba2a52611523146aef9"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000068576a5b6aee4a6bbc9f0d91f47e3918",
+      "ticker": "CEG",
+      "tokenSymbol": "CEG",
+      "nameEn": "Constellation Energy • Robinhood Token",
+      "underlyingIsin": "US21037T1097",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xae517a2903e68bd929dfd15be875f8369d53e94a"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000e5c73eb672384c37ab8554f9ebe3131a",
+      "ticker": "CELH",
+      "tokenSymbol": "CELH",
+      "nameEn": "Celsius • Robinhood Token",
+      "underlyingIsin": "US15118V2079",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x8cf07c5a878945185d327aaa6e33faa95f95e7bf"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000003bd94e037654c6a9828af2137edd3c3",
+      "ticker": "CIEN",
+      "tokenSymbol": "CIEN",
+      "nameEn": "Ciena • Robinhood Token",
+      "underlyingIsin": "US1717793095",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x44f6d488021f8233b9416294d1fe9b1fee28382d"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000006e6855f045c84b9cabd44da9108be2f8",
+      "ticker": "CLOV",
+      "tokenSymbol": "CLOV",
+      "nameEn": "Clover Health Investments • Robinhood Token",
+      "underlyingIsin": "US18914F1030",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x62200915e7deab1ec7f79fb246dadbb80eacddd0"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000819d5f213b4746e79145d1fc118dcfed",
+      "ticker": "CLS",
+      "tokenSymbol": "CLS",
+      "nameEn": "Celestica • Robinhood Token",
+      "underlyingIsin": "CA15101Q2071",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xbf449977089c718c004a66c554b26b94ef3ad4de"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000730835cf25474184af89c27075a82be1",
+      "ticker": "CLSK",
+      "tokenSymbol": "CLSK",
+      "nameEn": "CleanSpark • Robinhood Token",
+      "underlyingIsin": "US18452B2097",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xcbb95bbf36099d34da091dc6fa6f49efa257cee3"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000bf2748d148654427a4034359cbfb6f91",
+      "ticker": "COHR",
+      "tokenSymbol": "COHR",
+      "nameEn": "Coherent • Robinhood Token",
+      "underlyingIsin": "US19247G1076",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x92f9f459f1a9a5ad266b182be7bffd1c6c666894"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000970b46dbdece4ae4958a53815e62a85a",
+      "ticker": "COIN",
+      "tokenSymbol": "COIN",
+      "nameEn": "Coinbase • Robinhood Token",
+      "underlyingIsin": "US19260Q1076",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x6330d8c3178a418788df01a47479c0ce7ccf450b"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000e0e44220991548d0b030699e3062c2a7",
+      "ticker": "COST",
+      "tokenSymbol": "COST",
+      "nameEn": "Costco • Robinhood Token",
+      "underlyingIsin": "US22160K1051",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x4ea005168d7f09a7a0ba9d1def21a479950e44c2"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000005047f8f8a1a34a9ebee52a4155570807",
+      "ticker": "CRCL",
+      "tokenSymbol": "CRCL",
+      "nameEn": "Circle Internet Group • Robinhood Token",
+      "underlyingIsin": "US1725731079",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xdf0992e440dd0be65bd8439b609d6d4366bf1cb5"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000008e29de423e4b4105b3644e645fda354a",
+      "ticker": "CRDO",
+      "tokenSymbol": "CRDO",
+      "nameEn": "Credo Technology Group • Robinhood Token",
+      "underlyingIsin": "KYG254571055",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x4d67253bc223e6b0e104f1084c1fb2b669ddc41b"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000022015c295294037bfe416d3e45327b9",
+      "ticker": "CRM",
+      "tokenSymbol": "CRM",
+      "nameEn": "Salesforce • Robinhood Token",
+      "underlyingIsin": "US79466L3024",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xd95b44124e475743a7589e68f3d74008a5536d44"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000001adecf2c6a3749f9873b8926b5977c0a",
+      "ticker": "CRWD",
+      "tokenSymbol": "CRWD",
+      "nameEn": "CrowdStrike Holdings • Robinhood Token",
+      "underlyingIsin": "US22788C1053",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xea72ecca2d0f6bfa1394dbbcff85b52cd4233931"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000007f48cdbfaced4ff4b34fbc832f449c33",
+      "ticker": "CRWV",
+      "tokenSymbol": "CRWV",
+      "nameEn": "CoreWeave • Robinhood Token",
+      "underlyingIsin": "US21873S1087",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x5f10a1c971b69e47e059e1dc91901b59b3fb49c3"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000052b1bd2848fd4837baefc662660c6b28",
+      "ticker": "CSCO",
+      "tokenSymbol": "CSCO",
+      "nameEn": "Cisco Systems • Robinhood Token",
+      "underlyingIsin": "US17275R1023",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf543967eebb6f1917992ef0e68de63ab07a5a0da"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000b5fe9845954e479aa8519666c3f56476",
+      "ticker": "CTSH",
+      "tokenSymbol": "CTSH",
+      "nameEn": "Cognizant • Robinhood Token",
+      "underlyingIsin": "US1924461023",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x63d5a3b6939a33f1e75d8bcd85759858239600db"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000551774b7a07e4f24a8901f266c16a86d",
+      "ticker": "CVNA",
+      "tokenSymbol": "CVNA",
+      "nameEn": "Carvana • Robinhood Token",
+      "underlyingIsin": "US1468691027",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xa4f319104089fe321dc8093c6e707d4fe190a988"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d4bd519623e545bf91b7ea590c66801e",
+      "ticker": "DDOG",
+      "tokenSymbol": "DDOG",
+      "nameEn": "Datadog • Robinhood Token",
+      "underlyingIsin": "US23804L1035",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x27c99fbde9d0d2aa4f4bfb4943f237843ddf6958"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000014eaef73a2c44d62b7952cfd0a44ff51",
+      "ticker": "DELL",
+      "tokenSymbol": "DELL",
+      "nameEn": "Dell • Robinhood Token",
+      "underlyingIsin": "US24703L2025",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x941ae714ec6d8130c7b75d67160ca08f1e7d11dd"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d8a566c761e845fc8adffb9b2295c3ee",
+      "ticker": "DJT",
+      "tokenSymbol": "DJT",
+      "nameEn": "Trump Media & Technology Group • Robinhood Token",
+      "underlyingIsin": "US25400Q1058",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x1d11f0496982706c5e14a514d4e79f2e6bde4516"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000dfb6ab4d0e0f4cc5bff6d60396755b5f",
+      "ticker": "DOCN",
+      "tokenSymbol": "DOCN",
+      "nameEn": "DigitalOcean • Robinhood Token",
+      "underlyingIsin": "US25402D1028",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xc02f12b9fe9e707079ec0d546f3050d3f6c1f8bd"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000004ed544ce43734899971a27f98af8972e",
+      "ticker": "ELF",
+      "tokenSymbol": "ELF",
+      "nameEn": "e.l.f. Beauty • Robinhood Token",
+      "underlyingIsin": "US26856L1035",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x39ec44bee4f6a116c6f9b8de566848a985c53c60"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d198f900bc014be980442c67f2444460",
+      "ticker": "EWT",
+      "tokenSymbol": "EWT",
+      "nameEn": "iShares MSCI Taiwan Capped ETF • Robinhood Token",
+      "underlyingIsin": "US46434G7723",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x1c690498150252222c275a5ced69d3a6b1f52d5e"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000008a8710f26e424b2dbc1f6b5de9f267b8",
+      "ticker": "EWY",
+      "tokenSymbol": "EWY",
+      "nameEn": "iShares MSCI South Korea fund • Robinhood Token",
+      "underlyingIsin": "US4642867729",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x7f0abef0c07280f82c6a08ead09ded6bae2c13fc"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000952cedaaab6e4593b884e68a4efbf481",
+      "ticker": "F",
+      "tokenSymbol": "F",
+      "nameEn": "Ford Motor • Robinhood Token",
+      "underlyingIsin": "US3453708600",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x25c288e6d899b9bc30160965ad9644c67e73be0c"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000021d840250ab344d198503610448348fe",
+      "ticker": "FICO",
+      "tokenSymbol": "FICO",
+      "nameEn": "Fair Isaac • Robinhood Token",
+      "underlyingIsin": "US3032501047",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xa48f22a46c0f1c46ca7d111cb6c137c271987180"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000008616857c3143457db8534cc7ccac1420",
+      "ticker": "FIG",
+      "tokenSymbol": "FIG",
+      "nameEn": "Figma • Robinhood Token",
+      "underlyingIsin": "US3168411052",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x41f4267525a8aff329540ef24fd83d9044758b33"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000053906f8ddb574007aea297c4467f567b",
+      "ticker": "FISV",
+      "tokenSymbol": "FISV",
+      "nameEn": "Fiserv • Robinhood Token",
+      "underlyingIsin": "US3377381088",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x9ece29a4a2397c0a35fb5fa8ee2b9509130a98cc"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000000ca816dd2ffb4c279c52c5fa87bd431e",
+      "ticker": "FIX",
+      "tokenSymbol": "FIX",
+      "nameEn": "Comfort Systems • Robinhood Token",
+      "underlyingIsin": "US1999081045",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x93dbb1d2dc5d63f4abacff30485273f538df68ac"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000dceece67a8c740f180047f65ccb4c44a",
+      "ticker": "FLNC",
+      "tokenSymbol": "FLNC",
+      "nameEn": "Fluence Energy • Robinhood Token",
+      "underlyingIsin": "US34379V1035",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x282e87451e10fa6679bc7d76c69be44cd3fc777c"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000450b2a4327ce4062b527224efc49589a",
+      "ticker": "FLY",
+      "tokenSymbol": "FLY",
+      "nameEn": "Firefly Aerospace Inc. • Robinhood Token",
+      "underlyingIsin": "US31816X1063",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x03bc731ffb162cdd7b98d3c6542bfc291126075d"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d246e0e1cfa541deb327dcae22f1328a",
+      "ticker": "FTNT",
+      "tokenSymbol": "FTNT",
+      "nameEn": "Fortinet • Robinhood Token",
+      "underlyingIsin": "US34959E1091",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x3fb8976980d486084b2eb4a404bd12e72823958f"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000002e3b98468b2d49bea9b69a2b92228fa6",
+      "ticker": "FUTU",
+      "tokenSymbol": "FUTU",
+      "nameEn": "Futu Holdings • Robinhood Token",
+      "underlyingIsin": "US36118L1061",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xeb30663bdff0622ef4e4e5cbb4e975f19f33f51d"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000289ac6c307ef486d8201efa27fa14d63",
+      "ticker": "GE",
+      "tokenSymbol": "GE",
+      "nameEn": "General Electric • Robinhood Token",
+      "underlyingIsin": "US3696043013",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x63b814ddbd6bf339f25fed8c36158a008d5b373e"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000bf86ec8b050b46a9a7ad5a532b90c6af",
+      "ticker": "GEV",
+      "tokenSymbol": "GEV",
+      "nameEn": "GE Vernova • Robinhood Token",
+      "underlyingIsin": "US36828A1016",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x94b8aae43a1ccc08aa64b7d1f29b4d920af4a0c9"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000001db61e88b20b481093c556e4d07195b5",
+      "ticker": "GLD",
+      "tokenSymbol": "GLD",
+      "nameEn": "SPDR Gold Trust • Robinhood Token",
+      "underlyingIsin": "US78463V1070",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xc9a981fee1f9dec688bb123ccdecc63d0debfc4e"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000040b2153b3d3d4715b8d22a15ba1acff2",
+      "ticker": "GLW",
+      "tokenSymbol": "GLW",
+      "nameEn": "Corning • Robinhood Token",
+      "underlyingIsin": "US2193501051",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x7c04e6a3368f2a1de3874f0e80d2e0a1a9915da6"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000001acf6eeea06d40c5b323c903f77bd6d1",
+      "ticker": "GLXY",
+      "tokenSymbol": "GLXY",
+      "nameEn": "Galaxy Digital Inc. • Robinhood Token",
+      "underlyingIsin": "US36317J2096",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x2d427692e928fa156ec22acfabafa0447c5805b7"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c5ac9420091c4f9eb3ff1fdd1d2b60c6",
+      "ticker": "GME",
+      "tokenSymbol": "GME",
+      "nameEn": "GameStop • Robinhood Token",
+      "underlyingIsin": "US36467W1099",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x1b0e319c6a659f002271b69db8a7df2f911c153e"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000053b69e2076884cc9ae2ada9bc7095df3",
+      "ticker": "GOOGL",
+      "tokenSymbol": "GOOGL",
+      "nameEn": "Alphabet Class A • Robinhood Token",
+      "underlyingIsin": "US02079K3059",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x2e0847e8910a9732eb3fb1bb4b70a580adad4fe3"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000f759d1fccdb8418a8970ee6932aa6584",
+      "ticker": "HII",
+      "tokenSymbol": "HII",
+      "nameEn": "Huntington Ingalls • Robinhood Token",
+      "underlyingIsin": "US4464131063",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xeb61c0ed490a367d4e3631ccf8a74b3bfc7e775d"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000e56a9632bdd64f7ea0745b48971ad047",
+      "ticker": "HIMS",
+      "tokenSymbol": "HIMS",
+      "nameEn": "Hims & Hers Health • Robinhood Token",
+      "underlyingIsin": "US4330001060",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xccee82fe024c36fa15e1005ede3e9e4787e23d09"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d2ef3f28627f47539db72dbe14c6f1f7",
+      "ticker": "HPE",
+      "tokenSymbol": "HPE",
+      "nameEn": "HP Enterprise • Robinhood Token",
+      "underlyingIsin": "US42824C1099",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x59dd09d4900c2e4b5f75b7c0d4e6796fcc234cb1"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000e42a66686f784f69abb7759114f38f51",
+      "ticker": "HWM",
+      "tokenSymbol": "HWM",
+      "nameEn": "Howmet Aerospace • Robinhood Token",
+      "underlyingIsin": "US4432011082",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xaea445c5f3db1a462998ccc422a875a361ee5d99"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c0d3fe37e35240d1a0f311a07e2b9fc4",
+      "ticker": "IBM",
+      "tokenSymbol": "IBM",
+      "nameEn": "IBM • Robinhood Token",
+      "underlyingIsin": "US4592001014",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x980dcf6766fa79f5cf0c4aadb3ab477ff15a9619"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000ff5617943e99488d87281bae9b706d53",
+      "ticker": "IBRX",
+      "tokenSymbol": "IBRX",
+      "nameEn": "ImmunityBio, • Robinhood Token",
+      "underlyingIsin": "US45256X1037",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x7c148f74ac7445d1f28366b7fcdc6792a9fcd0cf"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000f87aee91942940d0acf2e657187332af",
+      "ticker": "INDA",
+      "tokenSymbol": "INDA",
+      "nameEn": "iShares MSCI India ETF • Robinhood Token",
+      "underlyingIsin": "US46429B5984",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xacef2e09adb47ad6abebad9ff06689e60615c2b6"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000005d6501818f804e87ab5b352105bbad0a",
+      "ticker": "INFQ",
+      "tokenSymbol": "INFQ",
+      "nameEn": "Infleqtion • Robinhood Token",
+      "underlyingIsin": "US45676K1034",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xb853bc83a753342a4f8320ea680b4b1e84118d21"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c23820045b544bafbdc0dd622098fcc3",
+      "ticker": "INOD",
+      "tokenSymbol": "INOD",
+      "nameEn": "Innodata • Robinhood Token",
+      "underlyingIsin": "US4576422053",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf1953dab6fad537488d5a022361ffaa8b4c95ec6"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000002eb75a2c20d7423881b4f812c27d0abe",
+      "ticker": "INTC",
+      "tokenSymbol": "INTC",
+      "nameEn": "Intel • Robinhood Token",
+      "underlyingIsin": "US4581401001",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xc72b96e0e48ecd4dc75e1e45396e26300bc39681"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000482927a418d1476c8ee89e119bf61fc7",
+      "ticker": "INTU",
+      "tokenSymbol": "INTU",
+      "nameEn": "Intuit • Robinhood Token",
+      "underlyingIsin": "US4612021034",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x56d23bee5f41a7120170b0c603dae30128e460e9"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000b6f6e756b7ff46b88238c18d0bc07fd4",
+      "ticker": "IONQ",
+      "tokenSymbol": "IONQ",
+      "nameEn": "IonQ • Robinhood Token",
+      "underlyingIsin": "US46222L1089",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x558378e000d634a36593e338ebacdd6207640efe"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000612c7fa7477f4f21b3a425f180cffd86",
+      "ticker": "IREN",
+      "tokenSymbol": "IREN",
+      "nameEn": "IREN Limited • Robinhood Token",
+      "underlyingIsin": "AU0000185993",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf0ab0c93be6f41369d302e55db1a96b3c430212d"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000aad6874f8eba489d8a46fe1cbddc8db4",
+      "ticker": "JBL",
+      "tokenSymbol": "JBL",
+      "nameEn": "Jabil Inc. • Robinhood Token",
+      "underlyingIsin": "US4663131039",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xeaf2512dfc1beac608f8794b3793cd4e02894aa6"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000b1ab18e03806432eac8895cdd289a769",
+      "ticker": "JNJ",
+      "tokenSymbol": "JNJ",
+      "nameEn": "Johnson & Johnson • Robinhood Token",
+      "underlyingIsin": "US4781601046",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x03dfbbe0ac4e7bcdafd08ed41a400326b77d8c80"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000092891cbd0b204f8a87d7878e0fbd60a8",
+      "ticker": "JOBY",
+      "tokenSymbol": "JOBY",
+      "nameEn": "Joby Aviation • Robinhood Token",
+      "underlyingIsin": "KYG651631007",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xb334c5ce741b80b5b671f47f5c269cb193fe8e24"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000fb93cee635bd469e8dc9849f12f889aa",
+      "ticker": "KLAC",
+      "tokenSymbol": "KLAC",
+      "nameEn": "KLA • Robinhood Token",
+      "underlyingIsin": "US4824801009",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x96b933c74ecb4a0926b9210cef7b743ef46be2e9"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000b3a0668c099e4767b0be3e33d2542cae",
+      "ticker": "KSS",
+      "tokenSymbol": "KSS",
+      "nameEn": "Kohls Corporation • Robinhood Token",
+      "underlyingIsin": "US5002551043",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x12e3c047bf9aecaf9ddc98c05c31bfd1dd043993"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000a8a9aa61c79e45b48d4ae5e9b6941ed1",
+      "ticker": "KTOS",
+      "tokenSymbol": "KTOS",
+      "nameEn": "Kratos Defense & Security Solutions • Robinhood Token",
+      "underlyingIsin": "US50077B2079",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x7fd06a4d81ccfa3f351394e144d5191874c31313"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000441407e9a0ab483bb0d6191d23bcb654",
+      "ticker": "LHX",
+      "tokenSymbol": "LHX",
+      "nameEn": "L3Harris • Robinhood Token",
+      "underlyingIsin": "US5024311095",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x48d60243c66437c6ac3c2495be94747aed5dfe25"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000a5fc7b0af972454baf7c124f624ae97f",
+      "ticker": "LITE",
+      "tokenSymbol": "LITE",
+      "nameEn": "Lumentum • Robinhood Token",
+      "underlyingIsin": "US55024U1097",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x8ef20885f94e3d9bc7eb3080279188bd5ed7c08c"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000ac7debdd1135468e9b6a35678f81bb28",
+      "ticker": "LLY",
+      "tokenSymbol": "LLY",
+      "nameEn": "Eli Lilly • Robinhood Token",
+      "underlyingIsin": "US5324571083",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x8005d266423c7ea827372c9c864491e5786600ea"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000005cca09f06be14aea89a8ea6265026644",
+      "ticker": "LMT",
+      "tokenSymbol": "LMT",
+      "nameEn": "Lockheed • Robinhood Token",
+      "underlyingIsin": "US5398301094",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x329fcaceb9ad6f9580dd5f643fed0646900d043c"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000065968801094d4f8794208f387f3fe9f9",
+      "ticker": "LRCX",
+      "tokenSymbol": "LRCX",
+      "nameEn": "Lam Research Corp • Robinhood Token",
+      "underlyingIsin": "US5128073062",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x57b0030166db0c31690d1a5aa167e2e26e2c29a4"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000005b0a57398f2f4322b011fb98da1f785f",
+      "ticker": "LULU",
+      "tokenSymbol": "LULU",
+      "nameEn": "Lululemon • Robinhood Token",
+      "underlyingIsin": "US5500211090",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x4e62068525ab11fe768e29dfd00ef909b9803016"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c8fa21fd16c744c9ac5c7f5a60ca433a",
+      "ticker": "LUNR",
+      "tokenSymbol": "LUNR",
+      "nameEn": "Intuitive Machines • Robinhood Token",
+      "underlyingIsin": "US46125A1007",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xa5d4968421ba94814be3b136b15cf422101ac1a3"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000f92f60961bbe43028a23a3d52174b320",
+      "ticker": "MDB",
+      "tokenSymbol": "MDB",
+      "nameEn": "MongoDB • Robinhood Token",
+      "underlyingIsin": "US60937P1066",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xddf2266b79abf0b48898959b0ed6e6adf512be74"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000343e7beca03644bcba2e50b8236784f5",
+      "ticker": "META",
+      "tokenSymbol": "META",
+      "nameEn": "Meta Platforms • Robinhood Token",
+      "underlyingIsin": "US30303M1027",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xc0d6457c16cc70d6790dd43521c899c87ce02f35"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000059499b681f6d4d558c653682dd74910e",
+      "ticker": "MOD",
+      "tokenSymbol": "MOD",
+      "nameEn": "Modine • Robinhood Token",
+      "underlyingIsin": "US6078281002",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xc6cbad1016b38b797610c25e1dc7d95988b1f362"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c5e6650eefa247d599fba9cf6dd5bdad",
+      "ticker": "MPWR",
+      "tokenSymbol": "MPWR",
+      "nameEn": "Monolithic Power Systems • Robinhood Token",
+      "underlyingIsin": "US6098391054",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x52d50d0280ad1054b43f052bd70a49a212a1b128"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000645f1b5c9e1a4a0e8fa96d05e16df733",
+      "ticker": "MRNA",
+      "tokenSymbol": "MRNA",
+      "nameEn": "Moderna • Robinhood Token",
+      "underlyingIsin": "US60770K1079",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x43b07d15ce533bec5476d70c22a78a1b2b662155"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000aa33b104a54c4de08cc929fb8e8af349",
+      "ticker": "MRVL",
+      "tokenSymbol": "MRVL",
+      "nameEn": "Marvell Technology • Robinhood Token",
+      "underlyingIsin": "US5738741041",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x62fd0668e10d8b72339be2dcf7643001688ff13b"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000307bb0113ca54f93adf80f4ff2bf681a",
+      "ticker": "MSFT",
+      "tokenSymbol": "MSFT",
+      "nameEn": "Microsoft • Robinhood Token",
+      "underlyingIsin": "US5949181045",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xe93237c50d904957cf27e7b1133b510c669c2e74"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c91ba6e57a1c493f99cae2174e43c86e",
+      "ticker": "MSTR",
+      "tokenSymbol": "MSTR",
+      "nameEn": "Strategy Inc. • Robinhood Token",
+      "underlyingIsin": "US5949724083",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xec262a75e413fafd0df80480274532c79d42da09"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000000cd0e8a5e7c341e09f4532de2dc256b2",
+      "ticker": "MTSI",
+      "tokenSymbol": "MTSI",
+      "nameEn": "MACOM • Robinhood Token",
+      "underlyingIsin": "US55405Y1001",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xc93f4d80e268ab922e871bd169156c3cc41894e6"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000007757415150a94b50a879cdc04dc90664",
+      "ticker": "MU",
+      "tokenSymbol": "MU",
+      "nameEn": "Micron Technology • Robinhood Token",
+      "underlyingIsin": "US5951121038",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xff080c8ce2e5feadaca0da81314ae59d232d4afd"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000014f96c01ad254647b2617a5686d6053a",
+      "ticker": "MXL",
+      "tokenSymbol": "MXL",
+      "nameEn": "MaxLinear • Robinhood Token",
+      "underlyingIsin": "US57776J1007",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x48961813349333209994750ffa89b3c5c22ec969"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c1fbbd1f58eb47a1a1d16285e48e2f20",
+      "ticker": "NAVN",
+      "tokenSymbol": "NAVN",
+      "nameEn": "Navan • Robinhood Token",
+      "underlyingIsin": "US6391931010",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf7181b63fdb858558a74ba96bc42732684cd7965"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000994b82ab24514d439fccc87156df35f9",
+      "ticker": "NBIS",
+      "tokenSymbol": "NBIS",
+      "nameEn": "Nebius Group • Robinhood Token",
+      "underlyingIsin": "NL0009805522",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x9d9c6684f596f66a64c030b93a886d51fd4d7931"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c8325c5c9c7e4ca2a3d8344500c5c483",
+      "ticker": "NET",
+      "tokenSymbol": "NET",
+      "nameEn": "Cloudflare, Inc. Class A common stock • Robinhood Token",
+      "underlyingIsin": "US18915M1071",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x116f00968269b7bfbad4109ce591d6e74c0601d4"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000500f14b2a92f44d6998e0e2b9cc9387e",
+      "ticker": "NFLX",
+      "tokenSymbol": "NFLX",
+      "nameEn": "Netflix • Robinhood Token",
+      "underlyingIsin": "US64110L1061",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xe0444ef8bf4ed74f74fd73686e2ddf4c1c5591e8"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000002850ddf4a89a4195905c49a4ef7af8a5",
+      "ticker": "NNE",
+      "tokenSymbol": "NNE",
+      "nameEn": "Nano Nuclear Energy • Robinhood Token",
+      "underlyingIsin": "US63010H1086",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xbef75684c43c4ea7bd18dd532a2244674ee8b926"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000008fcfbfc7a42c40d4aa44dc7dc943b078",
+      "ticker": "NOW",
+      "tokenSymbol": "NOW",
+      "nameEn": "ServiceNow • Robinhood Token",
+      "underlyingIsin": "US81762P1021",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x0c3260af4b8f13a69c4c2dfb84fd667890cdfa14"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000002ea76ec420fa43ab81d6734184f7058a",
+      "ticker": "NU",
+      "tokenSymbol": "NU",
+      "nameEn": "Nu • Robinhood Token",
+      "underlyingIsin": "KYG6683N1034",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x408c14038a04f7bd235329e26d2bf569ee20e250"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000915f477416294f5099a5e0e09f327ce5",
+      "ticker": "NVDA",
+      "tokenSymbol": "NVDA",
+      "nameEn": "NVIDIA • Robinhood Token",
+      "underlyingIsin": "US67066G1040",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000b9e9686fc0904e87aef5134b823020e3",
+      "ticker": "NVTS",
+      "tokenSymbol": "NVTS",
+      "nameEn": "Navitas Semiconductor • Robinhood Token",
+      "underlyingIsin": "US63942X1063",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xbe6702d7b70315376dc48a3293f24f0982f86386"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d9dd6bf798564cfd8d65f3f95fc915c3",
+      "ticker": "OKLO",
+      "tokenSymbol": "OKLO",
+      "nameEn": "Oklo • Robinhood Token",
+      "underlyingIsin": "US02156V1098",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x8b2f88497f15a18e9d4ffa1a8ffb8538399ae774"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000000467fac1d4da4c0e9ae874314fc8d784",
+      "ticker": "ON",
+      "tokenSymbol": "ON",
+      "nameEn": "ON Semiconductor • Robinhood Token",
+      "underlyingIsin": "US6821891057",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xbbd09f72b025360fee5c928053dca6248d35be54"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000f1469aaabbf6434cb8820d1026a28460",
+      "ticker": "ONTO",
+      "tokenSymbol": "ONTO",
+      "nameEn": "Onto Innovation • Robinhood Token",
+      "underlyingIsin": "US6833441057",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x8ff63eaeee3fe54ba450c4f5538064ec5a893aef"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000be23b7c535e841a3b1bae97bc0166eae",
+      "ticker": "ORCL",
+      "tokenSymbol": "ORCL",
+      "nameEn": "Oracle • Robinhood Token",
+      "underlyingIsin": "US68389X1054",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xb0992820e760d836549ba69bc7598b4af75dee03"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000060d13e3566ea42a0a83a3224fd446109",
+      "ticker": "OUST",
+      "tokenSymbol": "OUST",
+      "nameEn": "Ouster • Robinhood Token",
+      "underlyingIsin": "US68989M2026",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x40e7a279850e443f582059ae5dc1c3b6563e6395"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000002c4d1ce31ec4310b2c507c921a52b70",
+      "ticker": "P",
+      "tokenSymbol": "P",
+      "nameEn": "Everpure • Robinhood Token",
+      "underlyingIsin": "US74624M1027",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x1cdad396db64bda184d5182a97dd9b3c62100b7d"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000423f62d0b1e146a3b90e9b1ffcbf6e16",
+      "ticker": "PANW",
+      "tokenSymbol": "PANW",
+      "nameEn": "Palo Alto Networks • Robinhood Token",
+      "underlyingIsin": "US6974351057",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xb039597ed45cba7b6e2fb9e8be51802969cee5be"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000ba4c7482f4e048f9a8d4a19fa2d1227a",
+      "ticker": "PATH",
+      "tokenSymbol": "PATH",
+      "nameEn": "UiPath • Robinhood Token",
+      "underlyingIsin": "US90364P1057",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xfb2664f07b6aadd29ea7a59d8859b1aeb8645cda"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c6257ac357d34120ba22c2589ba17cc9",
+      "ticker": "PENG",
+      "tokenSymbol": "PENG",
+      "nameEn": "Penguin Solutions • Robinhood Token",
+      "underlyingIsin": "US7069151055",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x9b23573b156b52565012f5ce02cdf60afbaa70be"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000fb3ae5faa7f7465a95815518c4cd7a8b",
+      "ticker": "PFE",
+      "tokenSymbol": "PFE",
+      "nameEn": "Pfizer • Robinhood Token",
+      "underlyingIsin": "US7170811035",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x7066a64c24e4206cd62e83bf198c1e7eb361f51e"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000b6231b1f45a647a1930f919f161df020",
+      "ticker": "PL",
+      "tokenSymbol": "PL",
+      "nameEn": "Planet Labs • Robinhood Token",
+      "underlyingIsin": "US72703X1063",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xaa4d64474c172010ab57719cb9951e6142a100d3"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000007454a90b4aab491389ce9fa3c485de42",
+      "ticker": "PLTR",
+      "tokenSymbol": "PLTR",
+      "nameEn": "Palantir Technologies • Robinhood Token",
+      "underlyingIsin": "US69608A1088",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x894e1ec2d74ffe5aef8dc8a9e84686accb964f2a"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000a20e50a9f81946d58dafdad20661ec10",
+      "ticker": "POET",
+      "tokenSymbol": "POET",
+      "nameEn": "POET Technologies • Robinhood Token",
+      "underlyingIsin": "CA73044W3021",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xcf6b2d875361be807eafa57458c80f28521f9333"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000794a29855a8f4a9998510dfa2604da94",
+      "ticker": "POWL",
+      "tokenSymbol": "POWL",
+      "nameEn": "Powell Industries • Robinhood Token",
+      "underlyingIsin": "US7391281067",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x237c16d66590f67b886d978acd362eaead8b18c7"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000022d137a64ac743aa991898cc4c1d7af4",
+      "ticker": "PR",
+      "tokenSymbol": "PR",
+      "nameEn": "Permian Resources • Robinhood Token",
+      "underlyingIsin": "US71424F1057",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x4189f0c66ebbb0bfef1c31f763131361ef32f77c"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000094e84a8622774d5699842d9b0621b871",
+      "ticker": "PWR",
+      "tokenSymbol": "PWR",
+      "nameEn": "Quanta • Robinhood Token",
+      "underlyingIsin": "US74762E1029",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x9ab02ead789b6903c3c44d0ed32f9c707cdf12fd"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000000a924e0d878747e586c22887bc2d82b1",
+      "ticker": "QBTS",
+      "tokenSymbol": "QBTS",
+      "nameEn": "D-Wave Quantum Inc. Common Stock • Robinhood Token",
+      "underlyingIsin": "US26740W1099",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xc583c60aef9dc401da72cec1b404743a93cea1cc"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000ad4edb65cfed4b93a3f768502f7ac2b2",
+      "ticker": "QCOM",
+      "tokenSymbol": "QCOM",
+      "nameEn": "Qualcomm • Robinhood Token",
+      "underlyingIsin": "US7475251036",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x0f17206447090e464c277571124dd2688e48aea9"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000002470b933c52d47ccad017ed9ee80c9ed",
+      "ticker": "QQQ",
+      "tokenSymbol": "QQQ",
+      "nameEn": "Invesco QQQ • Robinhood Token",
+      "underlyingIsin": "US46090E1038",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xd5f3879160bc7c32ebb4dc785f8a4f505888de68"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000009448faa0b7c14ea798a7787a8cb9db5a",
+      "ticker": "QUBT",
+      "tokenSymbol": "QUBT",
+      "nameEn": "Quantum Computing • Robinhood Token",
+      "underlyingIsin": "US74766W1080",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x59818904ab4ce163b3ce4ffb64f2d6ca02c434b4"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000eed533334fe84ce08253d5b1dcff7373",
+      "ticker": "RBLX",
+      "tokenSymbol": "RBLX",
+      "nameEn": "Roblox • Robinhood Token",
+      "underlyingIsin": "US7710491033",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf0c4bf4c582cb3836e98394b1d4e7b7281101be8"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000311078f293cf441789d7bc7eb9480228",
+      "ticker": "RCAT",
+      "tokenSymbol": "RCAT",
+      "nameEn": "Red Cat • Robinhood Token",
+      "underlyingIsin": "US75644T1007",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xfde6b5d9bb419b10c23268c74e369abff39c0460"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000003bc66ed8f2314091a365604b4c01aef5",
+      "ticker": "RDDT",
+      "tokenSymbol": "RDDT",
+      "nameEn": "Reddit • Robinhood Token",
+      "underlyingIsin": "US75734B1008",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x05b37fb53a299a1b874a619e1c4c404d52c36f4c"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d6571fe1a63748a4b7b79b37612dc9b8",
+      "ticker": "RDW",
+      "tokenSymbol": "RDW",
+      "nameEn": "Redwire • Robinhood Token",
+      "underlyingIsin": "US75776W1036",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x92ef19e82bd8ff36661de838d5eae7e5cef0effe"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000031a6c09d095b4d49b4155de0040da68f",
+      "ticker": "RGTI",
+      "tokenSymbol": "RGTI",
+      "nameEn": "Rigetti Computing • Robinhood Token",
+      "underlyingIsin": "US76655K1034",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x284358abc07f9359f19f4b5b4ac91901be2597ba"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c4aa88df91204d23a4ff43cd0768298d",
+      "ticker": "RIVN",
+      "tokenSymbol": "RIVN",
+      "nameEn": "Rivian Automotive • Robinhood Token",
+      "underlyingIsin": "US76954A1034",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xb1bf26c1d20ff267a4f93550d1e0d06ac40a114b"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000007cacd0cd4c0547d480e89459e648592b",
+      "ticker": "RKLB",
+      "tokenSymbol": "RKLB",
+      "nameEn": "Rocket Lab Corporation • Robinhood Token",
+      "underlyingIsin": "US7731211089",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x3b14c39e89d60d627b42a1a4ca45b5bb45fc12e2"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000159fb9b112cb4ac8acec13e01d48e763",
+      "ticker": "RUN",
+      "tokenSymbol": "RUN",
+      "nameEn": "Sunrun • Robinhood Token",
+      "underlyingIsin": "US86771W1053",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x756bc80af765c82da966a788858d65adf14f3793"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000000b2d487cedd9423a890231379e09bbb6",
+      "ticker": "SATS",
+      "tokenSymbol": "SATS",
+      "nameEn": "EchoStar • Robinhood Token",
+      "underlyingIsin": "US2787681061",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x95052ddcd5dc25641657424a8cf04834997e1730"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000c89bb960aac6406fb95b34dc136a6016",
+      "ticker": "SCHD",
+      "tokenSymbol": "SCHD",
+      "nameEn": "Schwab US Dividend Equity ETF • Robinhood Token",
+      "underlyingIsin": "US8085247976",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xd63abb2c13d7a8421a8017a712802053568e3c1d"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000005f7e82ad6e4c4b60ba76497863fe4a67",
+      "ticker": "SGOV",
+      "tokenSymbol": "SGOV",
+      "nameEn": "iShares 0-3 Month Treasury Bond • Robinhood Token",
+      "underlyingIsin": "US46436E7186",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x92fd66527192e3e61d4ddd13322aa222de86f9b5"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000b82496d605ca4b019c9200daa049f52f",
+      "ticker": "SHOP",
+      "tokenSymbol": "SHOP",
+      "nameEn": "Shopify • Robinhood Token",
+      "underlyingIsin": "CA82509L1076",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf53f66751b1eff985311b693531e3290f600c410"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000009cc71272a7ec45f0adb8a7469632dd4d",
+      "ticker": "SHY",
+      "tokenSymbol": "SHY",
+      "nameEn": "iShares 1-3 Year Treasury Bond ETF • Robinhood Token",
+      "underlyingIsin": "US4642874576",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xbe274710bf3d9567e1b290ef6a5f9f90ca016fd8"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000006f1951b0f7c348a480d9c135679778f7",
+      "ticker": "SIMO",
+      "tokenSymbol": "SIMO",
+      "nameEn": "Silicon Motion • Robinhood Token",
+      "underlyingIsin": "US82706C1080",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x77e655e37f4d913fb9540e0d541d824171a60e81"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000002b98fc3881db4479b3827d5ca058d31a",
+      "ticker": "SKHY",
+      "tokenSymbol": "SKHY",
+      "nameEn": "SK hynix Inc. American Depositary Shares • Robinhood Token",
+      "underlyingIsin": "US78392B2060",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x84cab63bc87912e71ad199ff14a0ba45de68fef8"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000008a8af3575ac442b8ab46c2d966b2107d",
+      "ticker": "SLS",
+      "tokenSymbol": "SLS",
+      "nameEn": "SELLAS Life Sciences • Robinhood Token",
+      "underlyingIsin": "US81642T2096",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x285b231728c7e4333799183df1094d775246a535"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000ddf030d4e25046cab85b3d8c7cd86553",
+      "ticker": "SLV",
+      "tokenSymbol": "SLV",
+      "nameEn": "iShares Silver Trust • Robinhood Token",
+      "underlyingIsin": "US46428Q1094",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x411efb0e7f985935daec3d4c3ebaea0d0ad7d89f"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000000cfe41021541408ab92f19e6af2fa729",
+      "ticker": "SMCI",
+      "tokenSymbol": "SMCI",
+      "nameEn": "Super Micro Computer • Robinhood Token",
+      "underlyingIsin": "US86800U3023",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xc01aa1fecec0605b13bc84874ff7256c0f5f562a"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000008f38b46a1c554840a92533677cce89ad",
+      "ticker": "SMH",
+      "tokenSymbol": "SMH",
+      "nameEn": "VanEck Semiconductor ETF • Robinhood Token",
+      "underlyingIsin": "US92189F6768",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x072f979c2cac8e1391b0162a87fee094bf8744a0"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000a12860406ce84eb098e3861878aaf584",
+      "ticker": "SMR",
+      "tokenSymbol": "SMR",
+      "nameEn": "NuScale Power • Robinhood Token",
+      "underlyingIsin": "US67079K1007",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x1eebee7f74517e0279dfb09d25b0407beec3fdd6"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000002993bb34578a4b92b8addda0fc4d697b",
+      "ticker": "SNAP",
+      "tokenSymbol": "SNAP",
+      "nameEn": "Snap • Robinhood Token",
+      "underlyingIsin": "US83304A1060",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf6589f11bc40b669e584073f428b05562f568733"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000046e46cc63fe842ebbdfe6187bda403d6",
+      "ticker": "SNDK",
+      "tokenSymbol": "SNDK",
+      "nameEn": "Sandisk Corporation • Robinhood Token",
+      "underlyingIsin": "US80004C2008",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xb90a19ff0af67f7779aff50a882a9cff42446400"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000002087239447ce4fcb8c6194c8941d287c",
+      "ticker": "SNOW",
+      "tokenSymbol": "SNOW",
+      "nameEn": "Snowflake • Robinhood Token",
+      "underlyingIsin": "US8334451098",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xba0cab75495255d0cb58e22b648bfed4ecd1f47e"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000df2cb1370b1b41a8b896a706fefae931",
+      "ticker": "SOFI",
+      "tokenSymbol": "SOFI",
+      "nameEn": "SoFi Technologies • Robinhood Token",
+      "underlyingIsin": "US83406F1021",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x98e75885157c80992a8d41b696d8c9c6fb30a926"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000a153b6084a5743dfa4e4264b02cc0737",
+      "ticker": "SOUN",
+      "tokenSymbol": "SOUN",
+      "nameEn": "SoundHound AI • Robinhood Token",
+      "underlyingIsin": "US8361001071",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x6e3dfd9f7e1649baa14d25cac18c94d62db10a54"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000f379ff90efb54b4cb6280fc923e38926",
+      "ticker": "SOXX",
+      "tokenSymbol": "SOXX",
+      "nameEn": "iShares Semiconductor ETF • Robinhood Token",
+      "underlyingIsin": "US4642875235",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x75742c18bc1f1c5c5f448f4c9d9c6f66dafaaa38"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000001aa9c9cc0bf34c5e95cfe7168463d310",
+      "ticker": "SPCX",
+      "tokenSymbol": "SPCX",
+      "nameEn": "Space Exploration Technologies Corp. Class A Common Stock • Robinhood Token",
+      "underlyingIsin": "US84615Q1031",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x4a0e65a3eccec6dbe60ae065f2e7bb85fae35eea"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000eefd305f8fd04bdb882b158b0b30d776",
+      "ticker": "SPMO",
+      "tokenSymbol": "SPMO",
+      "nameEn": "Invesco S&P 500 Momentum ETF • Robinhood Token",
+      "underlyingIsin": "US46138E3392",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xad622320e520de39e72d41ef07438c3fd3354875"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000001c6f27a62789417d8ed359ed3c2d3da1",
+      "ticker": "SPY",
+      "tokenSymbol": "SPY",
+      "nameEn": "SPDR S&P 500 ETF Trust • Robinhood Token",
+      "underlyingIsin": "US78462F1030",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x117cc2133c37b721f49de2a7a74833232b3b4c0c"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000b7d8350ca5a94c8f999bcee3b17c079d",
+      "ticker": "TE",
+      "tokenSymbol": "TE",
+      "nameEn": "T1 Energy • Robinhood Token",
+      "underlyingIsin": "US35834F1049",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xb1969f6604ca1ae7a2cd3f1827876e914594ca2d"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000007a456595d454eafba36fa1fb508973e",
+      "ticker": "TEAM",
+      "tokenSymbol": "TEAM",
+      "nameEn": "Atlassian Corporation • Robinhood Token",
+      "underlyingIsin": "US0494681010",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x5b97476b922f3305131b8f0b9d333172e87f4aae"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000006ae9a2c6d30a4d379e93169d2441876b",
+      "ticker": "TEM",
+      "tokenSymbol": "TEM",
+      "nameEn": "Tempus AI • Robinhood Token",
+      "underlyingIsin": "US88023B1035",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xb1cc0ec7db69cf43539119814df40071b9d61793"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000007dadfeb7f65f49fb9fb1bc94bbbf2d1e",
+      "ticker": "TER",
+      "tokenSymbol": "TER",
+      "nameEn": "Teradyne • Robinhood Token",
+      "underlyingIsin": "US8807701029",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x2778c5024d5ca2cdb0f8ead671ffc69963adcd9c"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000036e64f28008640f9ab10ed949faf23b2",
+      "ticker": "TSEM",
+      "tokenSymbol": "TSEM",
+      "nameEn": "Tower Semiconductor • Robinhood Token",
+      "underlyingIsin": "IL0010823792",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x89776d4cd68193597a2fc132cfac1fde36ccea8a"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000cfece3244ea34bb29414dd9488b32d9f",
+      "ticker": "TSLA",
+      "tokenSymbol": "TSLA",
+      "nameEn": "Tesla • Robinhood Token",
+      "underlyingIsin": "US88160R1014",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x322f0929c4625ed5bad873c95208d54e1c003b2d"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000002e890a0884474abd86ba66b19722e827",
+      "ticker": "TSM",
+      "tokenSymbol": "TSM",
+      "nameEn": "Taiwan Semiconductor Manufacturing • Robinhood Token",
+      "underlyingIsin": "US8740391003",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x58ffe4a942d3885baa22d7520691f611ef09e7aa"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000e2f7326613594997b83c3fa7c2e63d70",
+      "ticker": "TTD",
+      "tokenSymbol": "TTD",
+      "nameEn": "Trade Desk • Robinhood Token",
+      "underlyingIsin": "US88339J1051",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x0b5fb4031cae9163db10b169ee72685f0edc8545"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000032d0504fcc1a48ff8ac9b29185578559",
+      "ticker": "TTWO",
+      "tokenSymbol": "TTWO",
+      "nameEn": "Take-Two Interactive Software • Robinhood Token",
+      "underlyingIsin": "US8740541094",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x5e81213613b6b86eab4c6c50d718d34359459786"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000bb970311792440cebde7cef41f80d446",
+      "ticker": "UMC",
+      "tokenSymbol": "UMC",
+      "nameEn": "United Microelectronics • Robinhood Token",
+      "underlyingIsin": "US9108734057",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x0e6e67ba88e7b5d9b67636a215c76779b948de79"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000006d5054df7b5d4f8f8a11cc01084242e7",
+      "ticker": "UNH",
+      "tokenSymbol": "UNH",
+      "nameEn": "UnitedHealth • Robinhood Token",
+      "underlyingIsin": "US91324P1021",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xcf364ea52787e289de6f32077834056e3e70d6a8"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000413cbb2a5e924576a297ccb67c272298",
+      "ticker": "UPS",
+      "tokenSymbol": "UPS",
+      "nameEn": "UPS • Robinhood Token",
+      "underlyingIsin": "US9113121068",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf23250dac154d05bb671cb0d0ebef3c635c79ce2"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000051d8408eb0484cb6bd003337551fddd5",
+      "ticker": "USAR",
+      "tokenSymbol": "USAR",
+      "nameEn": "USA Rare Earth • Robinhood Token",
+      "underlyingIsin": "US91733P1075",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xd917b029c761d264c6a312bbbcda868658ef86a6"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000949bd039a8ae465d9cf9336068188b55",
+      "ticker": "USO",
+      "tokenSymbol": "USO",
+      "nameEn": "United States Oil Fund • Robinhood Token",
+      "underlyingIsin": "US91232N2071",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xa30fa36db767ad9ed3f7a60fc79526fb4d56d344"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000034a1e548dfdc4b7cbf162648f20ccffc",
+      "ticker": "VICR",
+      "tokenSymbol": "VICR",
+      "nameEn": "Vicor • Robinhood Token",
+      "underlyingIsin": "US9258151029",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x6006ed4b2f94110851ff7509d97d034f0eed9226"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000008f9ceee3a7954365bdd32ff0094d9b0f",
+      "ticker": "VRT",
+      "tokenSymbol": "VRT",
+      "nameEn": "Vertiv • Robinhood Token",
+      "underlyingIsin": "US92537N1081",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xfa78c12e6488814a0262e4e802749a4a737d5fb7"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d3de17a58c1a4b58bd07bef4b9123e7f",
+      "ticker": "VSAT",
+      "tokenSymbol": "VSAT",
+      "nameEn": "ViaSat • Robinhood Token",
+      "underlyingIsin": "US92552V1008",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x26dcbfb34fc83cabd6990f449674efdc6097ff85"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000051fd963e99794a83a5e429d05ddc0347",
+      "ticker": "VST",
+      "tokenSymbol": "VST",
+      "nameEn": "Vistra • Robinhood Token",
+      "underlyingIsin": "US92840M1027",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x561e2a49212b7ccf47f2744ccb83e200722fadbc"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000007bf2fcc61eea41048648bcfbe4066b63",
+      "ticker": "VTI",
+      "tokenSymbol": "VTI",
+      "nameEn": "Vanguard Morningstar Total Stock Market ETF • Robinhood Token",
+      "underlyingIsin": "US9229087690",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x0594134df3f171a354d9c85ebd65b7a6148f6d09"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000001805c8a4eb1a4b3fa49e2698c0da6baa",
+      "ticker": "WDAY",
+      "tokenSymbol": "WDAY",
+      "nameEn": "Workday • Robinhood Token",
+      "underlyingIsin": "US98138H1014",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x82da4646242e1d962e96e932269dc644c94a9caa"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000007001c5951f374630b5f3f52fd1ff2022",
+      "ticker": "WDC",
+      "tokenSymbol": "WDC",
+      "nameEn": "Western Digital • Robinhood Token",
+      "underlyingIsin": "US9581021055",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf52597345a8edf418bc4071b4a35112472277d3e"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000e0c9d26f234a467fa738e2642dd815ca",
+      "ticker": "WULF",
+      "tokenSymbol": "WULF",
+      "nameEn": "TeraWulf • Robinhood Token",
+      "underlyingIsin": "US88080T1043",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x348be1a8663f15edde5cdf8a96bb69078f7ab6fd"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000025191a136aab4e5fa41b67ec3218a093",
+      "ticker": "WYFI",
+      "tokenSymbol": "WYFI",
+      "nameEn": "WhiteFiber, Inc. • Robinhood Token",
+      "underlyingIsin": "KYG961151035",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x9e7abd3c9139d14e4c86dce0e455aab7a0c2fb3e"
+        }
+      }
+    },
+    {
+      "assetId": "0x000000000000000000000000000000008ffcea951a5b43138e764a75e22284f9",
+      "ticker": "XLK",
+      "tokenSymbol": "XLK",
+      "nameEn": "State Street Technology Select Sector SPDR ETF • Robinhood Token",
+      "underlyingIsin": "US81369Y8030",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x15cd20759ce7f3285c29a319de2d1a2e098c6f43"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000d491ee29c5564368830ce787289dcae8",
+      "ticker": "XNDU",
+      "tokenSymbol": "XNDU",
+      "nameEn": "Xanadu Quantum • Robinhood Token",
+      "underlyingIsin": "CA98390R1029",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xa8eb3bccbf2017ee7cbfb652eb51cf2e1b153289"
+        }
+      }
+    },
+    {
+      "assetId": "0x0000000000000000000000000000000098d983331a5245e98847e635b93eb920",
+      "ticker": "XOM",
+      "tokenSymbol": "XOM",
+      "nameEn": "ExxonMobil Holdings Corporation • Robinhood Token",
+      "underlyingIsin": "US30233Q1085",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0xf9b46d3d1b22199d4d1025a9cedb540a33f1a2d5"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000da64fede272447a3b772423f0962a984",
+      "ticker": "ZM",
+      "tokenSymbol": "ZM",
+      "nameEn": "Zoom • Robinhood Token",
+      "underlyingIsin": "US98980L1017",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x44c4f142009036cf477ed2d09932051843137cf1"
+        }
+      }
+    },
+    {
+      "assetId": "0x00000000000000000000000000000000968cee5f446f422d876c7661ff20b373",
+      "ticker": "ZS",
+      "tokenSymbol": "ZS",
+      "nameEn": "Zscaler • Robinhood Token",
+      "underlyingIsin": "US98980G1022",
+      "assetStatus": "ASSET_STATUS_ACTIVE",
+      "deployments": {
+        "4663": {
+          "native": "0x7dc013eb55e436f30d7ed1afe4e36d6e45e3c3f7"
+        }
+      }
+    }
+  ]
+}

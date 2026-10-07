@@ -47,8 +47,10 @@ with open(sys.argv[1], "a+") as lock:
     def test_projection_role_registers_only_local_jobs_and_preserves_cadence(self):
         from app.projection_worker import start_projection_loops
         jobs = {}
-        def register(name, interval, action, delay=0):
+        admission_options = {}
+        def register(name, interval, action, delay=0, **options):
             jobs[name] = (interval, delay, action)
+            admission_options[name] = options
         publish = AsyncMock(return_value={'changed': True})
         derive = AsyncMock(return_value={'affected': 2})
         with patch('app.collectors.scheduler.spawn_loop', side_effect=register), \
@@ -57,8 +59,16 @@ with open(sys.argv[1], "a+") as lock:
             start_projection_loops()
             self.assertEqual({name: values[:2] for name, values in jobs.items()}, {
                 'realtimeProjection': (2, 0), 'realtimeDerived': (30, 2),
-                'comparisons': (120, 22), 'baskets': (60, 55),
+                'comparisons': (120, 22), 'baskets': (60, 55), 'outboxMaintenance': (2, 1),
             })
+            self.assertEqual({name for name, options in admission_options.items() if options.get('priority')},
+                             {'realtimeProjection'})
+            self.assertEqual({name for name, options in admission_options.items() if options.get('heavy')},
+                             {'realtimeProjection', 'realtimeDerived', 'comparisons', 'baskets'})
+            self.assertEqual(admission_options['realtimeProjection']['budget_lane'], 'publication')
+            self.assertEqual(admission_options['realtimeProjection']['max_run_s'], 90)
+            self.assertTrue(all('budget_lane' not in options for name, options in admission_options.items()
+                                if name != 'realtimeProjection'))
             self.assertEqual(asyncio.run(jobs['realtimeProjection'][2]()), {'accepted': 1, 'updated': 1})
             self.assertEqual(asyncio.run(jobs['realtimeDerived'][2]()), {'accepted': 1, 'updated': 2, 'skipped': 0})
         publish.assert_awaited_once()
@@ -67,7 +77,7 @@ with open(sys.argv[1], "a+") as lock:
     def test_long_derived_turn_leaves_a_gap_without_discarding_dirty_work(self):
         from app.projection_worker import start_projection_loops
         jobs = {}
-        def register(name, interval, action, delay=0):
+        def register(name, interval, action, delay=0, **options):
             jobs[name] = action
         clock = [100.0]
         async def slow_derive():
@@ -148,6 +158,14 @@ printf '%s' "$running"
 
 
 class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        # These health tests provide a complete storage snapshot. Keep the
+        # separate coverage reader from opening an unrelated global database.
+        self.discovery = patch('app.collectors.discovery_coverage.discovery_coverage_snapshot',
+                               AsyncMock(return_value={}))
+        self.discovery.start()
+        self.addCleanup(self.discovery.stop)
+
     def test_required_source_failure_and_optional_reference_warning(self):
         from app.main import classify_sources
         sources, issues, warnings = classify_sources([
@@ -295,9 +313,16 @@ class ProcessHealthEndpointTests(unittest.IsolatedAsyncioTestCase):
 
 class HealthProjectionReadTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        from app.db import ResearchStore
+        from app.db import ResearchStore, WriterLock
+        self.discovery = patch('app.collectors.discovery_coverage.discovery_coverage_snapshot',
+                               AsyncMock(return_value={}))
+        self.discovery.start()
+        self.addCleanup(self.discovery.stop)
         self.temp = tempfile.TemporaryDirectory()
-        self.store = await ResearchStore(self.temp.name + '/research.sqlite', '196').connect()
+        self.addCleanup(self.temp.cleanup)
+        self.store = ResearchStore(self.temp.name + '/research.sqlite', '196', write_lock=WriterLock())
+        self.addAsyncCleanup(self.store.close)
+        await self.store.connect()
         self.now = int(time.time() * 1000)
         self.market = {'unified': {
             'assets': [{'chainId': '196', 'price': 1, 'fieldTimes': {'price': self.now}}],
@@ -323,10 +348,6 @@ class HealthProjectionReadTests(unittest.IsolatedAsyncioTestCase):
             ('196:scan', 'two', json.dumps({'status': 'complete', 'unsupportedPools': 1, 'failedPools': 0})),
         ])
         await self.store.db.commit()
-
-    async def asyncTearDown(self):
-        await self.store.close()
-        self.temp.cleanup()
 
     async def publish(self):
         from app.realtime_projection import _dump, _encode_snapshot

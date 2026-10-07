@@ -24,6 +24,7 @@ class ActiveMemeTests(unittest.TestCase):
             'price': 1, 'fieldTimes': {'price': now - 1000},
             'totalLiquidityUsd': 1500, 'totalLiquidityAt': now - 1000,
             'totalLiquidityStatus': 'current',
+            'totalLiquidityCoverage': {'scope': 'token-aggregate', 'provider': 'CoinGecko', 'complete': False},
             'relationLevel': None,
         }
         duplicate = dict(base)

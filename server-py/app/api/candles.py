@@ -29,6 +29,8 @@ BAR_MS = {
     "1D": 86_400_000, "1W": 604_800_000,
 }
 BARS = list(BAR_TTL)
+EXCHANGE_REFRESH_MS = 30_000
+EXCHANGE_FRESHNESS_MS = 60_000
 
 _mem: dict[str, tuple[float, list, bool]] = {}
 _inflight: dict[str, asyncio.Future] = {}
@@ -84,7 +86,87 @@ def cache_ttl(bar: str, rows: list, _fetched_at: float) -> float:
     return min(BAR_TTL[bar], 30)
 
 
-async def resolve_market(chain, address, venue, market_id=None, pool=None):
+def exchange_history_limit(meta, bar, requested_at, maximum=1000):
+    """Refresh the real open bar and corrections, plus any missing intervals."""
+    tail = meta.get('lastHistoryTailAt')
+    if (not isinstance(tail, (int, float)) or isinstance(tail, bool)
+            or not math.isfinite(tail) or tail <= 0 or tail > requested_at):
+        return maximum
+    return min(maximum, max(3, int((requested_at-tail)//BAR_MS[bar])+3))
+
+
+def exchange_freshness(meta, rows, bar, now):
+    """A successful fetch cannot make old provider bars look current."""
+    observed = max(meta.get('lastHistoryRequestAt') or 0, meta.get('lastSourceEventAt') or 0)
+    if not observed:
+        observed = meta.get('lastSuccessfulAt') or 0  # Deployed legacy metadata.
+    collector_current = -1000 <= now-observed <= EXCHANGE_FRESHNESS_MS
+    period = BAR_MS[bar]
+    offset = 4*86_400_000 if bar == '1W' else 0
+    opened = (now-offset)//period*period+offset
+    tail_current = bool(rows) and opened-period <= rows[-1]['t'] <= opened
+    reason = ('upstream-error' if meta.get('error') or meta.get('stale') else
+              'history-missing' if not rows else 'collector-overdue' if not collector_current else
+              'history-old' if not tail_current else None)
+    return {'stale': reason is not None, 'staleReason': reason,
+            'collectorStatus': 'error' if reason == 'upstream-error' else
+                               'current' if collector_current else 'overdue' if observed else 'waiting',
+            'coverageStatus': 'backfilling' if meta.get('historyGap') else
+                              'current' if tail_current else 'missing' if not rows else 'history-old',
+            'marketStatus': 'live' if reason is None else 'recovering'}
+
+
+def exchange_gap_window(previous, rows, bar):
+    """Only describe known missing history between two provider observations."""
+    period = BAR_MS[bar]
+    gap = previous.get('historyGap')
+    gap = dict(gap) if isinstance(gap,dict) else None
+    tail = previous.get('lastHistoryTailAt')
+    if (rows and isinstance(tail,(int,float)) and not isinstance(tail,bool)
+            and math.isfinite(tail) and tail > 0):
+        start, end = int(tail)+period, min(row['t'] for row in rows)-period
+        if start <= end:
+            gap = {'from':min(start,gap['from']) if gap else start,
+                   'to':max(end,gap['to']) if gap else end}
+    return gap
+
+
+async def _exchange_page(client,market,bar,limit,*,start=None,end=None):
+    endpoint=('https://www.binance.com/bapi/defi/v1/public/alpha-trade/klines'
+              if market.venue=='binance-alpha' else 'https://api.binance.com/api/v3/klines')
+    params={'symbol':market.market_id,'interval':bar.lower(),'limit':limit}
+    if start is not None:
+        params.update(startTime=start,endTime=end)
+    response=await client.get(endpoint,params=params)
+    response.raise_for_status()
+    data=response.json()
+    if market.venue=='binance-alpha':
+        if not isinstance(data,dict) or data.get('code')!='000000' or data.get('success') is False:
+            raise ValueError('Invalid Alpha candles')
+        data=data.get('data')
+    if not isinstance(data,list):
+        raise ValueError('Invalid exchange candles')
+    rows=[]
+    seen=set()
+    for row in data:
+        if not isinstance(row,(list,tuple)) or len(row)<8 or any(_num(v) is None for v in row[1:5]):
+            if start is not None:
+                raise ValueError('Invalid exchange candle rows')
+            continue
+        opened=int(row[0])
+        if start is not None and not start<=opened<=end:
+            raise ValueError('Exchange returned candles outside requested range')
+        if start is not None and (opened in seen or len(rows)>=limit):
+            raise ValueError('Invalid exchange history page size')
+        seen.add(opened)
+        rows.append({'t':opened,'o':float(row[1]),'h':float(row[2]),'l':float(row[3]),'c':float(row[4]),
+                     'v':_vol(row[5]),'vu':_vol(row[7]),'confirmed':int(row[6])<time.time()*1000})
+    if data and not rows:
+        raise ValueError('Invalid exchange candle rows')
+    return sorted(rows,key=lambda row:row['t'])
+
+
+async def resolve_market(chain, address, venue, market_id=None, pool=None, *, candle_store=None):
     from ..collectors.market_streams import Market
     if market_id and venue in ('binance','binance-alpha'):
         market_id=market_id.upper()
@@ -95,7 +177,7 @@ async def resolve_market(chain, address, venue, market_id=None, pool=None):
             return None
         return Market(chain,address,venue,entry['symbol']+'USDT','USDT',entry['symbol'],underlying=entry['underlying'])
     candidates=[]
-    for _,row in await (await store(chain)).all_kv('market-registry'):
+    for _,row in await (candle_store or await store(chain)).all_kv('market-registry'):
         definition=row.get('definition') or {}
         if definition.get('venue')!=venue or definition.get('token','').lower()!=address:
             continue
@@ -138,6 +220,7 @@ def pool_freshness(health,cursor,meta,now):
     """A quiet, fully scanned pool is different from a disconnected collector."""
     health=health if isinstance(health,dict) else {}
     cursor=cursor if isinstance(cursor,dict) else {}
+    meta=meta if isinstance(meta,dict) else {}
     head=health.get('lastHead')
     scanned=cursor.get('block')
     scanned_at=cursor.get('updatedAt') or 0
@@ -146,8 +229,26 @@ def pool_freshness(health,cursor,meta,now):
                else isinstance(head,int) and isinstance(scanned,int) and head-scanned<=32)
     transport_ready=(health.get('status') in ('live','catching-up')
                      and 0<=now-int(health.get('updatedAt') or 0)<=30000)
-    healthy=(transport_ready
-             and 0<=now-int(scanned_at)<=20000 and caught_up)
+    historical_current=(transport_ready
+                        and 0<=now-int(scanned_at)<=20000 and caught_up)
+    proof=meta.get('poolScan') if isinstance(meta.get('poolScan'),dict) else {}
+    proof_at=proof.get('verifiedAt')
+    proof_time=proof.get('blockTime')
+    proof_start=proof.get('fromBlock')
+    proof_end=proof.get('throughBlock')
+    proof_head=proof.get('headBlockAtScan')
+    if proof.get('scope')=='exact-pool' and proof.get('canonical') is False:
+        historical_current=False
+    expected_pool=meta.get('poolId') or meta.get('pool')
+    recent_current=(proof.get('scope')=='exact-pool'
+        and bool(expected_pool) and proof.get('pool')==expected_pool
+        and proof.get('chainId')==meta.get('chainId')
+        and proof.get('canonical') is True and proof.get('decoded') is True
+        and isinstance(proof_start,int) and isinstance(proof_end,int) and 0<=proof_start<=proof_end
+        and isinstance(proof_head,int) and proof_end==proof_head
+        and isinstance(proof_at,(int,float)) and 0<=now-proof_at<=20000
+        and isinstance(proof_time,(int,float)) and 0<=now-proof_time<30000)
+    healthy=historical_current or recent_current
     last_trade=meta.get('lastSourceEventAt')
     # New live trades can be current while the durable historical range is
     # still catching up. Do not call a quiet pool healthy without that scan,
@@ -161,43 +262,56 @@ def pool_freshness(health,cursor,meta,now):
                   and 0<=now-int(persisted)<=30000
                   and -1000<=int(persisted)-int(last_trade)<=10000)
     quiet=healthy and (not last_trade or now-int(last_trade)>60000)
+    historical_scanned,historical_scanned_at=scanned,cursor.get('updatedAt')
+    if recent_current:
+        scanned,scanned_at,block_time=proof_end,proof_at,proof_time
     return {'stale':not (healthy or live_current),'transportStatus':health.get('status','starting'),
             'marketStatus':'quiet' if quiet else 'live' if healthy or live_current else 'recovering',
             'coverageStatus':'current' if healthy else 'backfilling',
+            'recentCoverageStatus':'current' if recent_current else 'unverified',
+            'historicalCoverageStatus':'current' if historical_current else 'backfilling',
+            'historicalScanThroughBlock':historical_scanned,'historicalScanAt':historical_scanned_at,
+            'nearTipVerifiedAt':proof_at,'nearTipFromBlock':proof_start,
+            'nearTipThroughBlock':proof_end,'nearTipBlockTime':proof_time,
+            'nearTipPool':proof.get('pool'),
             'lastTradeAt':last_trade,'scanThroughBlock':scanned,'scanAt':scanned_at,
             'headBlock':head,'scanBlockTime':block_time,'coverage':'observed'}
 
 
-async def _put_exchange_history(s,storage,bar,rows,key,request_started):
+async def _put_exchange_history(s,storage,bar,rows,key,request_started,*,historical=False):
     if not isinstance(s,ResearchStore):
         # The store protocol remains mockable in provider-contract tests.
         return await s.put_candles(storage,bar,rows)
-    async with s._guard_write():
-        await s.db.execute('BEGIN IMMEDIATE')
-        try:
-            latest=await s.get('candle-meta',key) or {}
-            if latest.get('lastHistoryRequestAt',0)>request_started:
-                await s.db.commit()
-                return
-            if latest.get('lastSourceEventAt',0)>request_started:
-                rows=[row for row in rows if row.get('confirmed')]
-            if rows:
-                await s.db.executemany(f'''INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
+    for offset in range(0,len(rows),64):
+        async with s._guard_write():
+            await s.db.execute('BEGIN IMMEDIATE')
+            try:
+                latest=await s.get('candle-meta',key) or {}
+                if latest.get('lastHistoryRequestAt',0)>request_started:
+                    await s.db.commit()
+                    return
+                batch=rows[offset:offset+64]
+                if latest.get('lastSourceEventAt',0)>request_started:
+                    batch=[row for row in batch if row.get('confirmed')]
+                if batch:
+                    await s.db.executemany(f'''INSERT INTO candles VALUES (?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(asset,bar,openTime) DO UPDATE SET
                     open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,
                     volume=excluded.volume,volumeUsd=excluded.volumeUsd,confirmed=excluded.confirmed
                     WHERE {CANDLE_UPDATE_WHERE}''',
-                    [(s.key(storage),bar,row['t'],row['o'],row['h'],row['l'],row['c'],row.get('v'),row.get('vu'),int(bool(row.get('confirmed')))) for row in rows])
-                latest.update(lastHistoryRequestAt=request_started,
-                              lastHistoryFrom=min(row['t'] for row in rows),
-                              lastHistoryTailAt=max(row['t'] for row in rows),
-                              lastObservationAt=max(request_started,latest.get('lastSourceEventAt') or 0))
-                await s.db.execute('INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body',
-                                   (s.key('candle-meta'),key,json.dumps(latest)))
-            await s.db.commit()
-        except BaseException:
-            await s.db.rollback()
-            raise
+                        [(s.key(storage),bar,row['t'],row['o'],row['h'],row['l'],row['c'],row.get('v'),row.get('vu'),int(bool(row.get('confirmed')))) for row in batch])
+                    if not historical:
+                        latest.update(lastHistoryRequestAt=request_started,
+                                      lastHistoryFrom=min(row['t'] for row in rows),
+                                      lastHistoryTailAt=max(row['t'] for row in batch),
+                                      lastObservationAt=max(request_started,latest.get('lastSourceEventAt') or 0))
+                        await s.db.execute('INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body',
+                                           (s.key('candle-meta'),key,json.dumps(latest)))
+                await s.db.commit()
+            except BaseException:
+                await s.db.rollback()
+                raise
+        await asyncio.sleep(0)
 
 
 async def _put_history_meta(s,key,source,request_started):
@@ -208,10 +322,16 @@ async def _put_history_meta(s,key,source,request_started):
         await s.db.execute('BEGIN IMMEDIATE')
         try:
             latest=await s.get('candle-meta',key) or {}
+            gap=source.get('historyGap')
+            gap_observed=('historyGap' in source and latest.get('lastHistoryRequestAt',0)<=request_started)
             if max(latest.get('lastSourceEventAt',0),latest.get('lastHistoryRequestAt',0))>request_started:
                 source={**source,**latest}
             else:
                 source={**latest,**source}
+            if gap_observed:
+                # New live ticks retain their own clocks and open candle, but
+                # cannot undo a completed, bounded historical scan.
+                source['historyGap']=gap
             await s.db.execute('INSERT INTO facts VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body',
                                (s.key('candle-meta'),key,json.dumps(source)))
             await s.db.commit()
@@ -221,8 +341,8 @@ async def _put_history_meta(s,key,source,request_started):
             raise
 
 
-async def candle_series(chain: str, address: str, bar: str, limit: int, venue: str = 'dex', market_id=None, pool=None):
-    market = await resolve_market(chain,address,venue,market_id,pool) if venue!='dex' or pool else None
+async def candle_series(chain: str, address: str, bar: str, limit: int, venue: str = 'dex', market_id=None, pool=None, *, candle_store=None):
+    market = await resolve_market(chain,address,venue,market_id,pool,candle_store=candle_store) if venue!='dex' or pool else None
     if (venue!='dex' or pool) and market is None:
         return {'bar':bar,'rows':[],'stale':True,'error':'unmapped-market','venue':venue,'status':'unavailable'}
     key = series_key(chain,address,bar,venue,market)
@@ -231,7 +351,7 @@ async def candle_series(chain: str, address: str, bar: str, limit: int, venue: s
     # Native pool history is built from confirmed protocol logs. USD token
     # aggregator history is a different market and cannot fill its gaps.
     if pool:
-        s=await store(chain)
+        s=candle_store or await store(chain)
         meta=await s.get('candle-meta',key) or {}
         rows=await s.candle_range(storage_address,bar,limit)
         return {**meta,**market.frame(),'source':meta.get('source','On-chain pool'),
@@ -254,32 +374,16 @@ async def candle_series(chain: str, address: str, bar: str, limit: int, venue: s
                   'storage':storage_address,'priceCurrency':market.quote_currency if market else 'USD',
                   'volumeCurrency':market.quote_currency if market else 'USD','venue':venue,
                   **(market.frame() if market else {})}
-        s = await store(chain)
+        s = candle_store or await store(chain)
         previous = await s.get('candle-meta', key)
         previous = previous if isinstance(previous,dict) else {}
         error = None
         request_started=int(time.time()*1000)
         try:
             if exchange:
-                endpoint=('https://www.binance.com/bapi/defi/v1/public/alpha-trade/klines'
-                          if venue=='binance-alpha' else 'https://api.binance.com/api/v3/klines')
                 async with httpx.AsyncClient(timeout=15) as client:
-                    response = await client.get(endpoint, params={
-                        'symbol':market.market_id,'interval':bar.lower(),'limit':min(limit,1000)})
-                    response.raise_for_status()
-                    data = response.json()
-                if venue=='binance-alpha':
-                    if not isinstance(data,dict) or data.get('code')!='000000':
-                        raise ValueError('Invalid Alpha candles')
-                    data=data.get('data')
-                if not isinstance(data,list):
-                    raise ValueError('Invalid exchange candles')
-                parsed=[]
-                for row in data:
-                    if len(row)<8 or any(_num(v) is None for v in row[1:5]):
-                        continue
-                    parsed.append({'t':int(row[0]),'o':float(row[1]),'h':float(row[2]),'l':float(row[3]),'c':float(row[4]),
-                                   'v':_vol(row[5]),'vu':_vol(row[7]),'confirmed':int(row[6])<time.time()*1000})
+                    parsed=await _exchange_page(client,market,bar,
+                        exchange_history_limit(previous,bar,request_started,min(limit,1000)))
             else:
                 data = await okx_get('/api/v6/dex/market/candles', {
                     'chainIndex': chain, 'tokenContractAddress': address, 'bar': bar,
@@ -308,6 +412,22 @@ async def candle_series(chain: str, address: str, bar: str, limit: int, venue: s
                     await _put_exchange_history(s,storage_address,bar,parsed,key,request_started)
                 else:
                     await s.put_candles(storage_address, bar, parsed)
+            if exchange:
+                gap=exchange_gap_window(previous,parsed,bar)
+                if gap:
+                    period=BAR_MS[bar]
+                    end=min(gap['to'],gap['from']+999*period)
+                    try:
+                        async with httpx.AsyncClient(timeout=15) as client:
+                            historical=await _exchange_page(client,market,bar,
+                                (end-gap['from'])//period+1,start=gap['from'],end=end+period-1)
+                        await _put_exchange_history(s,storage_address,bar,historical,key,request_started,historical=True)
+                        gap={**gap,'from':end+period,'lastAttemptAt':request_started,'error':None}
+                        if gap['from']>gap['to']:
+                            gap=None
+                    except Exception:
+                        gap={**gap,'lastAttemptAt':request_started,'error':'upstream-unavailable'}
+                source['historyGap']=gap
         except Exception as e:
             stale = True
             error = 'quota-exhausted' if isinstance(e,QuotaExceeded) else 'upstream-unavailable'
@@ -324,15 +444,20 @@ async def candle_series(chain: str, address: str, bar: str, limit: int, venue: s
         attempted = int(time.time()*1000)
         latest=await s.get('candle-meta',key)
         if isinstance(latest,dict) and latest.get('lastSourceEventAt',0)>request_started:
-            source={**source,**latest}
+            # Merge under the writer guard below so a newer tick cannot
+            # replace this request's verified historical gap progress.
             stale=bool(latest.get('stale'))
         elif not stale:
             source['lastSuccessfulAt'] = attempted
         source.update(lastAttemptAt=attempted,stale=stale,error=error if stale else None,
-                      nextRefreshAt=attempted+(60000 if exchange else 300000))
+                      nextRefreshAt=attempted+(EXCHANGE_REFRESH_MS if exchange else 300000))
         source=await _put_history_meta(s,key,source,request_started)
         stale=bool(source.get('stale'))
         rows = await s.candle_range(source.get('storage',storage_address), bar, min(limit,1000))
+        if exchange:
+            freshness=exchange_freshness(source,rows,bar,attempted)
+            stale=freshness['stale']
+            source.update(freshness)
         _meta[key] = {**source,'error':error if stale else None}
         _mem[key] = (time.time(), rows, stale)
         if len(_mem) > 600:
@@ -386,6 +511,9 @@ async def get_candles(chain: str, address: str, bar: str = Query(default='5m'), 
         age=now-int(meta.get('lastSuccessfulAt') or 0)
         stale=bool(meta.get('stale')) or age>(60000 if exchange or pool else 360000)
         pool_state={}
+        if exchange:
+            pool_state=exchange_freshness(meta,rows,bar,now)
+            stale=pool_state['stale']
         if pool:
             health,cursor=await asyncio.gather(s.get('chain-stream','pools'),s.get('chain-stream-cursor','pools'))
             pool_state=pool_freshness(health,cursor,meta,now)

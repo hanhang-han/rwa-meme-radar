@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-// The pinned xStocks API deployment list is shared with the Python read model.
+// Pinned issuer API deployment lists are shared with the Python read model.
 // A token symbol, provider issuer string, or wrapper asset() result cannot add
 // an address to this index. Only chain+contract identity can.
 type Deployment = { native?:string; wrapperCurrent?:string; wrapperLegacy?:string };
@@ -33,13 +33,37 @@ for(const asset of manifest.assets)for(const [chainId,addresses] of Object.entri
       nameEn:asset.nameEn,tokenSymbol:asset.tokenSymbol,underlyingIsin:asset.underlyingIsin});
   }
 }
-export const stockTokenManifest={version:manifest.version,sourceAt:manifest.capturedAt,sourceUrl:manifest.sourceUrl,entries:deployments.size};
+const robinhood:Manifest & {issuer:string}=JSON.parse(readFileSync(new URL('../catalogues/robinhood-stock-tokens.v1.json',import.meta.url),'utf8'));
+if(robinhood.provenance!=='official-api-pinned-snapshot'||!robinhood.version||!robinhood.capturedAt
+  ||robinhood.sourceUrl!=='https://api.robinhood.com/rhj/assets'||robinhood.issuer!=='Robinhood Assets (Jersey) Limited'
+  ||!Array.isArray(robinhood.assets)||!robinhood.assets.length)throw new Error('Robinhood identity manifest provenance missing');
+const robinhoodAssets=new Set<string>();
+for(const asset of robinhood.assets){
+  if(!/^0x[\da-f]{64}$/i.test(asset.assetId)||robinhoodAssets.has(asset.assetId)
+    ||!/^[A-Z0-9.\-]{1,24}$/.test(asset.ticker)||asset.ticker!==asset.tokenSymbol||!asset.nameEn
+    ||!/^[A-Z]{2}[A-Z0-9]{9}\d$/.test(asset.underlyingIsin??'')
+    ||Object.keys(asset.deployments).join(',')!=='4663')throw new Error('Invalid Robinhood issuer asset');
+  robinhoodAssets.add(asset.assetId);
+  const addresses=asset.deployments['4663'],address=addresses.native;
+  if(!address||!ADDRESS.test(address)||/^0x0{40}$/i.test(address)
+    ||Object.keys(addresses).join(',')!=='native')throw new Error('Invalid Robinhood issuer deployment');
+  const key=`4663:${address.toLowerCase()}`;
+  if(deployments.has(key))throw new Error('Conflicting official deployment addresses');
+  deployments.set(key,{chainId:'4663',address:address.toLowerCase(),underlyingId:`robinhood:${asset.assetId}`,
+    ticker:asset.ticker,tokenSymbol:asset.tokenSymbol,nameEn:asset.nameEn,underlyingIsin:asset.underlyingIsin,
+    issuer:robinhood.issuer,tokenKind:'native',version:'v1',verificationStatus:'official',
+    eligibleForPair:(asset as Asset & {assetStatus:string}).assetStatus==='ASSET_STATUS_ACTIVE',
+    sourceUrl:robinhood.sourceUrl,sourceAt:robinhood.capturedAt,manifestVersion:robinhood.version});
+}
+export const stockTokenManifest={version:manifest.version+'+'+robinhood.version,sourceAt:manifest.capturedAt,
+  sourceUrl:manifest.sourceUrl,entries:deployments.size,
+  issuers:[manifest,robinhood].map(source=>({version:source.version,sourceAt:source.capturedAt,sourceUrl:source.sourceUrl}))};
 export function officialStockIdentity(chainId:string|number|undefined,address:string|undefined,reportedTicker?:string):StockTokenIdentity{
   const chain=String(chainId??''),canonical=ADDRESS.test(address??'')?address!.toLowerCase():null;
   const known=canonical?deployments.get(`${chain}:${canonical}`):undefined;
   if(known)return {...known};
   return {chainId:chain,address:canonical,underlyingId:null,ticker:null,issuer:null,tokenKind:null,version:null,
-    verificationStatus:'unverified',eligibleForPair:false,sourceUrl:null,sourceAt:null,manifestVersion:manifest.version,
+    verificationStatus:'unverified',eligibleForPair:false,sourceUrl:null,sourceAt:null,manifestVersion:stockTokenManifest.version,
     ...(reportedTicker?{reportedTicker:reportedTicker.trim().toUpperCase()}:{}),
   };
 }
@@ -62,11 +86,9 @@ export function canonicalStockCode(row:{chainId?:string|number;chainIndex?:strin
 
 // These mappings identify the underlying named by the provider, not the issuer's
 // authorisation of a particular on-chain contract. Do not infer a market from digits alone.
-const hk:Record<string,{symbol:string;zh:string;en:string;source:string}>={
-  '1':{symbol:'CKHUTX',zh:'长江和记实业',en:'CK Hutchison Holdings',source:'https://www1.hkexnews.hk/listedco/listconews/sehk/2025/0828/2025082800501.pdf'},
-  '1024':{symbol:'KUAIX',zh:'快手',en:'Kuaishou Technology',source:'https://ir.kuaishou.com/node/6441/pdf'},
-  '1038':{symbol:'CKINFX',zh:'长江基建集团',en:'CK Infrastructure Holdings',source:'https://www1.hkexnews.hk/listedco/listconews/sehk/2022/0408/2022040800581.pdf'},
-};
+const hkCatalogue=JSON.parse(readFileSync(new URL('../catalogues/hk-underlyings.v1.json',import.meta.url),'utf8'));
+if(hkCatalogue.version!=='hk-underlyings-v1')throw new Error('Unknown HK security mapping version');
+const hk:Record<string,{symbol:string;zh:string;en:string;source:string}>=hkCatalogue.securities;
 // Explicit underlying mappings, never infer a US listing from arbitrary letters.
 // The mapping identifies the security, not authorisation of a token contract.
 export const US_SECURITIES:Record<string,string>={

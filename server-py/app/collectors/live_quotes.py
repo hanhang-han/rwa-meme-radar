@@ -19,8 +19,8 @@ from ..stream_hub import broadcast
 from .assets import now_ms, save_asset
 from .queue import checkpoint, combine, due, jobs, result
 
-CHAINS = ('196', '56', '4663')
-CORE_COUNTS = {'196': 100, '56': 30, '4663': 20}
+CHAINS = ('196', '56', '4663', '5042')
+CORE_COUNTS = {'196': 100, '56': 30, '4663': 20, '5042': 10}
 _watched: dict[tuple[str, str], float] = {}
 
 
@@ -56,6 +56,44 @@ def _is_busy(error):
     code = getattr(error, 'sqlite_errorcode', None)
     return code == sqlite3.SQLITE_BUSY or (
         code is None and 'database is locked' in str(error).lower())
+
+
+def quote_packet(chain, token, asset):
+    """Carry the committed field's unit and clocks, not a guessed provider."""
+    source = (asset.get('fieldObservations') or {}).get('price') or {}
+    provenance = asset.get('priceProvenance') or {}
+    # A newer provider observation can replace the value while old optional
+    # top-level metadata remains. Do not attach that previous pool/venue to it.
+    if any(source.get(key) and provenance.get(key) and source[key] != provenance[key]
+           for key in ('provider', 'venue', 'scope', 'quoteToken')):
+        provenance = {}
+    at = (asset.get('fieldTimes') or {}).get('price')
+    packet = {
+        'chainId': chain, 'token': token, 'price': asset.get('price'),
+        'change24h': asset.get('change24h'), 'at': at, 'quoteAt': at,
+        'marketAt': source.get('marketAt'),
+        'receivedAt': source.get('receivedAt') or now_ms(),
+        'timeKind': source.get('timeKind') or (asset.get('fieldTimeKinds') or {}).get('price'),
+        'venue': source.get('venue') or provenance.get('venue') or asset.get('venue'),
+        'quoteType': source.get('quoteType') or provenance.get('quoteType')
+                     or ('dex' if source.get('venue') == 'dex' and source.get('scope') == 'token'
+                         else asset.get('quoteType')),
+        'provider': source.get('provider') or (asset.get('fieldSources') or {}).get('price'),
+        'priceCurrency': source.get('currency') or asset.get('priceCurrency'),
+        'priceScope': source.get('scope') or (asset.get('fieldScopes') or {}).get('price') or asset.get('priceScope'),
+    }
+    for field in ('fieldTimes', 'fieldSources', 'fieldScopes', 'fieldTimeKinds', 'fieldObservations'):
+        packet[field] = {key: value for key, value in (asset.get(field) or {}).items()
+                         if key in ('price', 'change24h')}
+    if provenance:
+        packet['priceProvenance'] = provenance
+    for field in ('marketId', 'poolId', 'pool', 'quoteToken'):
+        value = source.get(field) or provenance.get(field)
+        if value is not None:
+            packet[field] = value
+    # Missing evidence remains missing. In particular, never infer USD merely
+    # because this scheduler originally fetched a response from OKX.
+    return {key: value for key, value in packet.items() if value is not None}
 
 
 async def _checkpoint_failure(s, token, reason, totals, *, count_failure=True):
@@ -136,13 +174,7 @@ async def _fetch_entries(entries, lane, priority='background'):
             if not changed:
                 continue
             totals['updated'] += 1
-            source = (updated.get('fieldObservations') or {}).get('price') or {}
-            broadcast('price', {
-                'chainId': c, 'token': t, 'price': updated.get('price'),
-                'change24h': updated.get('change24h'), 'at': (updated.get('fieldTimes') or {}).get('price'),
-                'receivedAt': source.get('receivedAt') or now_ms(), 'timeKind': source.get('timeKind', 'received'),
-                'venue': 'dex', 'quoteType': 'dex', 'provider': 'OKX',
-            })
+            broadcast('price', quote_packet(c, t, updated))
         for c, t in expected - answered:
             totals['unsupported'] += 1
             await _checkpoint_failure(stores[c], t, 'missing-price-row', totals)
@@ -264,11 +296,12 @@ def stock_batches_scheduled_through(at_ms):
 def stock_lane_used(at_ms):
     """Read the shared lane ledger; never charge it to inspect catch-up debt."""
     path = Path(os.environ.get('OKX_LEDGER_PATH', 'data/okx-budget.sqlite'))
-    if not path.is_file():
+    from ..storage_runtime import is_postgres_path, sync_connect
+    if not is_postgres_path(path) and not path.is_file():
         return None
     day = datetime.fromtimestamp(at_ms / 1000, timezone.utc).strftime('%Y-%m-%d')
     try:
-        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.25)) as db:
+        with closing(sync_connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.25)) as db:
             row = db.execute('SELECT used FROM lane_budget WHERE day=? AND lane=?',
                              (day, 'base-stocks')).fetchone()
         return max(0, int(row[0])) if row else 0

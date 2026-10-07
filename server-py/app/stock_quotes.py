@@ -9,9 +9,11 @@ import json
 import os
 import time
 from .comparisons import stock_premium
+from .equity_identity import US_UNDERLYINGS, equity_identity, clock_session
 
 EODHD_FILE = "data/market-enrichment.json"
 ROBINHOOD_FILE = "data/robinhood.json"
+EQUITY_FILE = "data/equity-market.json"
 
 _cache: dict[str, tuple[float, dict]] = {}
 CACHE_TTL = 10.0
@@ -95,9 +97,6 @@ def robinhood_status() -> dict:
 def _norm_code(code: str) -> str:
     code = code.upper().strip()
     return code.lstrip("0") if code.isdigit() else code
-
-
-US_UNDERLYINGS = frozenset("AAPL TSLA NVDA GOOG GOOGL AMZN META MSFT AMD INTC COIN PLTR SOFI HIMS GME AMC DJT MSTR RIVN LCID OPEN AI NKE DIS NFLX BA GM SBUX MCD NIO XPEV LI BABA JD PDD BIDU NTES TME IQ HOOD QQQ SLV SPY GLD TSM NOK MRNA SNDK CRCL SOXL SOXS TQQQ SQQQ BMNR".split())
 
 
 def valid_reference(q: dict, identity: dict | None = None) -> bool:
@@ -208,6 +207,7 @@ def apply_stock_overlays(stock_tokens: list[dict], market_quotes: list[dict] | N
             live_binance[addr] = {**previous, **quote}
     live_robinhood = robinhood_live()
     quotes_eod = eodhd_quotes()
+    quotes_public = _read_snapshot(EQUITY_FILE).get('quotes') or {}
     out: list[dict] = []
     now = _now()
     reference_source = eodhd_status()
@@ -289,7 +289,8 @@ def apply_stock_overlays(stock_tokens: list[dict], market_quotes: list[dict] | N
                 field_times["price"] = r.get("quoteAt")
                 row["priceProvenance"] = {"timeKind": "market", "dependenciesComplete": False, "dependencies": ["issuer-reference"]}
 
-        identity = dict(row.get("stockIdentity") or {})
+        identity = equity_identity(row)
+        row['stockIdentity'] = identity
         code = _norm_code(str(row.get("stockCode") or identity.get("code") or ""))
         if code in US_UNDERLYINGS:
             identity = {**identity, "id": identity.get("id") or code, "code": code, "market": "US", "currency": "USD", "status": "identified", "source": "curated-underlying-market-v1"}
@@ -299,6 +300,15 @@ def apply_stock_overlays(stock_tokens: list[dict], market_quotes: list[dict] | N
             q = quotes_eod.get(code.zfill(4) + ".HK")
         if q and valid_reference(q, identity):
             references["equity"] = {**q, "provider": "EODHD", "scope": "equity-exchange", "realtime": False, "delayMs": 1_200_000}
+        public = quotes_public.get(identity.get('id'))
+        public = public if isinstance(public, dict) else {}
+        public_price, public_at = _f(public.get('price')), _f(public.get('marketAt'))
+        if (public and public.get('id') == identity.get('id') and valid_reference(public, identity)
+                and public.get('identityVerified') is True and public.get('provider') == 'Tencent Finance'
+                and public_at is not None and 0 < public_at <= now+60_000
+                and public_price is not None and public_price > 0):
+            references['equity-public'] = {**public, 'price': public_price, 'marketAt': public_at,
+                                           'realtime': False, 'scope': 'equity-exchange'}
         row["referenceObservations"] = references
         row["independentReferenceStatus"] = reference_source.get("status")
         row["independentReferenceReason"] = reference_source.get("error")
@@ -309,6 +319,8 @@ def apply_stock_overlays(stock_tokens: list[dict], market_quotes: list[dict] | N
                        referenceObservedAt=selected.get("observedAt"), referenceProvider=selected.get("provider"),
                        referenceSymbol=selected.get("symbol"), referenceCurrency=selected.get("currency"),
                        referenceVolume=selected.get("volume"), referenceChange24h=selected.get("change24h"),
+                       referenceTurnover=selected.get('turnover'), referenceVolumeUnit=selected.get('volumeUnit'),
+                       referenceSourceUrl=selected.get('sourceUrl'), referenceDelayStatus=selected.get('delayStatus'),
                        referenceDelayMs=selected.get("delayMs"), referenceRealtime=selected.get("realtime") is True,
                        referenceScope=selected.get("scope"), referenceIdentityVerified=selected.get("identityVerified") is True,
                        referenceAdjustmentVersion=selected.get("adjustmentVersion"),
@@ -316,8 +328,8 @@ def apply_stock_overlays(stock_tokens: list[dict], market_quotes: list[dict] | N
             field_times["stockPrice"] = selected.get("marketAt")
             sources["stockPrice"] = selected.get("provider")
             age = now - (selected.get("marketAt") or 0)
-            row["referenceStatus"] = "stale" if age > (selected.get("delayMs") or 0)+900_000 else "delayed" if selected.get("delayMs") else "issuer-reference"
-            row["referenceReason"] = "delayed-provider-endpoint" if selected.get("delayMs") else "issuer-reference-not-independent-exchange"
+            row["referenceStatus"] = "stale" if age > (selected.get("delayMs") or 0)+900_000 else "delayed" if selected.get("delayMs") else "public-reference" if selected.get('provider') == 'Tencent Finance' else "issuer-reference"
+            row["referenceReason"] = "public-reference-delay-unconfirmed" if selected.get('provider') == 'Tencent Finance' else "delayed-provider-endpoint" if selected.get("delayMs") else "issuer-reference-not-independent-exchange"
         else:
             # Old catalogue stockPrice is not an independently timestamped
             # security reference; do not silently keep a quarantined value.
@@ -325,11 +337,19 @@ def apply_stock_overlays(stock_tokens: list[dict], market_quotes: list[dict] | N
                        referenceRealtime=False, referenceSymbol=None, referenceScope=None, referenceIdentityVerified=False,
                        referenceAdjustmentVersion=None, referenceDelayMs=None, referenceObservedAt=None, referenceVolume=None,
                        referenceChange24h=None, marketSession="unknown", referenceStatus="missing", referenceReason="identity-unverified" if not identity.get("market") else "reference-not-observed")
+            row.update(referenceTurnover=None, referenceVolumeUnit=None, referenceSourceUrl=None, referenceDelayStatus=None)
             if identity.get("market") and reference_source.get("status") in ("quota-exhausted", "entitlement-required"):
                 row["referenceStatus"] = reference_source["status"]
                 row["referenceReason"] = reference_source["status"]
             field_times["stockPrice"] = None
             sources["stockPrice"] = None
+        session = clock_session(identity, now)
+        if session:
+            row.update(marketSession='closed', marketSessionAt=session['asOf'],
+                       marketSessionSource=session['source'], marketSessionReason=session['reason'])
+        elif references and row.get('marketSession') not in (None, 'unknown'):
+            row['marketSessionAt'] = row.get('referenceObservedAt') or row.get('referenceAt')
+            row['marketSessionSource'] = row.get('referenceProvider')
         row["quoteAt"] = row.get("quoteAt") or field_times.get("price")
         quote_at = row.get("quoteAt")
         row["quoteStatus"] = "missing" if row.get("price") is None else "unknown" if not quote_at else "realtime" if row.get("priceScope") == "exchange" and 0 <= now-quote_at <= 30_000 else "scheduled" if 0 <= now-quote_at <= 3_600_000 else "stale"

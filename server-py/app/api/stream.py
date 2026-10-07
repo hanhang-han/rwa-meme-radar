@@ -1,6 +1,7 @@
 """Cursor-consistent SSE with bounded replay and one shared process tailer."""
 import asyncio
 import json
+import re
 import time
 import zlib
 from functools import lru_cache
@@ -8,9 +9,14 @@ from functools import lru_cache
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 
-from ..stream_hub import clients, cursor, hello, replay_batch, replay_page, _frame
+from ..stream_hub import (clients, cursor, hello, replay_batch, replay_page, _frame,
+                          async_cursor, async_replay_page, async_replay_batch, _journal_path)
+from ..storage_runtime import is_postgres_path
 
 router = APIRouter()
+MAX_VISIBLE_QUOTES = 80
+HEARTBEAT_SECONDS = 25
+_QUOTE_IDENTITY = re.compile(r'([1-9][0-9]{0,19}):(0x[0-9a-fA-F]{40})\Z')
 
 
 @lru_cache(maxsize=2)
@@ -49,6 +55,13 @@ def scoped_projection_frame(frame, scope=None, identity=None):
                 invalidations = [r for r in invalidations if r.get('kind') in ('feed', 'briefing')]
             encoded[scope] = _frame('projection.delta', {**packet, 'invalidations': invalidations}, seq)
         return encoded[scope]
+    if scope == 'memes':
+        if scope not in encoded:
+            # A paged result cannot accept global row patches or orders. One
+            # bounded notification reconciles its query, ranks and full stats.
+            encoded[scope] = _frame('directory.invalidate', {'scope': 'memes',
+                'revision': data.get('revision'), 'cursor': seq, 'now': data.get('now')}, seq)
+        return encoded[scope]
     # Asset subscribers receive complete replacements for their own rows. The
     # detail summary has its own HTTP lifecycle, so it needs no global catalogue
     # or partial-row base to keep its canonical headline price current.
@@ -80,14 +93,31 @@ def scoped_projection_frame(frame, scope=None, identity=None):
                   'invalidations': invalidations}, seq)
 
 
-def scope_frame(frame, protocol=0, scope=None, identity=None):
+def scope_frame(frame, protocol=0, scope=None, identity=None, quote_keys=None):
     lines = frame.split(b'\n', 3)
     event_line = lines[1] if lines[0].startswith(b'id:') else lines[0]
     event = event_line.partition(b':')[2].strip().decode()
+    if protocol == 2 and scope == 'quotes':
+        # Visible quote subscriptions never need the global projection, trade
+        # tape or candle catalogue. Filter event names before decoding bodies.
+        if event in ('hello', 'heartbeat', 'reset', 'checkpoint'):
+            return frame
+        if event not in ('price', 'stock-quote'):
+            return None
+        try:
+            data = json.loads(next(line[5:].strip() for line in lines if line.startswith(b'data:')))
+            if not isinstance(data, dict):
+                return None
+            key = (str(data.get('chainId') or ''), str(data.get('token') or '').lower())
+            return frame if key in (quote_keys or set()) else None
+        except (ValueError, StopIteration, TypeError):
+            return None
     if event == 'projection.delta':
         return scoped_projection_frame(frame, scope if protocol == 2 else None, identity)
     if protocol != 2:
         return frame
+    if scope == 'memes':
+        return frame if event in ('hello', 'heartbeat', 'reset') else None
     if event in ('price', 'stock-quote'):
         return None
     if event == 'comparison':
@@ -144,6 +174,7 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
                      protocol: int = 0, candles: str | None = None,
                      trades: str | None = None,
                      scope: str | None = None,
+                     tokens: str | None = None,
                      accept_encoding: str | None = Header(default=None, alias='Accept-Encoding')):
     q: asyncio.Queue = asyncio.Queue(maxsize=1024)
     # Browser reconnect headers take precedence over the original URL cursor.
@@ -152,11 +183,14 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
     except (TypeError, ValueError):
         last_id = None
     candle_keys = set(candles.split(',')) if isinstance(candles, str) and candles != 'all' else None
-    trade_scope = parse_trade_scope(trades)
+    quote_keys = parse_quote_tokens(tokens) if protocol == 2 and scope == 'quotes' else None
+    trade_scope = None if protocol == 2 and scope in ('memes', 'quotes') else parse_trade_scope(trades)
+    if protocol == 2 and scope in ('memes', 'quotes'):
+        candle_keys = set()
     if protocol == 2:
         scope = scope or 'overview'
-        if scope not in ('overview', 'market', 'asset'):
-            raise HTTPException(status_code=422, detail='scope must be overview, market or asset')
+        if scope not in ('overview', 'market', 'asset', 'memes', 'quotes'):
+            raise HTTPException(status_code=422, detail='scope must be overview, market, asset, memes or quotes')
         if scope == 'asset' and (trade_scope is None or trade_scope == ('feed', '')):
             raise HTTPException(status_code=422, detail='asset scope requires trades=chainId:token')
     feed_tokens = set()
@@ -170,6 +204,11 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
                        for row in feed.get('trackedAssets', feed.get('assets', []))}
 
     def visible(frame):
+        if protocol == 2 and scope == 'quotes':
+            return scope_frame(frame, protocol, scope, quote_keys=quote_keys)
+        if protocol == 2 and scope == 'memes':
+            # Do not even parse every candle/trade payload for this directory.
+            return scope_frame(frame, protocol, scope)
         if trade_scope == ('feed', '') and b'event: projection.delta\n' in frame:
             # The full delta still reaches clients and advances their version.
             # Update membership in memory; no database query per trade/client.
@@ -196,12 +235,18 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
         subscribers = clients()
         subscribers.add(q)
         try:
-            hello(q)
-            upper = cursor()
+            postgres = is_postgres_path(_journal_path())
+            if postgres:
+                upper = await async_cursor()
+                hello(q, upper)
+            else:
+                hello(q)
+                upper = cursor()
             seen = upper if last_id is None else last_id
             if last_id is not None:
                 while True:
-                    page, seen, done = replay_page(seen, upper)
+                    page, seen, done = (await async_replay_page(seen, upper) if postgres
+                                        else replay_page(seen, upper))
                     skipped = False
                     for frame in page:
                         selected = visible(frame)
@@ -211,20 +256,28 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
                                 return
                         else:
                             skipped = True
-                    if skipped:
+                    if skipped and scope != 'memes':
                         yield _frame('checkpoint', {'cursor': seen}, seen)
                     if done:
                         break
                     await asyncio.sleep(0)
             if snapshot and protocol not in (1, 2):
-                latest, _ = replay_batch(None, include_latest=True)
+                latest, _ = (await async_replay_batch(None, include_latest=True) if postgres
+                              else replay_batch(None, include_latest=True))
                 for frame in latest:
                     yield frame
             last_checkpoint = time.monotonic()
             pending_checkpoint = False
+            heartbeat_at = time.monotonic() + HEARTBEAT_SECONDS
             while True:
                 try:
-                    queued = await asyncio.wait_for(q.get(), timeout=25)
+                    # Foreign/duplicate traffic can fill this queue forever.
+                    # Heartbeat cadence follows frames actually sent to this
+                    # subscriber, rather than the most recent queue receipt.
+                    remaining = heartbeat_at - time.monotonic()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    queued = await asyncio.wait_for(q.get(), timeout=remaining)
                     if queued is None:
                         break
                     seq, frame = queued
@@ -235,11 +288,13 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
                     selected = visible(frame)
                     if selected is None:
                         pending_checkpoint = True
-                        if time.monotonic() - last_checkpoint >= 5:
+                        if time.monotonic() - last_checkpoint >= 5 and scope != 'memes':
+                            last_checkpoint = time.monotonic()
+                            heartbeat_at = last_checkpoint + HEARTBEAT_SECONDS
                             yield _frame('checkpoint', {'cursor': seen}, seen)
                             pending_checkpoint = False
-                            last_checkpoint = time.monotonic()
                         continue
+                    heartbeat_at = time.monotonic() + HEARTBEAT_SECONDS
                     yield selected
                     if b'event: reset\n' in selected:
                         return
@@ -249,10 +304,12 @@ async def get_stream(last_event_id: str | None = Header(default=None, alias='Las
                 except asyncio.TimeoutError:
                     # No database work per connected browser. Checkpoints also
                     # advance through intentionally filtered quote/candle ids.
-                    if pending_checkpoint:
+                    if pending_checkpoint and scope != 'memes':
+                        last_checkpoint = time.monotonic()
+                        heartbeat_at = last_checkpoint + HEARTBEAT_SECONDS
                         yield _frame('checkpoint', {'cursor': seen}, seen)
                         pending_checkpoint = False
-                        last_checkpoint = time.monotonic()
+                    heartbeat_at = time.monotonic() + HEARTBEAT_SECONDS
                     yield _frame('heartbeat', {'at': int(time.time()*1000)})
         finally:
             subscribers.discard(q)
@@ -276,6 +333,23 @@ def parse_trade_scope(value):
     if not separator or not chain.isdecimal() or not token or len(token) > 200:
         raise HTTPException(status_code=422, detail='trades must be chainId:token, feed or all')
     return chain, token.lower()
+
+
+def parse_quote_tokens(value):
+    """A bounded exact asset set, with no chain/symbol fallbacks or wildcards."""
+    detail = f'tokens must contain 1 to {MAX_VISIBLE_QUOTES} chainId:0x-address entries'
+    if not isinstance(value, str) or not value or len(value) > MAX_VISIBLE_QUOTES * 64:
+        raise HTTPException(status_code=422, detail=detail)
+    entries = value.split(',')
+    if len(entries) > MAX_VISIBLE_QUOTES:
+        raise HTTPException(status_code=422, detail=detail)
+    identities = set()
+    for entry in entries:
+        match = _QUOTE_IDENTITY.fullmatch(entry)
+        if not match:
+            raise HTTPException(status_code=422, detail=detail)
+        identities.add((match[1], match[2].lower()))
+    return identities
 
 
 def frame_visible(frame, protocol=0, candle_keys=None, trade_scope=None, feed_tokens=None):

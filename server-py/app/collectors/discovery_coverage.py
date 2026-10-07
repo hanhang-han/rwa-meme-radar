@@ -7,6 +7,8 @@ contributes to an unqualified coverage percentage.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -14,8 +16,8 @@ from collections.abc import Awaitable, Callable
 import httpx
 
 from ..db import store
-from ..stock_identity import _manifest
-from .pool_gap_repair import KIND as GAP_KIND, queue_indexed_gap
+from ..stock_identity import _manifest, chain_manifest_version
+from .pool_gap_repair import KIND as GAP_KIND, candidate_id, queue_indexed_gap
 
 
 ADDRESS = re.compile(r"0x[0-9a-f]{40}\Z", re.I)
@@ -27,6 +29,7 @@ REQUEST_SPACING_SECONDS = 0.6  # <=100/min, leaving headroom for quote enrichmen
 SUSPECTED_RESULT_CAP = 30
 REPORT_KIND = "discovery-coverage"
 MAX_QUEUED_CANDIDATES = 4_000
+NETWORKS = {"196": "xlayer", "56": "bsc", "4663": "robinhood", "5042": "arc"}
 CANDIDATE_TTL_MS = 90 * 86_400_000
 
 
@@ -42,7 +45,7 @@ def official_contracts(chain: str = CHAIN) -> list[str]:
                    if cid == chain and identity["eligibleForPair"]})
 
 
-def normalize_pairs(rows, token: str) -> tuple[dict[str, dict], int, bool]:
+def normalize_pairs(rows, token: str, network: str = NETWORK) -> tuple[dict[str, dict], int, bool]:
     """Reject malformed/cross-chain results instead of inflating a score."""
     if not isinstance(rows, list):
         raise ValueError("invalid-provider-response")
@@ -60,7 +63,7 @@ def normalize_pairs(rows, token: str) -> tuple[dict[str, dict], int, bool]:
         pool = _address(row.get("pairAddress"))
         base = _address(base_token.get("address"))
         quote = _address(quote_token.get("address"))
-        if (row.get("chainId") != NETWORK or not pool or not base or not quote
+        if (row.get("chainId") != network or not pool or not base or not quote
                 or base == quote or token not in (base, quote)):
             malformed += 1
             continue
@@ -91,30 +94,35 @@ def compare_pairs(indexed: dict[str, dict], local_pools: list[dict]) -> dict:
             "missing": len(missing), "samples": missing[:12]}
 
 
-async def _fetch(client: httpx.AsyncClient, token: str):
-    response = await client.get(URL + token)
+async def _fetch(client: httpx.AsyncClient, token: str, chain: str = CHAIN):
+    if chain == '196':
+        from .pool_market import GECKO_NETWORKS, gecko_pairs
+        response = await client.get('https://api.geckoterminal.com/api/v2/networks/'
+            + GECKO_NETWORKS[chain] + '/tokens/' + token + '/pools', params={'page': 1})
+        if response.status_code == 404:
+            return []  # Supported network, token absent from this public index.
+        response.raise_for_status()
+        return gecko_pairs(chain, response.json())
+    response = await client.get("https://api.dexscreener.com/token-pairs/v1/" + NETWORKS[chain] + "/" + token)
     response.raise_for_status()
     return response.json()
 
 
 async def reconcile_bnb(*, fetch: Callable[[str], Awaitable[object]] | None = None,
                         contracts: list[str] | None = None, request_spacing: float = REQUEST_SPACING_SECONDS,
-                        now_ms: Callable[[], int] | None = None) -> dict:
-    """Check every pinned BNB contract; retain an honest partial report on error.
-
-    The comparison does not add third-party pools to the product. Chain-side
-    token and factory verification is required before any missing pool enters
-    the asset catalogue or a relation ranking.
-    """
+                        now_ms: Callable[[], int] | None = None, chain: str = CHAIN,
+                        max_contracts: int = 32) -> dict:
+    """A bounded page of a durable scan; restart/cancellation repeats at most one token."""
     clock = now_ms or (lambda: int(time.time() * 1000))
-    system = await store("system")
-    subjects = contracts if contracts is not None else official_contracts()
-    subjects = sorted(set(subjects))
+    if chain not in NETWORKS or not 1 <= max_contracts <= 128:
+        raise ValueError('unsupported-index-chain-or-bound')
+    system = await store('system')
+    subjects = sorted(set(contracts if contracts is not None else official_contracts(chain)))
     if not subjects or any(_address(subject) != subject for subject in subjects):
-        raise ValueError("invalid-official-contracts")
-    local_pools = await (await store(CHAIN)).all("pool")
-    # Queue is durable across restarts, but an index provider may stop listing
-    # an old candidate. Expire only queue metadata, never verified pool facts.
+        raise ValueError('invalid-official-contracts')
+    fingerprint = hashlib.sha256(json.dumps(subjects).encode()).hexdigest()
+    local_store = await store(chain)
+    local_pools = await local_store.all('pool')
     async with system._guard_write():
         await system.db.execute("""DELETE FROM facts WHERE kind=? AND id IN (
             SELECT id FROM facts WHERE kind=?
@@ -122,105 +130,171 @@ async def reconcile_bnb(*, fetch: Callable[[str], Awaitable[object]] | None = No
             (system.key(GAP_KIND), system.key(GAP_KIND), clock() - CANDIDATE_TTL_MS))
         await system.db.commit()
     queued = len(await system.all(GAP_KIND))
-    local_sides = {pool: {_address(row.get("token0")), _address(row.get("token1"))}
-                   for row in local_pools if isinstance(row, dict)
-                   if (pool := _address(row.get("pool")))
-                   and row.get("creationStatus") != "orphaned"
-                   and row.get("verificationStatus") != "reorged"}
-    active_sides = {_address(row.get(side)) for row in local_pools if isinstance(row, dict)
-                    for side in ("token0", "token1")}
-    subjects.sort(key=lambda address: (address not in active_sides, address))
+    scan = await system.get('discovery-scan', chain) or {}
+    if scan.get('fingerprint') != fingerprint or scan.get('manifestVersion') != chain_manifest_version(chain):
+        scan = {}
+    if scan.get('cursor', 0) >= len(subjects):
+        if contracts is None and clock()-scan.get('completedAt', 0) < 86_400_000:
+            return {'requested': 0, 'accepted': 0, 'updated': 0, 'failed': 0, 'skipped': 1}
+        scan = {}
     started = clock()
-    report = {"chainId": CHAIN, "status": "partial", "scope": "dexscreener-indexed-official-stock-pools",
-              "provider": PROVIDER, "sourceUrl": "https://docs.dexscreener.com/api/reference",
-              "manifestVersion": _manifest()[0]["version"], "startedAt": started,
-              "checkedAt": None, "updatedAt": started, "subjectCount": len(subjects),
-              "checkedContracts": 0, "failedContracts": 0, "cappedContracts": 0,
-              "malformedPairs": 0, "eligible": 0, "covered": 0, "missing": 0, "samples": [],
-              "queuedCandidates": 0, "queueOverflow": 0}
-    await system.put(REPORT_KIND, CHAIN, report)
-    indexed: dict[str, dict] = {}
-    failures = []
+    report = scan.get('report') or {
+        'chainId': chain, 'status': 'partial', 'scope': 'dexscreener-indexed-official-stock-pools',
+        'provider': 'GeckoTerminal' if chain == '196' else PROVIDER,
+        'sourceUrl': 'https://apiguide.geckoterminal.com' if chain == '196' else 'https://docs.dexscreener.com/api/reference',
+        'manifestVersion': chain_manifest_version(chain), 'startedAt': started,
+        'checkedAt': None, 'updatedAt': started, 'subjectCount': len(subjects),
+        'checkedContracts': 0, 'failedContracts': 0, 'cappedContracts': 0,
+        'malformedPairs': 0, 'eligible': 0, 'covered': 0, 'missing': 0, 'samples': [],
+        'queuedCandidates': 0, 'queueOverflow': 0, 'failureSamples': []}
+    indexed = scan.get('indexed') or {}
+    cursor = scan.get('cursor', 0)
+    result = {'requested': 0, 'accepted': 0, 'updated': 0, 'failed': 0, 'unsupported': 0}
+    local_sides = {_address(row.get('pool')): {_address(row.get('token0')), _address(row.get('token1'))}
+        for row in local_pools if row.get('creationStatus') != 'orphaned' and row.get('verificationStatus') != 'reorged'}
+
+    async def save():
+        report.update(compare_pairs(indexed, await local_store.all('pool')))
+        report.update(updatedAt=clock(), cursor=cursor, unqueriedContracts=len(subjects)-cursor,
+                      maxContractsPerRound=max_contracts, resumable=True)
+        report['status'] = ('complete' if cursor == len(subjects) and report['eligible'] > 0
+            and not any(report[k] for k in ('failedContracts', 'cappedContracts', 'malformedPairs', 'queueOverflow'))
+            else 'partial')
+        report['coverageRatio'] = report['covered']/report['eligible'] if report['eligible'] and report['status'] == 'complete' else None
+        report['observedMatchRatio'] = report['covered']/report['eligible'] if report['eligible'] else None
+        report['passesCoverage95'] = report['coverageRatio'] is not None and report['coverageRatio'] >= .95
+        if cursor == len(subjects):
+            report['checkedAt'] = clock()
+        # Save the cursor after each completed request, before yielding. Index
+        # candidates are idempotent, so a crash between writes is safe to replay.
+        await system.put('discovery-scan', chain, {'fingerprint': fingerprint,
+            'manifestVersion': report['manifestVersion'], 'cursor': cursor, 'indexed': indexed,
+            'report': report, 'completedAt': clock() if cursor == len(subjects) else None})
+        await system.put(REPORT_KIND, chain, report)
 
     async def collect(get):
-        nonlocal queued
+        nonlocal queued, cursor
         consecutive_failures = 0
-        for token in subjects:
+        end = min(len(subjects), cursor+max_contracts)
+        while cursor < end:
+            token = subjects[cursor]
+            result['requested'] += 1
             try:
-                rows = await get(token)
-                pairs, malformed, capped = normalize_pairs(rows, token)
+                pairs, malformed, capped = normalize_pairs(await get(token), token, NETWORKS[chain])
+                if chain == '196' and len(pairs) >= 20:
+                    capped = True  # First public token-pool page; no completeness claim.
                 indexed.update(pairs)
                 for pool, pair in pairs.items():
-                    ident = ":".join((pool, *sorted((pair["token0"], pair["token1"]))))
+                    pair = {**pair, 'chainId': chain, 'indexProvider': report['provider']}
+                    ident = candidate_id(pair)
                     existing = await system.get(GAP_KIND, ident)
-                    if local_sides.get(pool) == {pair["token0"], pair["token1"]}:
-                        if existing and existing.get("status") == "awaiting-classification":
-                            await system.patch_fact(GAP_KIND, ident, {"lastIndexedAt": clock()})
+                    if local_sides.get(pool) == {pair['token0'], pair['token1']}:
+                        if existing and existing.get('status') == 'awaiting-classification':
+                            await system.patch_fact(GAP_KIND, ident, {'lastIndexedAt': clock()})
                         continue
                     if not existing and queued >= MAX_QUEUED_CANDIDATES:
-                        report["queueOverflow"] += 1
+                        report['queueOverflow'] += 1
                         continue
                     if await queue_indexed_gap(system, pair, seen_at=clock()):
                         queued += 1
-                        report["queuedCandidates"] += 1
-                report["checkedContracts"] += 1
-                report["malformedPairs"] += malformed
-                report["cappedContracts"] += int(capped)
+                        report['queuedCandidates'] += 1
+                report['checkedContracts'] += 1
+                report['malformedPairs'] += malformed
+                report['cappedContracts'] += int(capped)
+                result['accepted'] += 1
+                result['updated'] += len(pairs)
+                result['unsupported'] += malformed + int(capped)
                 consecutive_failures = 0
             except (httpx.HTTPError, ValueError, TypeError) as exc:
-                report["failedContracts"] += 1
+                report['failedContracts'] += 1
+                result['failed'] += 1
                 consecutive_failures += 1
-                if len(failures) < 5:
-                    failures.append({"token": token, "reason": type(exc).__name__})
-            if (report["checkedContracts"] + report["failedContracts"]) % 64 == 0:
-                report.update(compare_pairs(indexed, local_pools))
-                report["updatedAt"] = clock()
-                report["failureSamples"] = failures
-                await system.put(REPORT_KIND, CHAIN, report)
+                if len(report['failureSamples']) < 5:
+                    report['failureSamples'].append({'token': token, 'reason': type(exc).__name__})
+            cursor += 1
+            await save()
             if consecutive_failures >= 8:
-                break  # Provider outage/rate limit: do not waste 2,248 requests.
-            if request_spacing:
+                break
+            if request_spacing and cursor < end:
                 await asyncio.sleep(request_spacing)
 
     if fetch is not None:
         await collect(fetch)
     else:
-        async with httpx.AsyncClient(timeout=10, headers={"Accept": "application/json",
-                                                         "User-Agent": "CliperX pool-coverage/1"}) as client:
-            await collect(lambda token: _fetch(client, token))
-    # The repair worker can register a pool while the daily scan runs. Refresh
-    # the local side set at completion so the published snapshot is not stuck
-    # with the original missing count for another day.
-    local_pools = await (await store(CHAIN)).all("pool")
-    report.update(compare_pairs(indexed, local_pools))
-    report["checkedAt"] = clock()
-    report["updatedAt"] = report["checkedAt"]
-    report["unqueriedContracts"] = len(subjects) - report["checkedContracts"] - report["failedContracts"]
-    report["failureSamples"] = failures
-    report["status"] = ("complete" if report["eligible"] > 0
-                        and not report["failedContracts"] and not report["cappedContracts"]
-                        and not report["malformedPairs"] and not report["queueOverflow"]
-                        and report["checkedContracts"] == len(subjects)
-                        else "partial")
-    await system.put(REPORT_KIND, CHAIN, report)
-    return {"requested": len(subjects), "accepted": report["checkedContracts"],
-            "updated": report["eligible"], "failed": report["failedContracts"],
-            "unsupported": report["cappedContracts"] + report["malformedPairs"]}
+        async with httpx.AsyncClient(timeout=8, headers={'Accept': 'application/json',
+                'User-Agent': 'CliperX pool-coverage/2'}) as client:
+            await collect(lambda token: _fetch(client, token, chain))
+    return result
+
+
+async def reconcile_all_chains():
+    # Advance one chain per turn, including small chains; a long X Layer scan
+    # cannot prevent BNB from being visited. The per-chain cursor is durable.
+    system = await store('system')
+    chains = [chain for chain in NETWORKS if official_contracts(chain)]
+    if not chains:
+        return {'requested': 0, 'accepted': 0, 'skipped': 1}
+    checkpoint = await system.get('collector', 'discovery-chain-cursor') or {}
+    offset = int(checkpoint.get('cursor', 0)) % len(chains)
+    await system.put('collector', 'discovery-chain-cursor', {'cursor': (offset+1) % len(chains)})
+    chain = chains[offset]
+    return await reconcile_bnb(chain=chain, max_contracts=8 if chain == '196' else 32,
+                               request_spacing=2.1 if chain == '196' else REQUEST_SPACING_SECONDS)
+
+
+async def poll_active_stock_pairs():
+    """Minute cadence, bounded and round-robin across verified catalogue sides.
+
+    The scheduled task polls active contracts, not the full historical issuer
+    manifest. Daily full reconciliation owns the completeness claim.
+    """
+    system = await store('system')
+    subjects = []
+    for chain in NETWORKS:
+        approved = set(official_contracts(chain))
+        if not approved:
+            continue
+        s = await store(chain)
+        known = {_address(r.get('stockSide') or r.get('stock')) for r in await s.all('relation') if r.get('status') == 'verified'}
+        catalogue = {_address(r.get('tokenContractAddress')) for r in await s.all('stock') if r.get('active') is not False}
+        subjects.extend((chain, token) for token in sorted(approved & (known | catalogue)))
+    if not subjects:
+        return {'requested': 0, 'accepted': 0, 'skipped': 1}
+    checkpoint = await system.get('collector', 'stock-pair-minute') or {}
+    offset = int(checkpoint.get('cursor', 0)) % len(subjects)
+    selected = (subjects[offset:]+subjects[:offset])[:8]
+    result = {'requested': 0, 'accepted': 0, 'updated': 0, 'failed': 0}
+    async with httpx.AsyncClient(timeout=10) as client:
+        for chain, token in selected:
+            result['requested'] += 1
+            try:
+                pairs, _, capped = normalize_pairs(await _fetch(client, token, chain), token, NETWORKS[chain])
+                result['accepted'] += 1
+                for pair in pairs.values():
+                    result['updated'] += int(await queue_indexed_gap(system, {**pair, 'chainId': chain,
+                        'indexProvider': 'GeckoTerminal' if chain == '196' else PROVIDER}, seen_at=int(time.time()*1000)))
+            except (httpx.HTTPError, ValueError, TypeError):
+                result['failed'] += 1
+            await asyncio.sleep(2.1 if chain == '196' else REQUEST_SPACING_SECONDS)
+    await system.put('collector', 'stock-pair-minute', {**result, 'at': int(time.time()*1000),
+        'cursor': (offset+len(selected)) % len(subjects), 'subjectCount': len(subjects),
+        'scope': 'active-verified-stock-catalogue', 'cadenceMs': 60_000, 'maxContractsPerRound': 8})
+    return result
 
 
 async def discovery_coverage_snapshot(now_ms: int) -> dict:
-    """Small, explicit health contract for all displayed chains."""
-    found = await (await store("system")).get(REPORT_KIND, CHAIN)
-    bnb = dict(found) if isinstance(found, dict) else {
-        "chainId": CHAIN, "status": "unverified", "scope": "dexscreener-indexed-official-stock-pools",
-        "checkedAt": None, "eligible": 0, "covered": 0, "missing": 0,
-    }
-    if bnb.get("checkedAt") and now_ms - bnb["checkedAt"] > 36 * 3600_000:
-        bnb["status"] = "stale"
-    return {"chains": [
-        {"chainId": "196", "status": "unverified", "scope": "external-pool-index-unconfirmed",
-         "checkedAt": None, "eligible": 0, "covered": 0, "missing": 0},
-        bnb,
-        {"chainId": "4663", "status": "unverified", "scope": "official-stock-manifest-unavailable",
-         "checkedAt": None, "eligible": 0, "covered": 0, "missing": 0},
-    ]}
+    system = await store('system')
+    chains = []
+    for chain in NETWORKS:
+        found = await system.get(REPORT_KIND, chain)
+        report = dict(found) if isinstance(found, dict) else {
+            'chainId': chain, 'status': 'unverified', 'scope': 'external-pool-index-unconfirmed',
+            'checkedAt': None, 'eligible': 0, 'covered': 0, 'missing': 0, 'coverageRatio': None}
+        if not official_contracts(chain):
+            report['reason'] = 'official-stock-manifest-unavailable'
+        if report.get('checkedAt') and now_ms-report['checkedAt'] > 36*3600_000:
+            report['status'] = 'stale'
+            report['passesCoverage95'] = False
+        report['factoryTask'] = await system.get('collector', 'factory-discovery:'+chain)
+        chains.append(report)
+    return {'chains': chains, 'minutePoll': await system.get('collector', 'stock-pair-minute')}

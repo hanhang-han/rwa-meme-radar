@@ -16,7 +16,7 @@ MAX_WATCHES = 200
 
 def init():
     access.init()
-    path = str(access._path().resolve())
+    path = access._storage_key()
     with _lock:
         if path in _initialized:
             return

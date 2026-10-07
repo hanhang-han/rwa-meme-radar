@@ -11,6 +11,7 @@ import math
 from fastapi import APIRouter, HTTPException
 
 from ..db import store
+from ..activity_reads import read_activity
 from ..data_quality import evaluate_asset
 from ..state import _assessed_relations, _official_pools, _pool_totals, unquoted_market_status
 from ..scoped_reads import candidate_relations, stock_view, token_pools
@@ -153,6 +154,13 @@ async def _token_section(section, s, snapshot, chain, address, limit, offset):
                  and not isinstance(r['top10Percent'], bool) and math.isfinite(r['top10Percent']) and 0 <= r['top10Percent'] <= 100]
         distribution = max(valid, key=lambda r: r.get('checkedAt') or 0) if valid else {'top10Percent': None}
         distribution.update(exclusionsApplied=False, scope='raw-top10-including-pools')
+        adjusted = persisted.get('holderDistribution') or {}
+        share = adjusted.get('top10AdjustedPercent')
+        if (adjusted.get('excludedKnownAddresses') is True and isinstance(share, (int, float))
+                and not isinstance(share, bool) and math.isfinite(share) and 0 <= share <= 100
+                and adjusted.get('provider') and adjusted.get('checkedAt')):
+            distribution = {**adjusted, 'top10Percent': share, 'exclusionsApplied': True,
+                            'scope': adjusted.get('scope') or 'adjusted-top10-excluding-known-addresses'}
         return {**base, 'asset': {k: asset.get(k) for k in ('token', 'chainId', 'holders', 'fieldTimes', 'fieldSources', 'riskFlags', 'riskStatus', 'riskAssessment')},
                 'holdersSummary': {'count': asset.get('holders'), 'observedAt': (asset.get('fieldTimes') or {}).get('holders'),
                     'provider': (asset.get('fieldSources') or {}).get('holders'),
@@ -165,7 +173,7 @@ async def _token_section(section, s, snapshot, chain, address, limit, offset):
             trade.setdefault('wallet', trade.get('user'))
             trade.setdefault('venue', 'dex')
             trade.setdefault('sourceEventAt', trade.get('t'))
-        activity = await s.activity(address, time.time()*1000-86_400_000)
+        activity = await read_activity(s, address)
         activity.update(scope='dex', status='observed')
         return {**base, 'trades': trades[:limit], 'tradesScope': 'dex', 'activity': activity,
                 'next': offset+limit if len(trades)>limit else None}
@@ -185,7 +193,8 @@ async def _token_section(section, s, snapshot, chain, address, limit, offset):
 @router.get("/token/{chain}/{address}")
 async def get_token(chain: str, address: str, section: str | None = None, limit: int = 50, offset: int = 0):
     address = address.lower()
-    if chain not in ("196", "56", "4663") or not (address.startswith("0x") and len(address) == 42):
+    import re
+    if chain not in ("196", "56", "4663", "5042") or not re.fullmatch(r'0x[0-9a-f]{40}', address):
         raise HTTPException(status_code=400, detail="unsupported token")
     if section is not None and section not in SECTION_NAMES:
         raise HTTPException(status_code=400, detail='unsupported token section')
@@ -272,8 +281,7 @@ async def get_token(chain: str, address: str, section: str | None = None, limit:
     events = [e for e in await s.events(address, 50)][:50]
     pools = await token_pools(s, address)
     scan = await s.get("scan", address)
-    day_ago = time.time() * 1000 - 86_400_000
-    activity = await s.activity(address, day_ago)
+    activity = await read_activity(s, address)
     activity.update(scope='dex',status='observed')
     trade_buckets = {
         "1m": await s.trade_buckets(address, "1m", 120),

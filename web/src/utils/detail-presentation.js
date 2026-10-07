@@ -26,3 +26,31 @@ export function detailTrades(data,selection){
 export function pairRelationMatches(relation,chain,stock,pool){
  return String(relation?.chainId)===String(chain)&&String(relation.pool??'').toLowerCase()===String(pool).toLowerCase()&&String(relation.stock??'').toLowerCase()===String(stock).toLowerCase();
 }
+
+const numeric = value => typeof value === 'number' && Number.isFinite(value);
+const observed = (at, now, ttl) => numeric(at) && at > 0 && now >= at && now-at <= ttl;
+export function observedField(asset, field, now = Date.now()) {
+ const declared = asset?.fieldAvailability?.[field];
+ const ttl = field === 'holders' ? 86_400_000 : 1_800_000;
+ const at = declared?.at ?? (field === 'totalLiquidityUsd' ? asset?.totalLiquidityAt : asset?.fieldTimes?.[field]);
+ const raw = declared ? declared.value : asset?.[field];
+ const value = numeric(raw) && observed(at, now, ttl) && (!declared || declared.status === 'current') ? raw : null;
+ const coverage = declared?.coverage ?? asset?.totalLiquidityCoverage;
+ const aggregateOK = field !== 'totalLiquidityUsd' || asset?.totalLiquidityStatus === 'current' && (value !== 0 || coverage?.complete === true);
+ return {value: aggregateOK ? value : null, at,
+   source:declared?.source ?? asset?.fieldSources?.[field] ?? (field === 'totalLiquidityUsd' ? coverage?.provider : null),
+   status: value != null && aggregateOK ? 'current' : declared?.status ?? (at ? 'stale' : 'unknown')};
+}
+
+export function recordedPool(relation) {
+ return relation?.status === 'verified' && /^0x[0-9a-f]{40}$/i.test(String(relation.pool))
+   && /^0x[0-9a-f]{40}$/i.test(String(relation.stock));
+}
+
+export function tradeClocks(trade, now = Date.now()) {
+ const t = trade?.sourceEventAt ?? trade?.t;
+ const received = trade?.receivedAt;
+ return {ageMs: numeric(t) && t <= now ? now-t : null,
+   receiptDelayMs: numeric(t) && numeric(received) && received >= t ? received-t : null,
+   confirmed: trade?.confirmationStatus === 'confirmed' || trade?.confirmed === true};
+}

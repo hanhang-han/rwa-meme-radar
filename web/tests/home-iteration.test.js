@@ -30,15 +30,17 @@ test('home onchain feed rejects exchange markets, retains unknown USD only witho
   assert.equal(onchainRecordedTrades(trades,[{chainId:'56',token:'0xa'}],'all',0).length,1);
 });
 
-test('activity groups repeated records by asset and type without merging chains or implying creation', () => {
-  const result=groupActivityItems([{chainId:'56',token:'0xA',type:'relation-verified',verifiedAt:10,relation:{pool:'0x1'}},
-    {chainId:'56',token:'0xa',type:'relation-verified',verifiedAt:20,relation:{pool:'0x2'}},
+test('activity merges the same chain, pool, stock and kind while retaining separate identities', () => {
+  const result=groupActivityItems([{chainId:'56',token:'0xA',type:'relation-verified',verifiedAt:10,relation:{pool:'0x1',stock:'0xstock'}},
+    {chainId:'56',token:'0xa',type:'relation-verified',verifiedAt:20,relation:{pool:'0x1',stock:'0xstock'}},
+    {chainId:'56',token:'0xa',type:'relation-verified',verifiedAt:25,relation:{pool:'0x2',stock:'0xstock'}},
+    {chainId:'56',token:'0xa',type:'relation-verified',verifiedAt:25,relation:{pool:'0x1',stock:'0xother'}},
     {chainId:'196',token:'0xa',type:'relation-verified',verifiedAt:30},
     {chainId:'56',token:'0xa',kind:'discovered',at:5}]);
-  assert.equal(result.length,3);
-  const grouped=result.find(row=>row.chainId==='56'&&row.type==='relation-verified');
+  assert.equal(result.length,5);
+  const grouped=result.find(row=>row.chainId==='56'&&row.relation?.pool==='0x1'&&row.relation?.stock==='0xstock');
   assert.equal(grouped.recordCount,2);
-  assert.equal(grouped.relation.pool,'0x2');
+  assert.equal(grouped.verifiedAt,20);
   assert.equal(grouped.occurredAt,undefined);
 });
 
@@ -46,4 +48,9 @@ test('activity groups repeated records by asset and type without merging chains 
 test('repeated delivery of a feed ID does not inflate the activity record count', () => {
   const item={id:'evt-1',chainId:'56',token:'0xa',type:'relation-verified',verifiedAt:10};
   assert.equal(groupActivityItems([item,item])[0].recordCount,1);
+});
+
+test('same feed ID on different chains remains separate',()=>{
+  const result=groupActivityItems([{id:'1',chainId:'56',token:'0xa',kind:'discovered',at:10},{id:'1',chainId:'196',token:'0xa',kind:'discovered',at:10}]);
+  assert.equal(result.length,2);
 });

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 
+from .storage_runtime import async_connect
 from .config import load_env
 
 load_env()
@@ -13,8 +14,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
-from .api import ai_route, candles, comparisons, dashboard, developer, misc, public_v1, stream, token, telegram
+from .api import ai_route, candles, comparisons, dashboard, developer, misc, public_v1, stream, token, telegram, product_v2, product_services
 from . import developer_access
+from .api import live_market
 
 
 @asynccontextmanager
@@ -25,9 +27,18 @@ async def lifespan(_: FastAPI):
     for chain in ('196','56','4663','system','ai'):
         await store(chain)  # schema/indexes before accepting concurrent queries
     await start_hub()
+    await misc.start_feed_reads()
     try:
         yield
     finally:
+        await misc.stop_feed_reads()
+        from .realtime_projection import stop_projection_queries
+        from .activity_reads import stop_activity_reads
+        await stop_projection_queries()
+        await stop_activity_reads()
+        await live_market.stop_market_hubs()
+        from .live_market_store import close_all as close_live_market
+        await close_live_market()
         from .demand_leases import stop_lease_writer
         await stop_lease_writer()
         await stop_hub()
@@ -42,11 +53,16 @@ app.include_router(stream.router, prefix="/api")
 app.include_router(token.router, prefix="/api")
 app.include_router(comparisons.router, prefix="/api")
 app.include_router(candles.router, prefix="/api")
+app.include_router(live_market.router, prefix="/api")
 app.include_router(ai_route.router, prefix="/api")
 app.include_router(misc.router, prefix="/api")
 app.include_router(developer.router, prefix="/api")
 app.include_router(telegram.router, prefix="/api")
 app.include_router(public_v1.router, prefix="/api")
+app.include_router(product_v2.router, prefix="/api/v2")
+app.include_router(product_services.router, prefix="/api/v2")
+# The versioned entry uses the same cursor and scope contract as /api/stream.
+app.include_router(stream.router, prefix="/api/v2")
 
 
 @app.get("/api/health")
@@ -96,7 +112,9 @@ def process_health(path, now, stale_after_ms=180_000):
                 alive = True
             except ProcessLookupError:
                 pass
-        ok = alive and bool(tasks) and 0 <= age < stale_after_ms
+        # A health read can begin just before a worker writes its heartbeat.
+        # Permit only small clock skew, while still rejecting a future clock.
+        ok = alive and bool(tasks) and -5_000 <= age < stale_after_ms
         return {**record, "tasks": tasks, "ageMs": age, "alive": alive, "ok": ok}
     except (OSError, ValueError, TypeError):
         return {"tasks": {}, "ageMs": None, "alive": False, "ok": False}
@@ -152,15 +170,17 @@ def okx_lane_usage(day, path=None):
     """Read the committed lane ledger without taking a quota writer lock."""
     import os
     import sqlite3
+    from contextlib import closing
+    from .storage_runtime import is_postgres_path, sync_connect
     ledger = Path(path or os.environ.get("OKX_LEDGER_PATH", "data/okx-budget.sqlite"))
-    if not day or not ledger.exists():
+    if not day or (not is_postgres_path(ledger) and not ledger.exists()):
         return []
     # These limits match the collectors' current lane allowances. The shared
     # global budget remains the final gate for every provider call.
     limits = {"core-quotes": 1152, "base-candidates": 1728, "base-stocks": 1728,
               "discovery": 1544, "trades": 1000, "candles": 800}
     try:
-        with sqlite3.connect(ledger.resolve().as_uri() + "?mode=ro", uri=True, timeout=1) as db:
+        with closing(sync_connect(ledger.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
             used = dict(db.execute("SELECT lane,used FROM lane_budget WHERE day=?", (day,)))
         return [{"name": name, "used": int(used.get(name, 0)), "limit": limit,
                  "remaining": max(0, limit-int(used.get(name, 0)))} for name, limit in limits.items()]
@@ -184,7 +204,7 @@ async def _health_storage_snapshot(now):
 
     scoped = await store('196')
     kinds = lambda name: tuple(f'{chain}:{name}' for chain in _HEALTH_CHAINS)
-    async with aiosqlite.connect(scoped.path, timeout=15) as reader:
+    async with async_connect(scoped.path, readonly=True, timeout=15) as reader:
         await reader.execute('PRAGMA query_only=ON')
         await reader.execute('BEGIN')
         projection_rows = await reader.execute_fetchall('''
@@ -273,6 +293,7 @@ async def health_data(request: Request):
 
 async def health_data_payload():
     from .collectors.discovery_coverage import discovery_coverage_snapshot
+    from .realtime_projection import projection_query_health
     """Internal diagnostics. Only the authenticated HTTP wrapper exposes it."""
     from . import state
     now = int(time.time() * 1000)
@@ -439,4 +460,5 @@ async def health_data_payload():
         "worker": worker,
         "collector": collector,
         "projection": projection,
+        "queryCache": projection_query_health(),
     }

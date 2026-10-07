@@ -1,13 +1,26 @@
-"""Cross-process daily request budget, shared with Node's SQLite ledger."""
+"""Cross-process daily request budget, shared with Node's durable ledger."""
 import json
 import os
 import sqlite3
 import time
 
+from .storage_runtime import is_postgres_path, sync_connect
+
+def _legacy_seed(day):
+    try:
+        with open('data/okx-usage.json') as f:
+            old = json.load(f)
+        return max(0, int(old.get('daily', 0))) if old.get('day') == day else 0
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
 def shared_usage(day: str, limit: int | None = None, lane: str | None = None, lane_limit: int | None = None) -> int:
     path = os.environ.get('OKX_LEDGER_PATH', 'data/okx-budget.sqlite')
-    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    db = sqlite3.connect(path, timeout=5)
+    postgres = is_postgres_path(path)
+    if not postgres:
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    db = sync_connect(path, timeout=5)
     try:
         if limit is None:
             # Status rendering must not reserve a SQLite writer or wait for
@@ -17,21 +30,18 @@ def shared_usage(day: str, limit: int | None = None, lane: str | None = None, la
                 row = db.execute('SELECT used FROM budget WHERE day=?', (day,)).fetchone()
                 if row is not None:
                     return row[0]
+                if postgres:
+                    return _legacy_seed(day)
             except sqlite3.OperationalError as exc:
                 if 'no such table' not in str(exc):
                     raise
-        db.execute('PRAGMA journal_mode=WAL')
-        db.execute('CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY, used INTEGER NOT NULL)')
-        db.execute('CREATE TABLE IF NOT EXISTS lane_budget(day TEXT, lane TEXT, used INTEGER NOT NULL, PRIMARY KEY(day,lane))')
+        if not postgres:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY, used INTEGER NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS lane_budget(day TEXT, lane TEXT, used INTEGER NOT NULL, PRIMARY KEY(day,lane))')
+            db.commit()
         db.execute('BEGIN IMMEDIATE')
-        seed = 0
-        try:
-            with open('data/okx-usage.json') as f:
-                old = json.load(f)
-            if old.get('day') == day:
-                seed = max(0, int(old.get('daily', 0)))
-        except (OSError, ValueError, TypeError):
-            pass
+        seed = _legacy_seed(day)
         db.execute('INSERT OR IGNORE INTO budget(day,used) VALUES (?,?)', (day, seed))
         used = db.execute('SELECT used FROM budget WHERE day=?', (day,)).fetchone()[0]
         if limit is not None:
@@ -58,11 +68,15 @@ def reserve_request_slot(interval_ms: int = 500, now_ms: int | None = None) -> f
     waste a small interval but cannot create an uncharged upstream request.
     """
     path = os.environ.get('OKX_LEDGER_PATH', 'data/okx-budget.sqlite')
-    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    postgres = is_postgres_path(path)
+    if not postgres:
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     now = int(time.time()*1000) if now_ms is None else now_ms
-    db = sqlite3.connect(path, timeout=5)
+    db = sync_connect(path, timeout=5)
     try:
-        db.execute('CREATE TABLE IF NOT EXISTS request_rate(provider TEXT PRIMARY KEY,next_at INTEGER NOT NULL)')
+        if not postgres:
+            db.execute('CREATE TABLE IF NOT EXISTS request_rate(provider TEXT PRIMARY KEY,next_at INTEGER NOT NULL)')
+            db.commit()
         db.execute('BEGIN IMMEDIATE')
         row = db.execute("SELECT next_at FROM request_rate WHERE provider='okx'").fetchone()
         start = max(now, int(row[0]) if row else now)

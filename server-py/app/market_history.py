@@ -53,9 +53,11 @@ async def _bounded_trade_rows(s, storages, limit, offset=0):
         heads = []
         for start in range(0, len(storages), 200):
             chunk = storages[start:start+200]
-            query = ('WITH requested(asset) AS (VALUES '+','.join('(?)' for _ in chunk)+') '
-                'SELECT asset,(SELECT t FROM trades INDEXED BY trades_time '
-                'WHERE trades.asset=requested.asset ORDER BY t DESC LIMIT 1) newest FROM requested')
+            # Explicit projections keep the restricted adapter compatible;
+            # one correlated seek avoids compiling a scalar subquery per pool.
+            query = ('WITH requested(asset) AS ('+' UNION ALL '.join('SELECT ? AS asset' for _ in chunk)+') '
+                     'SELECT requested.asset,(SELECT t FROM trades INDEXED BY trades_time '
+                     'WHERE trades.asset=requested.asset ORDER BY t DESC LIMIT 1) AS newest FROM requested')
             heads.extend((row['asset'], row['newest']) for row in await s.fetchall(query, chunk)
                          if row['newest'] is not None)
         heads.sort(key=lambda row: (-row[1], row[0]))
